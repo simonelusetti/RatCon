@@ -1,0 +1,29 @@
+defaults:
+  - _self_
+
+train:
+  retrain: False
+  epochs: 5
+  data:
+    batch_size: 128
+    num_workers: 4
+    subset: 1.0
+    shuffle: True
+
+eval:
+  eval_only: False
+  verbose: False
+  data:
+    batch_size: 32
+    num_workers: 1
+    subset: 10
+    shuffle: True
+
+optim:
+  lr: 5e-5
+  weight_decay: 1e-2
+
+device: "cuda"
+
+dora:
+  exclude: ["eval.eval_only","train.retrain","eval.verbose"]

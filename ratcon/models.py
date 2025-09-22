@@ -12,18 +12,32 @@ class HardKumaSampler(nn.Module):
     """
     Differentiable HardKuma gate per token.
     We use Kumaraswamy reparameterization and clamp to (0,1).
+    Log-space version.
     """
     def __init__(self):
         super().__init__()
 
     @staticmethod
-    def sample(alpha, beta):
-        # Uniform u ~ (0,1), Kumaraswamy: x = (1 - (1-u)^{1/beta})^{1/alpha}
-        u = torch.rand_like(alpha).clamp(EPS, 1.0 - EPS)
-        x = (1.0 - (1.0 - u).pow(1.0 / (beta + EPS))).pow(1.0 / (alpha + EPS))
-        # Straight-through "hard" version (optional): hard = (x > 0.5).float()
-        # return x + (hard - x).detach()
-        return x  # soft gate keeps training stable early on
+    def sample(alpha, beta, eps=1e-6, u_min=1e-4):
+        # u in (u_min, 1-u_min)
+        u = torch.rand_like(alpha)
+        u = u.clamp(u_min, 1.0 - u_min)
+
+        # log-space version:
+        # t = (1 - u)^(1/beta)  = exp( (1/beta) * log(1-u) )
+        log1m_u = torch.log1p(-u)                              # safe log(1-u)
+        inv_beta = 1.0 / (beta + eps)
+        t = torch.exp(inv_beta * log1m_u)                      # (1-u)^(1/beta)
+
+        # x = (1 - t)^(1/alpha)  = exp( (1/alpha) * log(1 - t) )
+        # clamp argument to log1p to avoid log(<=0) numerics
+        one_minus_t = (1.0 - t).clamp(min=eps, max=1.0)
+        log1m_t = torch.log(one_minus_t)
+        inv_alpha = 1.0 / (alpha + eps)
+        x = torch.exp(inv_alpha * log1m_t)
+
+        # keep away from exact 0/1 to stabilize backward
+        return x.clamp(eps, 1.0 - eps)
 
 class Selector(nn.Module):
     """
@@ -45,8 +59,8 @@ class Selector(nn.Module):
         params = self.out(h)                 # [B, L, 2]
         alpha, beta = params[..., 0], params[..., 1]
         # map to (0, +inf)
-        alpha = self.softplus(alpha) + 1.0
-        beta  = self.softplus(beta)  + 1.0
+        alpha = (self.softplus(alpha) + 1.0).clamp(1.0, 10.0)
+        beta  = (self.softplus(beta)  + 1.0).clamp(1.0, 10.0)   
         return alpha, beta
 
 class RationaleSelectorModel(nn.Module):
@@ -90,6 +104,7 @@ class RationaleSelectorModel(nn.Module):
             (logger.debug if logger else print)(msg)
 
         gates = self.kuma.sample(alpha, beta)  # [B,L]
+        gates = gates.clamp(1e-6, 1.0 - 1e-6)
 
         if verbose:
             msg = (f"gates: nan={torch.isnan(gates).any().item()} "
@@ -106,9 +121,9 @@ class RationaleSelectorModel(nn.Module):
         h_comp   = self.proj_view(h_comp)
 
         # Normalize for cosine
-        h_anchor = F.normalize(h_anchor, dim=-1)
-        h_rat    = F.normalize(h_rat, dim=-1)
-        h_comp   = F.normalize(h_comp, dim=-1)
+        h_anchor = F.normalize(h_anchor, dim=-1, eps=1e-6)
+        h_rat    = F.normalize(h_rat, dim=-1, eps=1e-6)
+        h_comp   = F.normalize(h_comp, dim=-1, eps=1e-6)
 
         return {
             "h_anchor": h_anchor,
@@ -124,6 +139,7 @@ def nt_xent(anchor, positive, temperature=0.07):
     """
     InfoNCE with in-batch negatives: anchors vs. positives (one-to-one).
     """
+    temperature = max(float(temperature), 1e-3)
     B = anchor.size(0)
     logits = anchor @ positive.t() / temperature              # [B,B]
     labels = torch.arange(B, device=anchor.device)

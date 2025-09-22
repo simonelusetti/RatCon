@@ -114,7 +114,19 @@ def main(cfg):
         return
 
     for epoch in range(cfg.train.epochs):
-        avg = train_epoch(model, train_dl, optim, cfg.device, epoch, verbose=cfg.eval.verbose, logger=logger)
+        avg = train_epoch(
+            model,
+            train_dl,
+            optim, 
+            cfg.device, 
+            epoch, 
+            l_comp=cfg.train.loss.l_comp,
+            l_s=cfg.train.loss.l_s,
+            l_tv=cfg.train.loss.l_tv,
+            verbose=cfg.eval.verbose, 
+            logger=logger
+        )
+        
         logger.info(f"epoch {epoch+1}: loss {avg:.4f}")
         
         logger.info(sample_inference(model, tok, eval_ds, cfg.device))

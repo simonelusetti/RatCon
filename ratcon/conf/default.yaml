@@ -9,6 +9,10 @@ train:
     num_workers: 4
     subset: 1.0
     shuffle: True
+  loss:
+    l_comp: 0.5
+    l_s: 0.01
+    l_tv: 0.02
 
 eval:
   eval_only: False

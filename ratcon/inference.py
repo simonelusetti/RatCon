@@ -34,11 +34,13 @@ def sample_inference(model, tok, ds, device, thresh=0.2,
 
         # Join with spaces, handling WordPiece '##'
         out_text = []
-        for _, t in enumerate(highlighted):
+        for t in highlighted:
             if t.startswith("##"):
+                # merge with previous word
                 out_text[-1] = out_text[-1] + t[2:]
             elif t.startswith("[[##"):
-                out_text[-1] = out_text[-1] + t[4:]
+                # token like [[##se]] -> append inside the brackets
+                out_text[-1] = out_text[-1][:-2] + t[4:] + "]]"
             else:
                 out_text.append(t)
         pretty = " ".join(out_text)

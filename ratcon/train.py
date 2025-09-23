@@ -3,9 +3,9 @@ import torch, os, logging, sys
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from .models import RationaleSelectorModel, nt_xent
-from .data import get_datasets, collate
+from .data import get_datasets, collate, get_wikiann
 from .losses import complement_margin_loss, sparsity_loss, total_variation_1d
-from .inference import sample_inference
+from .inference import sample_inference, evaluate
 from dora import get_xp, hydra_main
 
 torch.set_num_threads(os.cpu_count())
@@ -74,6 +74,16 @@ def train_epoch(model, loader, optimizer, device, epoch, verbose=False,
         
     return total / len(loader.dataset)
 
+def eval(xp, model, sample_ds, eval_ds, tok, cfg, logger):
+    metrics, samples = evaluate(model, eval_ds, tok, cfg.device, thresh=cfg.eval.thresh, logger=logger)
+    xp.link.push_metrics(metrics)
+    logger.info(f"Metrics: {metrics}")
+    if cfg.eval.examples:
+        for s in samples:
+            logger.info(f"--- {s}")
+        logger.info(sample_inference(model, tok, sample_ds, cfg.device, verbose=cfg.eval.verbose, thresh=cfg.eval.thresh, logger=logger))
+            
+
 @hydra_main(config_path="conf", config_name="default", version_base="1.1")
 def main(cfg):
     logger = get_logger("train.log")
@@ -83,11 +93,10 @@ def main(cfg):
     logger.info(f"Work dir: {os.getcwd()}")
     logger.info(f"Exec file: {__file__}")
     
-    train_ds, tok = get_datasets(subset=cfg.train.data.subset)
-    eval_ds, _   = get_datasets(split="validation", subset=cfg.eval.data.subset)
-    
-    pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
-    
+    train_ds, tok = get_datasets(subset=cfg.train.data.subset,rebuild=cfg.eval.rebuild_ds)
+    sample_ds, _   = get_datasets(split="validation", subset=cfg.eval.data.subset, rebuild=cfg.eval.rebuild_ds)
+    eval_ds, _     = get_wikiann(split="validation", subset=cfg.eval.data.subset, rebuild=cfg.eval.rebuild_ds)
+        
     train_dl = DataLoader(
         train_ds, 
         batch_size=cfg.train.data.batch_size, 
@@ -109,8 +118,7 @@ def main(cfg):
     optim = torch.optim.AdamW(model.parameters(), lr=cfg.optim.lr, weight_decay=cfg.optim.weight_decay)
 
     if cfg.eval.eval_only:
-        logger.info("Eval only mode")
-        logger.info(sample_inference(model, tok, eval_ds, cfg.device, verbose=cfg.eval.verbose, logger=logger))
+        eval(xp,model, sample_ds, eval_ds, tok, cfg, logger)
         return
 
     for epoch in range(cfg.train.epochs):
@@ -128,9 +136,7 @@ def main(cfg):
         )
         
         logger.info(f"epoch {epoch+1}: loss {avg:.4f}")
-        
-        logger.info(sample_inference(model, tok, eval_ds, cfg.device))
-        
+        eval(xp, model, sample_ds, eval_ds, tok, cfg, logger)
         torch.save(model.state_dict(), "model.pth")
         logger.info("Model saved to model.pth")
 

@@ -1,36 +1,44 @@
 defaults:
   - _self_
 
-train:
-  retrain: False
-  epochs: 5
-  data:
-    batch_size: 128
-    num_workers: 4
-    subset: 1.0
-    shuffle: True
+model:
   loss:
     l_comp: 0.5
     l_s: 0.01
     l_tv: 0.02
+  optim:
+    lr: 5e-5
+    weight_decay: 1e-2
+  proj_dim: 256
+  nt_xent:
+    temperature: 0.07
 
+data:
+  rebuild_ds: False
+  train:
+    dataset: "cnn"
+    batch_size: 128
+    num_workers: 4
+    subset: 1.0
+    shuffle: True
+  eval:
+    dataset: "wikiann"
+    batch_size: 32
+    num_workers: 1
+    subset: 0.1
+    shuffle: True
+
+train:
+  retrain: False
+  epochs: 10
+  
 eval:
   eval_only: False
   examples: False
   verbose: False
-  rebuild_ds: False
   thresh: 0.2
-  data:
-    batch_size: 32
-    num_workers: 1
-    subset: 10
-    shuffle: True
-
-optim:
-  lr: 5e-5
-  weight_decay: 1e-2
 
 device: "cuda"
 
 dora:
-  exclude: ["eval.eval_only","train.retrain","eval.verbose","eval.subset","eval.rebuild_ds"]
+  exclude: ["eval.eval_only","train.retrain","eval.verbose","data.eval.dataset"]

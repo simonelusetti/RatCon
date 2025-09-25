@@ -63,6 +63,7 @@ class Selector(nn.Module):
         beta  = (self.softplus(beta)  + 1.0).clamp(1.0, 10.0)   
         return alpha, beta
 
+
 class RationaleSelectorModel(nn.Module):
     """
     Shared encoder (SBERT backbone as HF AutoModel) + selector + pooling + projection heads.

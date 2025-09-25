@@ -3,7 +3,7 @@ import torch, os, logging, sys
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from .models import RationaleSelectorModel, nt_xent
-from .data import get_datasets, collate, get_wikiann
+from .data import get_dataset, collate
 from .losses import complement_margin_loss, sparsity_loss, total_variation_1d
 from .inference import sample_inference, evaluate
 from dora import get_xp, hydra_main
@@ -74,14 +74,15 @@ def train_epoch(model, loader, optimizer, device, epoch, verbose=False,
         
     return total / len(loader.dataset)
 
-def eval(xp, model, sample_ds, eval_ds, tok, cfg, logger):
+def eval(xp, model, sample_ds, eval_ds, tok, cfg, logger, dataset_name="wikiann"):
     metrics, samples = evaluate(model, eval_ds, tok, cfg.device, thresh=cfg.eval.thresh, logger=logger)
-    xp.link.push_metrics(metrics)
+    xp.link.push_metrics({"dataset": dataset_name, "metrics": metrics})
     logger.info(f"Metrics: {metrics}")
     if cfg.eval.examples:
         for s in samples:
             logger.info(f"--- {s}")
         logger.info(sample_inference(model, tok, sample_ds, cfg.device, verbose=cfg.eval.verbose, thresh=cfg.eval.thresh, logger=logger))
+    return metrics
             
 
 @hydra_main(config_path="conf", config_name="default", version_base="1.1")
@@ -93,33 +94,57 @@ def main(cfg):
     logger.info(f"Work dir: {os.getcwd()}")
     logger.info(f"Exec file: {__file__}")
     
-    train_ds, tok = get_datasets(subset=cfg.train.data.subset,rebuild=cfg.eval.rebuild_ds)
-    sample_ds, _   = get_datasets(split="validation", subset=cfg.eval.data.subset, rebuild=cfg.eval.rebuild_ds)
-    eval_ds, _     = get_wikiann(split="validation", subset=cfg.eval.data.subset, rebuild=cfg.eval.rebuild_ds)
-        
+    train_ds, tok = get_dataset(
+        name=cfg.data.train.dataset,
+        subset=cfg.data.train.subset,
+        rebuild=cfg.data.rebuild_ds
+    )
+    sample_ds, _   = get_dataset(
+        split="validation", 
+        name=cfg.data.train.dataset,
+        subset=cfg.data.eval.subset, 
+        rebuild=cfg.data.rebuild_ds
+    )
+    eval_ds, _     = get_dataset(
+        split="validation", 
+        name=cfg.data.eval.dataset,
+        subset=cfg.data.eval.subset, 
+        rebuild=cfg.data.rebuild_ds
+    )
+
     train_dl = DataLoader(
         train_ds, 
-        batch_size=cfg.train.data.batch_size, 
-        shuffle=cfg.train.data.shuffle,
+        batch_size=cfg.data.train.batch_size, 
+        shuffle=cfg.data.train.shuffle,
         collate_fn=collate, 
-        num_workers=cfg.train.data.num_workers
+        num_workers=cfg.data.train.num_workers
     )
 
     if cfg.device == "cuda" and not torch.cuda.is_available():
         logger.warning("No GPU available, switching to CPU")
     cfg.device = cfg.device if torch.cuda.is_available() else "cpu"
     
-    model = RationaleSelectorModel().to(cfg.device)
+    model = RationaleSelectorModel(
+        proj_dim=cfg.model.proj_dim
+    ).to(cfg.device)
+    
     if os.path.exists("model.pth") and not cfg.train.retrain:
         logger.info("Loading model from model.pth")
         model.load_state_dict(torch.load("model.pth", map_location=cfg.device))
     else:
         logger.info("Retraining model from scratch")
-    optim = torch.optim.AdamW(model.parameters(), lr=cfg.optim.lr, weight_decay=cfg.optim.weight_decay)
+        
+    optim = torch.optim.AdamW(
+        model.parameters(), 
+        lr=cfg.model.optim.lr, 
+        weight_decay=cfg.model.optim.weight_decay
+    )
 
     if cfg.eval.eval_only:
-        eval(xp,model, sample_ds, eval_ds, tok, cfg, logger)
+        eval(xp,model, sample_ds, eval_ds, tok, cfg, logger, dataset_name=cfg.data.eval.dataset)
         return
+    
+    best_f1 = 0.0
 
     for epoch in range(cfg.train.epochs):
         avg = train_epoch(
@@ -128,17 +153,19 @@ def main(cfg):
             optim, 
             cfg.device, 
             epoch, 
-            l_comp=cfg.train.loss.l_comp,
-            l_s=cfg.train.loss.l_s,
-            l_tv=cfg.train.loss.l_tv,
+            l_comp=cfg.model.loss.l_comp,
+            l_s=cfg.model.loss.l_s,
+            l_tv=cfg.model.loss.l_tv,
             verbose=cfg.eval.verbose, 
             logger=logger
         )
         
         logger.info(f"epoch {epoch+1}: loss {avg:.4f}")
-        eval(xp, model, sample_ds, eval_ds, tok, cfg, logger)
-        torch.save(model.state_dict(), "model.pth")
-        logger.info("Model saved to model.pth")
+        metrics = eval(xp, model, sample_ds, eval_ds, tok, cfg, logger, dataset_name=cfg.data.eval.dataset)
+        if metrics["f1"] > best_f1:
+            best_f1 = metrics["f1"]
+            logger.info(f"New best F1: {best_f1:.4f}, saving model to model.pth")
+            torch.save(model.state_dict(), "model.pth")
 
 if __name__ == "__main__":
     main()

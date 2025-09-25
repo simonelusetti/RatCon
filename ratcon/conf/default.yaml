@@ -2,16 +2,17 @@ defaults:
   - _self_
 
 model:
+  proj_dim: 256
   loss:
-    l_comp: 0.5
-    l_s: 0.01
-    l_tv: 0.02
+    l_comp: 0.5       # weight for adversary loss
+    l_s: 0.01         # sparsity regularizer
+    l_tv: 0.02        # total variation regularizer
+    tau: 0.07         # InfoNCE temperature (was model.nt_xent.temperature)
   optim:
     lr: 5e-5
     weight_decay: 1e-2
-  proj_dim: 256
-  nt_xent:
-    temperature: 0.07
+    lr_adv: 5e-5
+    weight_decay_adv: 1e-2
 
 data:
   rebuild_ds: False
@@ -31,7 +32,8 @@ data:
 train:
   retrain: False
   epochs: 10
-  
+  grad_clip: 1.0
+
 eval:
   eval_only: False
   verbose: False
@@ -43,4 +45,4 @@ eval:
 device: "cuda"
 
 dora:
-  exclude: ["eval.eval_only","train.retrain","eval.verbose","data.eval.dataset", "eval.samples"]
+  exclude: ["eval.eval_only","train.retrain","eval.verbose","data.eval.dataset","eval.samples"]

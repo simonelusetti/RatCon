@@ -39,6 +39,7 @@ class HardKumaSampler(nn.Module):
         # keep away from exact 0/1 to stabilize backward
         return x.clamp(eps, 1.0 - eps)
 
+
 class Selector(nn.Module):
     """
     Tiny 1-layer conv + FF to produce (alpha, beta) per token from token embeddings.
@@ -64,76 +65,80 @@ class Selector(nn.Module):
         return alpha, beta
 
 
-class RationaleSelectorModel(nn.Module):
+class ComplementAdversary(nn.Module):
     """
-    Shared encoder (SBERT backbone as HF AutoModel) + selector + pooling + projection heads.
+    Learns a per-token weighting over the complement to form a 'best possible' complement view.
+    Outputs a pooled representation that goes through the same view projection.
     """
-    def __init__(self, encoder_name="sentence-transformers/all-MiniLM-L6-v2",
-                 proj_dim=256):
+    def __init__(self, d_model, hidden=256, temp=0.5):
         super().__init__()
-        self.encoder = AutoModel.from_pretrained(encoder_name)  # returns last_hidden_state
+        self.scorer = nn.Sequential(
+            nn.Linear(d_model, hidden), nn.GELU(),
+            nn.Linear(hidden, 1)
+        )
+        self.temp = temp
+
+    def forward(self, token_emb, comp_mask):  # token_emb: [B,L,D], comp_mask: [B,L] in [0,1]
+        # score tokens, masked softmax over complement positions only
+        logits = self.scorer(token_emb).squeeze(-1)             # [B,L]
+        logits = logits - (1.0 - comp_mask) * 1e9               # -inf where not complement
+        w = F.softmax(logits / self.temp, dim=-1)               # [B,L]
+        return w                                                # normalized weights
+
+
+class RationaleSelectorModel(nn.Module):
+    def __init__(self, encoder_name="sentence-transformers/all-MiniLM-L6-v2", proj_dim=256):
+        super().__init__()
+        self.encoder = AutoModel.from_pretrained(encoder_name)
         d_model = self.encoder.config.hidden_size
         self.selector = Selector(d_model)
         self.kuma = HardKumaSampler()
 
         self.proj_anchor = nn.Sequential(nn.Linear(d_model, proj_dim), nn.GELU(),
-                                            nn.Linear(proj_dim, proj_dim))
+                                         nn.Linear(proj_dim, proj_dim))
         self.proj_view   = nn.Sequential(nn.Linear(d_model, proj_dim), nn.GELU(),
-                                            nn.Linear(proj_dim, proj_dim))
+                                         nn.Linear(proj_dim, proj_dim))
+
+        # NEW: adversarial complement predictor
+        self.comp_adv = ComplementAdversary(d_model, hidden=256, temp=0.5)
 
     @staticmethod
     def weighted_mean_pool(last_hidden, attn_weights):  # [B,L,D], [B,L]
-        w = attn_weights.unsqueeze(-1)                  # [B,L,1]
-        s = (last_hidden * w).sum(dim=1)                # [B,D]
-        z = w.sum(dim=1).clamp_min(EPS)                 # [B,1]
+        w = attn_weights.unsqueeze(-1)
+        s = (last_hidden * w).sum(dim=1)
+        z = w.sum(dim=1).clamp_min(EPS)
         return s / z
 
-    def forward(self, embeddings, attention_mask, verbose=False, logger=None, input_ids=None):
-        if verbose:
-            msg = (f"tok: nan={torch.isnan(embeddings).any().item()} "
-                f"min={embeddings.min().item():.4f} max={embeddings.max().item():.4f}")
-            (logger.debug if logger else print)(msg)
+    def build_base_views(self, embeddings, attention_mask, gates):
+        h_anchor = self.weighted_mean_pool(embeddings, attention_mask.float())
+        h_rat    = self.weighted_mean_pool(embeddings, attention_mask.float() * gates)
+        h_comp   = self.weighted_mean_pool(embeddings, attention_mask.float() * (1.0 - gates))
 
-        # HardKuma params & gates
+        h_anchor = F.normalize(self.proj_anchor(h_anchor), dim=-1, eps=1e-6)
+        h_rat    = F.normalize(self.proj_view(h_rat),     dim=-1, eps=1e-6)
+        h_comp   = F.normalize(self.proj_view(h_comp),    dim=-1, eps=1e-6)
+        return h_anchor, h_rat, h_comp
+
+    def forward(self, embeddings, attention_mask, return_details=False):
+        # selector -> gates
         alpha, beta = self.selector(embeddings)
+        gates = self.kuma.sample(alpha, beta).clamp(1e-6, 1.0 - 1e-6)
 
-        if verbose:
-            msg = (f"alpha: nan={torch.isnan(alpha).any().item()} "
-                f"min={alpha.min().item():.4f} max={alpha.max().item():.4f} | "
-                f"beta: nan={torch.isnan(beta).any().item()} "
-                f"min={beta.min().item():.4f} max={beta.max().item():.4f}")
-            (logger.debug if logger else print)(msg)
+        # base views
+        h_anchor, h_rat, h_comp = self.build_base_views(embeddings, attention_mask, gates)
 
-        gates = self.kuma.sample(alpha, beta)  # [B,L]
-        gates = gates.clamp(1e-6, 1.0 - 1e-6)
+        # adversarial complement: learn a 'best' complement pooling
+        comp_mask = attention_mask.float() * (1.0 - gates)
+        w_adv = self.comp_adv(embeddings, comp_mask)                  # [B,L]
+        h_c_adv = self.weighted_mean_pool(embeddings, w_adv)          # [B,D]
+        h_c_adv = F.normalize(self.proj_view(h_c_adv), dim=-1, eps=1e-6)
 
-        if verbose:
-            msg = (f"gates: nan={torch.isnan(gates).any().item()} "
-                f"min={gates.min().item():.4f} max={gates.max().item():.4f}")
-            (logger.debug if logger else print)(msg)
-
-        # Build views
-        h_anchor = self.weighted_mean_pool(embeddings, attention_mask.float())                  # [B,D]
-        h_rat    = self.weighted_mean_pool(embeddings, attention_mask.float() * gates)          # [B,D]
-        h_comp   = self.weighted_mean_pool(embeddings, attention_mask.float() * (1.0 - gates))  # [B,D]
-
-        h_anchor = self.proj_anchor(h_anchor)
-        h_rat    = self.proj_view(h_rat)
-        h_comp   = self.proj_view(h_comp)
-
-        # Normalize for cosine
-        h_anchor = F.normalize(h_anchor, dim=-1, eps=1e-6)
-        h_rat    = F.normalize(h_rat, dim=-1, eps=1e-6)
-        h_comp   = F.normalize(h_comp, dim=-1, eps=1e-6)
-
-        return {
-            "h_anchor": h_anchor,
-            "h_rat": h_rat,
-            "h_comp": h_comp,
-            "gates": gates,
-            "alpha": alpha,
-            "beta": beta,
+        out = {
+            "h_anchor": h_anchor, "h_rat": h_rat,
+            "h_comp": h_comp, "h_c_adv": h_c_adv,
+            "gates": gates, "alpha": alpha, "beta": beta
         }
+        return out if return_details else out
 
 
 def nt_xent(anchor, positive, temperature=0.07):

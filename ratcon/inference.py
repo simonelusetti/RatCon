@@ -2,87 +2,79 @@
 import torch
 from sklearn.metrics import precision_recall_fscore_support
 
-
-def merge_spans(ids, gates, tokenizer, thresh=0.2):
-    """
-    Merge subwords and group contiguous selected tokens into spans.
-    tokens: list of strings (from tokenizer)
-    gates: list of floats (same length as tokens)
-    """
-    out_text = ""
-    buffer = ""
-    buffer_gate = 0.0
-    tokens = tokenizer.convert_ids_to_tokens(ids)
-        
+def merge_subwords(ids, tokens, tokenizer):
+    # --- Phase 1: merge subwords ---
+    buf = ""
     words = []
-    word_gates = []
+
+    def flush(buf):
+        if buf:
+            words.append(buf)
+        return ""
+
+    for tok_id, tok_str in zip(ids, tokens):
+        if tok_id in [tokenizer.cls_token_id, tokenizer.sep_token_id, tokenizer.pad_token_id]:
+            continue
+
+        if tok_str.startswith("##"):
+            buf += tok_str[2:]
+        else:
+            buf = flush(buf)
+            buf = tok_str
+
+    buf = flush(buf)  # flush leftover
+    return words
+
+def merge_spans(ids, tokens, gates, tokenizer, thresh=0.2):
+    """
+    Merge subwords into words (avg gate over subwords), 
+    then group contiguous high-gate words into rationale spans.
+    """
     
-    for id, token, g in zip(ids, tokens, gates):
-        if id in [tokenizer.cls_token_id, tokenizer.sep_token_id, tokenizer.pad_token_id]:
-            continue  # skip special tokens
-        if token.startswith("##"):
-            buffer += token[2:]
-            buffer_gate += g
-        elif buffer != "":
-            out_text += buffer
-            words.append(buffer)
-            word_gates.append(buffer_gate / len(buffer))  # avg gate for subword
-            buffer = ""
-        else:  
-            out_text += " " + token
-            words.append(token)
-            word_gates.append(g)
-            
-    if buffer != "":
-        out_text += " " + buffer
-        words.append(buffer)
-        word_gates.append(buffer_gate / len(buffer))  # avg gate for subword
+    # --- Phase 1: merge subwords ---
+    buf, buf_gs = "", []
+    words, word_gates = [], []
 
-    for token, g in zip(words, word_gates):
+    def flush(buf, buf_gs):
+        if buf:
+            words.append(buf)
+            word_gates.append(sum(buf_gs) / len(buf_gs))
+        return "", []
+
+    for tok_id, tok_str, g in zip(ids, tokens, gates):
+        if tok_id in [tokenizer.cls_token_id, tokenizer.sep_token_id, tokenizer.pad_token_id]:
+            continue
+
+        if tok_str.startswith("##"):
+            buf += tok_str[2:]
+            buf_gs.append(g)
+        else:
+            buf, buf_gs = flush(buf, buf_gs)
+            buf, buf_gs = tok_str, [g]
+
+    buf, buf_gs = flush(buf, buf_gs)  # flush leftover
+
+    # --- Phase 2: group into rationale spans ---
+    out_tokens, span_buf = [], []
+
+    def flush_span(span_buf):
+        if span_buf:
+            out_tokens.append(f"[[{' '.join(span_buf)}]]")
+        return []
+
+    for word, g in zip(words, word_gates):
         if g >= thresh:
-            buffer += " " + token
-        elif buffer != "":
-            out_text += " [[" + buffer + "]]"
-            buffer = ""
-        else:  
-            out_text += " " + token
-            
-    if buffer != "":
-        out_text += " [[" + buffer + "]]"
+            span_buf.append(word)
+        else:
+            span_buf = flush_span(span_buf)
+            out_tokens.append(word)
 
-    return out_text +'\n'
+    span_buf = flush_span(span_buf)  # flush last span
+
+    return " ".join(out_tokens) + "\n"
 
 
-def sample_inference(model, tok, ds, device, thresh=0.2, 
-    verbose=False, logger=None):
-    """
-    Run the model on a random sentence and print rationale vs. complement.
-    """
-    all_pretty = ""
-    for example in ds:
-        
-        embeddings = torch.tensor([example["embeddings"]], device=device)
-        attention_mask = torch.tensor([example["attention_mask"]], device=device)
-        input_ids = torch.tensor([example["input_ids"]], device=device)
-
-        model.eval()
-        with torch.no_grad():
-            out = model(embeddings=embeddings,
-                        attention_mask=attention_mask,
-                        verbose=verbose,
-                        logger=logger)
-            gates = out["gates"][0].cpu().numpy()
-            ids = input_ids[0].cpu().tolist()
-
-        pretty = merge_spans(ids, gates, tok, thresh=thresh)
-
-        all_pretty += "\n--- Sample Inference ---"
-        all_pretty += "\n" + pretty
-        all_pretty += "\n------------------------\n"
-        
-    return all_pretty
-
-def evaluate(model, ds, tok, device, thresh=0.2, logger=None):
+def evaluate(model, ds, tok, cfg, logger=None):
     """
     Evaluate model by comparing gate activations against gold NER labels (if present).
     Returns metrics + a string with sample highlighted outputs.
@@ -90,9 +82,12 @@ def evaluate(model, ds, tok, device, thresh=0.2, logger=None):
     model.eval()
     y_true, y_pred = [], []
     highlighted_samples = []
+    device = cfg.device
+    thresh = cfg.eval.thresh
+    num_samples = cfg.eval.samples.num
 
     with torch.no_grad():
-        for _, example in enumerate(ds):
+        for example in ds:
             embeddings = torch.tensor([example["embeddings"]], device=device)
             attention_mask = torch.tensor([example["attention_mask"]], device=device)
             input_ids = torch.tensor([example["input_ids"]], device=device)
@@ -116,8 +111,10 @@ def evaluate(model, ds, tok, device, thresh=0.2, logger=None):
                     y_pred.append(int(g >= thresh))
                     y_true.append(int(lab != 0))  # non-O tag = entity
 
-                pretty = merge_spans(ids, gates, tok, thresh=thresh)
-                highlighted_samples.append(pretty)
+            tokens = tok.convert_ids_to_tokens(ids)
+            pretty = merge_spans(ids, tokens, gates, tok, thresh=thresh)
+            merged_orig = " ".join(merge_subwords(ids, tokens, tok))
+            highlighted_samples.append(f"\nOrig: {merged_orig}\nPred: {pretty}")
 
     # ---- metrics summary ----
     if len(y_true) == 0:
@@ -131,4 +128,4 @@ def evaluate(model, ds, tok, device, thresh=0.2, logger=None):
 
     metrics = {"precision": precision, "recall": recall, "f1": f1}
 
-    return metrics, highlighted_samples
+    return metrics, highlighted_samples[:num_samples]

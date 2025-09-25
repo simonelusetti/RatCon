@@ -34,11 +34,13 @@ train:
   
 eval:
   eval_only: False
-  examples: False
   verbose: False
-  thresh: 0.2
+  thresh: 0.5
+  samples:
+    num: 10
+    show: True
 
 device: "cuda"
 
 dora:
-  exclude: ["eval.eval_only","train.retrain","eval.verbose","data.eval.dataset"]
+  exclude: ["eval.eval_only","train.retrain","eval.verbose","data.eval.dataset", "eval.samples"]

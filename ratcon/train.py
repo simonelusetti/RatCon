@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 from .models import RationaleSelectorModel, nt_xent
 from .data import get_dataset, collate
 from .losses import complement_margin_loss, sparsity_loss, total_variation_1d
-from .inference import sample_inference, evaluate
+from .inference import evaluate
 from dora import get_xp, hydra_main
 
 torch.set_num_threads(os.cpu_count())
@@ -74,16 +74,23 @@ def train_epoch(model, loader, optimizer, device, epoch, verbose=False,
         
     return total / len(loader.dataset)
 
-def eval(xp, model, sample_ds, eval_ds, tok, cfg, logger, dataset_name="wikiann"):
-    metrics, samples = evaluate(model, eval_ds, tok, cfg.device, thresh=cfg.eval.thresh, logger=logger)
+
+def eval(xp, model, eval_ds, tok, cfg, logger):
+    dataset_name=cfg.data.eval.dataset
+    metrics, samples = evaluate(
+        model, 
+        eval_ds, 
+        tok,
+        cfg=cfg,
+        logger=logger
+    )
     xp.link.push_metrics({"dataset": dataset_name, "metrics": metrics})
-    logger.info(f"Metrics: {metrics}")
-    if cfg.eval.examples:
+    logger.info(f"dataset: {dataset_name}\n metrics: {metrics}")
+    if cfg.eval.samples.show:
         for s in samples:
-            logger.info(f"--- {s}")
-        logger.info(sample_inference(model, tok, sample_ds, cfg.device, verbose=cfg.eval.verbose, thresh=cfg.eval.thresh, logger=logger))
+            logger.info(s)
     return metrics
-            
+    
 
 @hydra_main(config_path="conf", config_name="default", version_base="1.1")
 def main(cfg):
@@ -97,25 +104,21 @@ def main(cfg):
     train_ds, tok = get_dataset(
         name=cfg.data.train.dataset,
         subset=cfg.data.train.subset,
-        rebuild=cfg.data.rebuild_ds
+        rebuild=cfg.data.rebuild_ds,
+        shuffle=cfg.data.train.shuffle
     )
-    sample_ds, _   = get_dataset(
-        split="validation", 
-        name=cfg.data.train.dataset,
-        subset=cfg.data.eval.subset, 
-        rebuild=cfg.data.rebuild_ds
-    )
-    eval_ds, _     = get_dataset(
+
+    eval_ds, _ = get_dataset(
         split="validation", 
         name=cfg.data.eval.dataset,
         subset=cfg.data.eval.subset, 
-        rebuild=cfg.data.rebuild_ds
+        rebuild=cfg.data.rebuild_ds,
+        shuffle=cfg.data.eval.shuffle
     )
 
     train_dl = DataLoader(
         train_ds, 
         batch_size=cfg.data.train.batch_size, 
-        shuffle=cfg.data.train.shuffle,
         collate_fn=collate, 
         num_workers=cfg.data.train.num_workers
     )
@@ -141,7 +144,7 @@ def main(cfg):
     )
 
     if cfg.eval.eval_only:
-        eval(xp,model, sample_ds, eval_ds, tok, cfg, logger, dataset_name=cfg.data.eval.dataset)
+        eval(xp,model, eval_ds, tok, cfg, logger)
         return
     
     best_f1 = 0.0
@@ -161,7 +164,7 @@ def main(cfg):
         )
         
         logger.info(f"epoch {epoch+1}: loss {avg:.4f}")
-        metrics = eval(xp, model, sample_ds, eval_ds, tok, cfg, logger, dataset_name=cfg.data.eval.dataset)
+        metrics = eval(xp, model, eval_ds, tok, cfg, logger)
         if metrics["f1"] > best_f1:
             best_f1 = metrics["f1"]
             logger.info(f"New best F1: {best_f1:.4f}, saving model to model.pth")

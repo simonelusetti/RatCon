@@ -74,47 +74,54 @@ def merge_spans(ids, tokens, gates, tokenizer, thresh=0.2):
     return " ".join(out_tokens) + "\n"
 
 
-def evaluate(model, ds, tok, cfg, logger=None):
+from sklearn.metrics import precision_recall_fscore_support
+
+def evaluate(model, data, tok, cfg, logger=None):
     """
     Evaluate model by comparing gate activations against gold NER labels (if present).
-    Returns metrics + a string with sample highlighted outputs.
+    Works with full batches instead of only the first example.
     """
     model.eval()
     y_true, y_pred = [], []
     highlighted_samples = []
-    device = cfg.device
     thresh = cfg.eval.thresh
     num_samples = cfg.eval.samples.num
 
     with torch.no_grad():
-        for example in ds:
-            embeddings = torch.tensor([example["embeddings"]], device=device)
-            attention_mask = torch.tensor([example["attention_mask"]], device=device)
-            input_ids = torch.tensor([example["input_ids"]], device=device)
+        for batch in data:
+            embeddings = batch["embeddings"]        # [B,L,D]
+            attention_mask = batch["attention_mask"] # [B,L]
+            input_ids = batch["input_ids"]          # [B,L]
 
             out = model(
                 embeddings=embeddings,
-                attention_mask=attention_mask,
-                logger=logger
+                attention_mask=attention_mask
             )
-            gates = out["gates"][0].cpu().numpy()
-            ids = input_ids[0].cpu().tolist()
+            gates = out["gates"].cpu().numpy()      # [B,L]
 
-            # ---- metrics ----
-            if "ner_tags" in example:
-                gold = example["ner_tags"]
-                mask = example["attention_mask"]
+            # ---- loop over batch ----
+            for i in range(embeddings.size(0)):
+                ids = input_ids[i].cpu().tolist()
+                g   = gates[i]
+                mask = attention_mask[i].cpu().tolist()
 
-                for g, lab, m in zip(gates, gold, mask):
-                    if m == 0:  # ignore padding
-                        continue
-                    y_pred.append(int(g >= thresh))
-                    y_true.append(int(lab != 0))  # non-O tag = entity
+                # ---- metrics ----
+                if "ner_tags" in batch:
+                    gold = batch["ner_tags"][i].cpu().tolist()
+                    for gi, lab, m in zip(g, gold, mask):
+                        if m == 0:  # skip padding
+                            continue
+                        y_pred.append(int(gi >= thresh))
+                        y_true.append(int(lab != 0))  # non-O = entity
 
-            tokens = tok.convert_ids_to_tokens(ids)
-            pretty = merge_spans(ids, tokens, gates, tok, thresh=thresh)
-            merged_orig = " ".join(merge_subwords(ids, tokens, tok))
-            highlighted_samples.append(f"\nOrig: {merged_orig}\nPred: {pretty}")
+                # ---- pretty printing ----
+                if len(highlighted_samples) < num_samples:
+                    tokens = tok.convert_ids_to_tokens(ids)
+                    pretty = merge_spans(ids, tokens, g, tok, thresh=thresh)
+                    merged_orig = " ".join(merge_subwords(ids, tokens, tok))
+                    highlighted_samples.append(
+                        f"\nOrig: {merged_orig}\nPred: {pretty}"
+                    )
 
     # ---- metrics summary ----
     if len(y_true) == 0:
@@ -125,7 +132,5 @@ def evaluate(model, ds, tok, cfg, logger=None):
     precision, recall, f1, _ = precision_recall_fscore_support(
         y_true, y_pred, average="binary", zero_division=0
     )
-
     metrics = {"precision": precision, "recall": recall, "f1": f1}
-
-    return metrics, highlighted_samples[:num_samples]
+    return metrics, highlighted_samples

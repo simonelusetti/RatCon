@@ -2,7 +2,6 @@ defaults:
   - _self_
 
 model:
-  proj_dim: 256
   loss:
     l_comp: 0.5       # weight for adversary loss
     l_s: 0.01         # sparsity regularizer

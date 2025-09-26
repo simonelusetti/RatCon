@@ -76,32 +76,41 @@ def _build_dataset(name, split, tokenizer_name, max_length, subset=None, shuffle
 
 # ---------- Collate ----------
 
+from torch.nn.utils.rnn import pad_sequence
+
 def collate(batch):
-    max_len = max(len(x["embeddings"]) for x in batch)
-    emb_dim = len(batch[0]["embeddings"][0])
+    # assume batch is a list of dicts
+    input_ids = [torch.tensor(x["input_ids"], dtype=torch.long) for x in batch]
+    attention_masks = [torch.tensor(x["attention_mask"], dtype=torch.long) for x in batch]
+    if "ner_tags" in batch[0]:
+        ner_tags = [torch.tensor(x["ner_tags"], dtype=torch.long) for x in batch]
 
-    embeds, attn, input_ids, ner_tags = [], [], [], []
+    # pad to longest sequence in batch
+    input_ids = pad_sequence(input_ids, batch_first=True, padding_value=0)
+    attention_masks = pad_sequence(attention_masks, batch_first=True, padding_value=0)
+    if "ner_tags" in batch[0]:
+        ner_tags = pad_sequence(ner_tags, batch_first=True, padding_value=-100)  # -100 is common ignore_index
 
-    for x in batch:
-        e, ids = x["embeddings"], x["input_ids"]
-        pad = max_len - len(e)
-        embeds.append(e + [[0.0] * emb_dim] * pad)
-        attn.append([1] * len(e) + [0] * pad)
-        input_ids.append(ids + [0] * pad)
+    if "ner_tags" in batch[0]:
+        batch_out = {
+            "input_ids": input_ids,
+            "attention_mask": attention_masks,
+            "ner_tags": ner_tags,
+        }
+    else:
+        batch_out = {
+            "input_ids": input_ids,
+            "attention_mask": attention_masks
+        }
 
-        if "ner_tags" in x:
-            tags = x["ner_tags"]
-            ner_tags.append(tags + [0] * pad)  # pad with "O" (0)
-
-    batch_out = {
-        "embeddings": torch.tensor(embeds, dtype=torch.float),
-        "attention_mask": torch.tensor(attn, dtype=torch.long),
-        "input_ids": torch.tensor(input_ids, dtype=torch.long),
-    }
-    if ner_tags:
-        batch_out["ner_tags"] = torch.tensor(ner_tags, dtype=torch.long)
+    # add precomputed embeddings if your dataset already has them
+    if "embeddings" in batch[0]:
+        embeddings = [torch.tensor(x["embeddings"], dtype=torch.float) for x in batch]
+        embeddings = pad_sequence(embeddings, batch_first=True, padding_value=0.0)
+        batch_out["embeddings"] = embeddings
 
     return batch_out
+
 
 
 # ---------- Loader ----------

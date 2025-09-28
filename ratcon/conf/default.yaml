@@ -2,6 +2,7 @@ defaults:
   - _self_
 
 model:
+  attention_augment: False
   loss:
     l_comp: 0.5       # weight for adversary loss
     l_s: 0.01         # sparsity regularizer
@@ -25,11 +26,11 @@ data:
     dataset: "wikiann"
     batch_size: 32
     num_workers: 1
-    subset: 0.1
+    subset: 1.0
     shuffle: True
 
 train:
-  retrain: False
+  retrain: True
   epochs: 10
   grad_clip: 1.0
 
@@ -41,7 +42,7 @@ eval:
     num: 10
     show: True
 
-device: "cuda"
+device: "cpu"
 
 dora:
-  exclude: ["eval.eval_only","train.retrain","eval.verbose","data.eval.dataset","eval.samples"]
+  exclude: ["train.retrain","eval", "data.rebuild_ds"]

@@ -91,12 +91,11 @@ def evaluate(model, data, tok, cfg, logger=None):
         for batch in data:
             embeddings = batch["embeddings"]        # [B,L,D]
             attention_mask = batch["attention_mask"] # [B,L]
-            input_ids = batch["input_ids"]          # [B,L]
-
-            out = model(
-                embeddings=embeddings,
-                attention_mask=attention_mask
-            )
+            input_ids = batch["input_ids"]
+            if cfg.model.attention_augment:
+                incoming = batch["incoming"]
+                outgoing = batch["outgoing"]
+            out = model(embeddings, attention_mask, incoming, outgoing)
             gates = out["gates"].cpu().numpy()      # [B,L]
 
             # ---- loop over batch ----
@@ -125,8 +124,6 @@ def evaluate(model, data, tok, cfg, logger=None):
 
     # ---- metrics summary ----
     if len(y_true) == 0:
-        if logger:
-            logger.info("No gold labels found in dataset; returning empty metrics.")
         return None, highlighted_samples
 
     precision, recall, f1, _ = precision_recall_fscore_support(

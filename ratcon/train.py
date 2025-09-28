@@ -10,7 +10,7 @@ from .inference import evaluate
 from dora import get_xp, hydra_main
 
 torch.set_num_threads(os.cpu_count())
-torch.autograd.set_detect_anomaly(True)
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # -------------------------
 # Logging
@@ -47,18 +47,27 @@ def get_logger(logfile="train.log"):
 # Training epoch
 # -------------------------
 def train_epoch(
-    model, loader, optimizer, device, epoch,
-    verbose=False, tau=0.07, l_comp=0.5, l_s=0.01, l_tv=0.02,
-    grad_clip=1.0, logger=None
+    model, loader, optimizer, epoch, cfg, logger=None
 ):
-    model.train()
+    tau   = getattr(cfg.model.loss, "tau", 0.07)
+    device = cfg.device
+    l_comp = cfg.model.loss.l_comp
+    l_s    = cfg.model.loss.l_s
+    l_tv   = cfg.model.loss.l_tv
+    grad_clip = getattr(cfg.train, "grad_clip", 1.0)
     total = 0.0
+    
+    model.train()
 
+    incoming = outgoing = None
     for batch in tqdm(loader, desc=f"Epoch {epoch+1}"):
         batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
         embeddings = batch["embeddings"]
         attention_mask = batch["attention_mask"]
-        out = model(embeddings, attention_mask)  # returns h_anchor, h_rat, h_comp, gates, ...
+        if cfg.model.attention_augment:
+            incoming = batch["incoming"]
+            outgoing = batch["outgoing"]
+        out = model(embeddings, attention_mask, incoming, outgoing)  # returns h_anchor, h_rat, h_comp, gates, ...
 
         h_a, h_r, h_c, g = out["h_anchor"], out["h_rat"], out["h_comp"], out["gates"]
 
@@ -78,7 +87,7 @@ def train_epoch(
         # logging
         bs = batch["embeddings"].size(0)
         loss_step = loss.item() * bs
-        if verbose and logger is not None:
+        if cfg.eval.verbose and logger is not None:
             logger.debug(
                 f"step loss: {loss_step:.4f} "
                 f"(rat {L_rat.item():.4f}, comp {L_comp.item():.4f}, "
@@ -95,10 +104,10 @@ def eval_once(xp, model, eval_dl, tok, cfg, logger):
     dataset_name = cfg.data.eval.dataset
     metrics, samples = evaluate(model, eval_dl, tok, cfg=cfg, logger=logger)
     xp.link.push_metrics({"dataset": dataset_name, "metrics": metrics})
-    logger.info(f"dataset: {dataset_name}\n metrics: {metrics}")
     if cfg.eval.samples.show:
         for s in samples:
             logger.info(s)
+    logger.info(f"dataset: {dataset_name}\n metrics: {metrics}")
     return metrics
 
 # -------------------------
@@ -155,14 +164,14 @@ def main(cfg):
     cfg.device = cfg.device if torch.cuda.is_available() else "cpu"
 
     # --- Model
-    model = RationaleSelectorModel().to(cfg.device)
+    model = RationaleSelectorModel(attention_augment=cfg.model.attention_augment).to(cfg.device)
 
-    if os.path.exists("model.pth") and not getattr(cfg.train, "retrain", False):
+    if os.path.exists("model.pth") and not cfg.train.retrain:
         logger.info("Loading model from model.pth")
         state = torch.load("model.pth", map_location=cfg.device)
-        model.load_state_dict(state, strict=False)  # tolerate new/missing keys
+        model.load_state_dict(state)  # tolerate new/missing keys
     else:
-        logger.info("Retraining model from scratch")
+        logger.info("Training model from scratch")
 
     # --- Optimizer
     optimizer = torch.optim.AdamW(
@@ -179,26 +188,15 @@ def main(cfg):
 
     # --- Training loop
     best_f1 = 0.0
-    tau   = getattr(cfg.model.loss, "tau", 0.07)
-    l_comp = cfg.model.loss.l_comp
-    l_s    = cfg.model.loss.l_s
-    l_tv   = cfg.model.loss.l_tv
-    grad_clip = getattr(cfg.train, "grad_clip", 1.0)
 
     for epoch in range(cfg.train.epochs):
         avg = train_epoch(
             model=model,
             loader=train_dl,
             optimizer=optimizer,
-            device=cfg.device,
             epoch=epoch,
-            tau=tau,
-            l_comp=l_comp,
-            l_s=l_s,
-            l_tv=l_tv,
-            grad_clip=grad_clip,
-            verbose=cfg.eval.verbose,
-            logger=logger
+            cfg=cfg,
+            logger=logger,
         )
         logger.info(f"epoch {epoch+1}: loss {avg:.4f}")
 

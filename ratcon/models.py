@@ -39,16 +39,25 @@ class RationaleSelectorModel(nn.Module):
     Inputs are already SBERT token embeddings.
     We only do selection + SBERT pooling (mean/cls/max).
     """
-    def __init__(self, sbert_name="sentence-transformers/all-MiniLM-L6-v2", pool_mode="mean"):
+    def __init__(self, sbert_name="sentence-transformers/all-MiniLM-L6-v2", attention_augment=False):
         super().__init__()
         self.sbert = SentenceTransformer(sbert_name)
         self.pooler = self.sbert[1]  # SentenceTransformer pooling module
+        self.attention_augment = attention_augment
         d = self.sbert[0].auto_model.config.hidden_size
+        if self.attention_augment: d = d + 2
         self.selector = Selector(d)
         self.kuma = HardKumaSampler()
+        
 
-    def forward(self, embeddings, attention_mask):
-        # embeddings: [B,L,D], already SBERT contextualized
+    def forward(self, embeddings, attention_mask, incoming=None, outgoing=None):
+        if self.attention_augment:
+            embeddings = torch.cat([
+                embeddings,
+                incoming.unsqueeze(-1),
+                outgoing.unsqueeze(-1)
+            ], dim=-1)  # [B,L,D+2]
+        
         alpha, beta = self.selector(embeddings)
         g = self.kuma.sample(alpha, beta).clamp(1e-6, 1.0 - 1e-6)
 

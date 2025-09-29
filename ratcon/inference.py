@@ -1,8 +1,8 @@
 # inference.py
 
-import torch
+import torch, spacy
+from tqdm import tqdm
 from sklearn.metrics import precision_recall_fscore_support
-import spacy
 
 def merge_subwords(ids, tokens, tokenizer):
     # --- Phase 1: merge subwords ---
@@ -101,7 +101,7 @@ def evaluate(model, data, tok, cfg, logger=None):
 
 
     with torch.no_grad():
-        for batch in data:
+        for batch in tqdm(data, desc="Evaluating: "):
             embeddings = batch["embeddings"]        # [B,L,D]
             attention_mask = batch["attention_mask"] # [B,L]
             input_ids = batch["input_ids"]

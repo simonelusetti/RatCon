@@ -13,11 +13,17 @@ model:
     l_s: 0.01         # sparsity regularizer
     l_tv: 0.02        # total variation regularizer
     tau: 0.07         # InfoNCE temperature (was model.nt_xent.temperature)
+  dual:
+    use: False           # Use two rationale models
+    kl_weight: 1.0      # Weight for KL divergence loss
+    ls_1: 0.01
+    ls_2: 0.1
   optim:
     lr: 5e-5
     weight_decay: 1e-2
     lr_adv: 5e-5
     weight_decay_adv: 1e-2
+    betas: [0.9, 0.999]
 
 data:
   rebuild_ds: False

@@ -2,7 +2,12 @@ defaults:
   - _self_
 
 model:
+  sbert_name: "sentence-transformers/all-MiniLM-L6-v2"
   attention_augment: False
+  fourier:
+    use: False
+    mode: "lowpass"
+    keep_ratio: 0.5
   loss:
     l_comp: 0.5       # weight for adversary loss
     l_s: 0.01         # sparsity regularizer
@@ -45,4 +50,4 @@ eval:
 device: "cpu"
 
 dora:
-  exclude: ["train.retrain","eval", "data.rebuild_ds"]
+  exclude: ["train.retrain", "eval.*", "data.rebuild_ds"]

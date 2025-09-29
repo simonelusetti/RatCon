@@ -101,13 +101,35 @@ def train_epoch(
 # Eval wrapper
 # -------------------------
 def eval_once(xp, model, eval_dl, tok, cfg, logger):
+    import datetime
     dataset_name = cfg.data.eval.dataset
-    metrics, samples = evaluate(model, eval_dl, tok, cfg=cfg, logger=logger)
-    xp.link.push_metrics({"dataset": dataset_name, "metrics": metrics})
+    metrics, samples, word_stats = evaluate(model, eval_dl, tok, cfg=cfg, logger=logger)
+    timestamp = datetime.datetime.now().isoformat()
+    xp.link.push_metrics({"dataset": dataset_name, "metrics": metrics, "timestamp": timestamp, "word_stats": word_stats})
     if cfg.eval.samples.show:
-        for s in samples:
-            logger.info(s)
+        for i, s in enumerate(samples):
+            if i < len(word_stats):
+                logger.info(f"{s}\nWord stats: {word_stats[i]}\n")
+            else:
+                logger.info(s)
     logger.info(f"dataset: {dataset_name}\n metrics: {metrics}")
+    # Optionally, aggregate and log average word stats as proportions
+    if word_stats:
+        total_words = sum(d["total"] for d in word_stats if d["total"] > 0)
+        if total_words > 0:
+            avg_props = {
+                k: sum(d[k] for d in word_stats if d["total"] > 0) / total_words
+                for k in ["nouns", "verbs", "conjugations", "stopwords", "other"]
+            }
+            logger.info(f"Average highlighted word proportions: {avg_props}")
+            if total_words > 0:
+                avg_props = {
+                    k: sum(d.get(k, 0) for d in word_stats if d["total"] > 0) / total_words
+                    for k in ["nouns", "proper_nouns", "verbs", "conjugations", "stopwords"]
+                }
+                logger.info(f"Average highlighted word proportions: {avg_props}")
+        else:
+            logger.info("No highlighted words to compute average proportions.")
     return metrics
 
 # -------------------------
@@ -164,12 +186,12 @@ def main(cfg):
     cfg.device = cfg.device if torch.cuda.is_available() else "cpu"
 
     # --- Model
-    model = RationaleSelectorModel(attention_augment=cfg.model.attention_augment).to(cfg.device)
-
-    if os.path.exists("model.pth") and not cfg.train.retrain:
+    model = RationaleSelectorModel(cfg=cfg.model).to(cfg.device)
+    
+    if os.path.exists("model.pth") and (not cfg.train.retrain or cfg.eval.eval_only):
         logger.info("Loading model from model.pth")
         state = torch.load("model.pth", map_location=cfg.device)
-        model.load_state_dict(state)  # tolerate new/missing keys
+        model.load_state_dict(state)  
     else:
         logger.info("Training model from scratch")
 
@@ -209,6 +231,8 @@ def main(cfg):
             best_f1 = metrics["f1"]
             logger.info(f"New best F1: {best_f1:.4f}, saving model to model.pth")
             torch.save(model.state_dict(), "model.pth")
+            
+    logger.info(f"Best F1: {best_f1:.4f}")
 
 if __name__ == "__main__":
     main()

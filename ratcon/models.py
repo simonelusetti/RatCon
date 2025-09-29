@@ -2,6 +2,7 @@
 import torch, logging
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.fft
 from transformers import AutoModel
 from sentence_transformers import SentenceTransformer
 
@@ -9,6 +10,51 @@ EPS = 1e-8
 
 logger = logging.getLogger(__name__)
 
+
+class FourierFilter(nn.Module):
+    def __init__(self, mode="lowpass", keep_ratio=0.5):
+        """
+        mode: 'lowpass', 'highpass', or 'bandpass'
+        keep_ratio: fraction of frequencies to keep (0 < keep_ratio <= 1)
+        """
+        super().__init__()
+        self.mode = mode
+        self.keep_ratio = keep_ratio
+
+    def forward(self, x, mask=None):
+        """
+        x: [B, D] token embeddings
+        mask: optional attention mask [B,L] (ignored here but can zero out padded tokens)
+        """
+        B, D = x.shape
+
+        # FFT along sequence length
+        Xf = torch.fft.rfft(x, dim=1)  # [B, L//2+1, D]
+
+        # build frequency mask
+        freqs = Xf.size(1)
+        k = int(self.keep_ratio * freqs)
+
+        if self.mode == "lowpass":
+            m = torch.zeros(freqs, device=x.device)
+            m[:k] = 1.0
+        elif self.mode == "highpass":
+            m = torch.zeros(freqs, device=x.device)
+            m[-k:] = 1.0
+        elif self.mode == "bandpass":
+            m = torch.zeros(freqs, device=x.device)
+            start, end = freqs//4, freqs//4 + k
+            m[start:end] = 1.0
+        else:
+            raise ValueError(f"Unknown mode: {self.mode}")
+
+        # apply mask in frequency domain
+        Xf_filtered = Xf * m
+
+        # inverse FFT to time domain
+        x_filtered = torch.fft.irfft(Xf_filtered, dim=1)  # [B,D]
+
+        return x_filtered
 
 class HardKumaSampler(nn.Module):
     @staticmethod
@@ -39,19 +85,26 @@ class RationaleSelectorModel(nn.Module):
     Inputs are already SBERT token embeddings.
     We only do selection + SBERT pooling (mean/cls/max).
     """
-    def __init__(self, sbert_name="sentence-transformers/all-MiniLM-L6-v2", attention_augment=False):
+    def __init__(self, cfg):
         super().__init__()
-        self.sbert = SentenceTransformer(sbert_name)
+        self.cfg = cfg
+        self.sbert = SentenceTransformer(cfg.sbert_name)
         self.pooler = self.sbert[1]  # SentenceTransformer pooling module
-        self.attention_augment = attention_augment
+        
         d = self.sbert[0].auto_model.config.hidden_size
-        if self.attention_augment: d = d + 2
+        
+        if cfg.attention_augment: d = d + 2
+        
         self.selector = Selector(d)
+        
         self.kuma = HardKumaSampler()
+        
+        if cfg.fourier.use:
+            self.fourier = FourierFilter(mode=cfg.fourier.mode, keep_ratio=cfg.fourier.keep_ratio)
         
 
     def forward(self, embeddings, attention_mask, incoming=None, outgoing=None):
-        if self.attention_augment:
+        if self.cfg.attention_augment:
             embeddings = torch.cat([
                 embeddings,
                 incoming.unsqueeze(-1),
@@ -72,6 +125,11 @@ class RationaleSelectorModel(nn.Module):
         # Complement = pool complement tokens
         h_comp = self.pooler({"token_embeddings": embeddings,
                               "attention_mask": attention_mask * (1.0 - g)})["sentence_embedding"]
+        
+        if self.cfg.fourier.use:
+            h_anchor = self.fourier(h_anchor)
+            h_rat = self.fourier(h_rat)
+            h_comp = self.fourier(h_comp)
 
         return {
             "h_anchor": h_anchor, "h_rat": h_rat, "h_comp": h_comp,

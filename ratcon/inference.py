@@ -1,6 +1,8 @@
 # inference.py
+
 import torch
 from sklearn.metrics import precision_recall_fscore_support
+import spacy
 
 def merge_subwords(ids, tokens, tokenizer):
     # --- Phase 1: merge subwords ---
@@ -82,16 +84,28 @@ def evaluate(model, data, tok, cfg, logger=None):
     Works with full batches instead of only the first example.
     """
     model.eval()
+
     y_true, y_pred = [], []
     highlighted_samples = []
+    highlighted_word_stats = []
     thresh = cfg.eval.thresh
     num_samples = cfg.eval.samples.num
+
+    # Load spaCy English model
+    try:
+        nlp = spacy.load("en_core_web_sm")
+    except OSError:
+        nlp = None
+        if logger:
+            logger.warning("spaCy model 'en_core_web_sm' not found. Word stats will be skipped.")
+
 
     with torch.no_grad():
         for batch in data:
             embeddings = batch["embeddings"]        # [B,L,D]
             attention_mask = batch["attention_mask"] # [B,L]
             input_ids = batch["input_ids"]
+            incoming = outgoing = None
             if cfg.model.attention_augment:
                 incoming = batch["incoming"]
                 outgoing = batch["outgoing"]
@@ -114,20 +128,49 @@ def evaluate(model, data, tok, cfg, logger=None):
                         y_true.append(int(lab != 0))  # non-O = entity
 
                 # ---- pretty printing ----
+                tokens = tok.convert_ids_to_tokens(ids)
+                pretty = merge_spans(ids, tokens, g, tok, thresh=thresh)
+                merged_orig = " ".join(merge_subwords(ids, tokens, tok))
                 if len(highlighted_samples) < num_samples:
-                    tokens = tok.convert_ids_to_tokens(ids)
-                    pretty = merge_spans(ids, tokens, g, tok, thresh=thresh)
-                    merged_orig = " ".join(merge_subwords(ids, tokens, tok))
                     highlighted_samples.append(
                         f"\nOrig: {merged_orig}\nPred: {pretty}"
                     )
 
+                # --- Word stats for highlighted words (for all examples) ---
+                if nlp is not None:
+                    import re, string
+                    highlighted = re.findall(r'\[\[(.*?)\]\]', pretty)
+                    cleaned_words = []
+                    for span in highlighted:
+                        for word in span.split():
+                            w = word.strip(string.punctuation + string.whitespace)
+                            if w:
+                                cleaned_words.append(w.lower())
+                    doc = nlp(" ".join(cleaned_words))
+                    noun_count = sum(1 for t in doc if t.pos_ == "NOUN")
+                    propn_count = sum(1 for t in doc if t.pos_ == "PROPN")
+                    verb_count = sum(1 for t in doc if t.pos_ == "VERB")
+                    conj_count = sum(1 for t in doc if t.tag_ in ["VBD", "VBG", "VBN", "VBP", "VBZ"])
+                    stopword_count = sum(1 for t in doc if t.is_stop)
+                    recognized = noun_count + propn_count + verb_count + conj_count + stopword_count
+                    other = len(doc) - recognized
+                    highlighted_word_stats.append({
+                        "nouns": noun_count,
+                        "proper_nouns": propn_count,
+                        "verbs": verb_count,
+                        "conjugations": conj_count,
+                        "stopwords": stopword_count,
+                        "other": other,
+                        "total": len(doc)
+                    })
+
+
     # ---- metrics summary ----
     if len(y_true) == 0:
-        return None, highlighted_samples
+        return None, highlighted_samples, highlighted_word_stats
 
     precision, recall, f1, _ = precision_recall_fscore_support(
         y_true, y_pred, average="binary", zero_division=0
     )
     metrics = {"precision": precision, "recall": recall, "f1": f1}
-    return metrics, highlighted_samples
+    return metrics, highlighted_samples, highlighted_word_stats

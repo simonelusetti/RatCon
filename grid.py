@@ -3,22 +3,24 @@ import itertools
 import subprocess
 
 # Define the sweep values
-l_comp_values = [0.1, 0.5, 1.0]
-l_s_values = [0.1, 0.5, 1.0]
-l_tv_values = [0.1, 0.5, 1.0]
+modes = ["lowpass","highpass","bandpass"]
+keep_ratio = ["0.3","0.5","0.7"]
 
-baseline = ["data.train.subset=0.1"]
+baseline = ["data.train.subset=0.1","model.fourier.use=True"]
 
-for l_comp, l_s, l_tv in itertools.product(l_comp_values, l_s_values, l_tv_values):
+params_grid = itertools.product(keep_ratio, modes)
+n = len(list(params_grid))
+i = 0
+
+for kr, mode in itertools.product(keep_ratio, modes):
     # Build the argument list
     overrides = [
-        f"model.loss.l_comp={l_comp}",
-        f"model.loss.l_s={l_s}",
-        f"model.loss.l_tv={l_tv}",
+        f"model.fourier.mode={mode}",
+        f"model.fourier.keep_ratio={kr}",
     ]
 
     # Print what we’re about to run
-    print(f"\n=== Running {baseline} {overrides} ===")
+    print(f"\n=== Running Exp {i+1}/{n} with {baseline} {overrides} ===")
 
     # Call `dora run` with these overrides
     cmd = ["dora", "run"] + baseline + overrides
@@ -26,3 +28,5 @@ for l_comp, l_s, l_tv in itertools.product(l_comp_values, l_s_values, l_tv_value
         subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError as e:
         print(f"Run failed: {overrides} -> {e}")
+    
+    i+=1

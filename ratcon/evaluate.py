@@ -136,7 +136,7 @@ def merge_spans(ids, tokens, gates, tokenizer, thresh=0.2):
 
 from sklearn.metrics import precision_recall_fscore_support
 
-def evaluate(model, data, tok, cfg, logger=None, spacy_model="en_core_web_lg"):
+def evaluate(model, data, tok, cfg, logger=None):
     """
     Evaluate model by comparing gate activations against gold NER labels (if present).
     Works with full batches instead of only the first example.
@@ -150,6 +150,7 @@ def evaluate(model, data, tok, cfg, logger=None, spacy_model="en_core_web_lg"):
     num_samples = cfg.eval.samples.num
 
     # Load spaCy English model
+    spacy_model = getattr(cfg.eval, "spacy_model", "en_core_web_sm")
     try:
         nlp = spacy.load(spacy_model)
     except OSError:

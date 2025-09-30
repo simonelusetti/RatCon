@@ -1,4 +1,4 @@
-# inference.py
+# evaluate.py
 
 import torch, spacy
 from tqdm import tqdm

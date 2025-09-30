@@ -8,7 +8,7 @@ from tqdm import tqdm
 from .models import RationaleSelectorModel, nt_xent
 from .data import get_dataset, collate
 from .losses import sparsity_loss, total_variation_1d
-from .inference import evaluate
+from .evaluate import evaluate
 from dora import get_xp, hydra_main
 
 # -------------------------------------------------------------------

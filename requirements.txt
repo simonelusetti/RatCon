@@ -1,0 +1,6 @@
+dora-search
+hydra-core
+transformers
+sentence-transformers
+datasets
+spacy

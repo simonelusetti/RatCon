@@ -1,3 +1,61 @@
+def format_gold_spans(ids, tokens, gold_labels, tokenizer):
+    """
+    Merge subwords and gold labels, then format as bracketed spans for entity words.
+    """
+    buf = ""
+    buf_labels = []
+    words, word_labels = [], []
+    for tok_id, tok_str, lab in zip(ids, tokens, gold_labels):
+        if tok_id in [tokenizer.cls_token_id, tokenizer.sep_token_id, tokenizer.pad_token_id]:
+            continue
+        if tok_str.startswith("##"):
+            buf += tok_str[2:]
+            buf_labels.append(lab)
+        else:
+            if buf:
+                words.append(buf)
+                word_labels.append(1 if any(l != 0 for l in buf_labels) else 0)
+            buf = tok_str
+            buf_labels = [lab]
+    if buf:
+        words.append(buf)
+        word_labels.append(1 if any(l != 0 for l in buf_labels) else 0)
+    # Now format with brackets for contiguous entity words
+    out, span = [], []
+    for w, l in zip(words, word_labels):
+        if l:
+            span.append(w)
+        else:
+            if span:
+                out.append(f"[[{' '.join(span)}]]")
+                span = []
+            out.append(w)
+    if span:
+        out.append(f"[[{' '.join(span)}]]")
+    return " ".join(out)
+def merge_gold_labels(ids, tokens, gold_labels, tokenizer):
+    """
+    Merge gold labels for subwords into word-level labels.
+    A word is an entity if any of its subwords is an entity (label != 0).
+    """
+    buf = ""
+    buf_labels = []
+    word_labels = []
+    for tok_id, tok_str, lab in zip(ids, tokens, gold_labels):
+        if tok_id in [tokenizer.cls_token_id, tokenizer.sep_token_id, tokenizer.pad_token_id]:
+            continue
+        if tok_str.startswith("##"):
+            buf += tok_str[2:]
+            buf_labels.append(lab)
+        else:
+            if buf_labels:
+                # If any subword is entity, mark word as entity
+                word_labels.append(1.0 if any(l != 0 for l in buf_labels) else 0.0)
+            buf = tok_str
+            buf_labels = [lab]
+    if buf_labels:
+        word_labels.append(1.0 if any(l != 0 for l in buf_labels) else 0.0)
+    return word_labels
 # evaluate.py
 
 import torch, spacy
@@ -78,7 +136,7 @@ def merge_spans(ids, tokens, gates, tokenizer, thresh=0.2):
 
 from sklearn.metrics import precision_recall_fscore_support
 
-def evaluate(model, data, tok, cfg, logger=None):
+def evaluate(model, data, tok, cfg, logger=None, spacy_model="en_core_web_lg"):
     """
     Evaluate model by comparing gate activations against gold NER labels (if present).
     Works with full batches instead of only the first example.
@@ -93,11 +151,11 @@ def evaluate(model, data, tok, cfg, logger=None):
 
     # Load spaCy English model
     try:
-        nlp = spacy.load("en_core_web_sm")
+        nlp = spacy.load(spacy_model)
     except OSError:
         nlp = None
         if logger:
-            logger.warning("spaCy model 'en_core_web_sm' not found. Word stats will be skipped.")
+            logger.warning(f"spaCy model {spacy_model} not found. Word stats will be skipped.")
 
 
     with torch.no_grad():
@@ -130,10 +188,15 @@ def evaluate(model, data, tok, cfg, logger=None):
                 # ---- pretty printing ----
                 tokens = tok.convert_ids_to_tokens(ids)
                 pretty = merge_spans(ids, tokens, g, tok, thresh=thresh)
-                merged_orig = " ".join(merge_subwords(ids, tokens, tok))
+                # For original spans, merge words and gold labels, then format with brackets
+                if "ner_tags" in batch:
+                    gold = batch["ner_tags"][i].cpu().tolist()
+                    orig_pretty = format_gold_spans(ids, tokens, gold, tok)
+                else:
+                    orig_pretty = " ".join(merge_subwords(ids, tokens, tok))
                 if len(highlighted_samples) < num_samples:
                     highlighted_samples.append(
-                        f"\nOrig: {merged_orig}\nPred: {pretty}"
+                        f"\nOrig: {orig_pretty}\nPred: {pretty}"
                     )
 
                 # --- Word stats for highlighted words (for all examples) ---

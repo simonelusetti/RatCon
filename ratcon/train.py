@@ -2,6 +2,7 @@ import os
 import sys
 import logging
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -48,6 +49,19 @@ def get_logger(logfile="train.log"):
     logger.addHandler(ch)
     logger.addHandler(fh)
     return logger
+
+
+# -------------------------------------------------------------------
+# Loss helpers
+# -------------------------------------------------------------------
+
+
+def complement_null_loss(h_comp, h_anchor):
+    """Encourage complements to collapse to a null embedding while remaining orthogonal to anchors."""
+    null_loss = h_comp.pow(2).sum(dim=-1).mean()
+    cosine = F.cosine_similarity(h_comp, h_anchor, dim=-1)
+    orth_loss = cosine.pow(2).mean()
+    return null_loss + orth_loss
 
 
 # -------------------------------------------------------------------
@@ -124,8 +138,8 @@ class Trainer:
             out1 = self.model1(embeddings, attention_mask, incoming, outgoing)
             h_a1, h_r1, h_c1, g1 = out1["h_anchor"], out1["h_rat"], out1["h_comp"], out1["gates"]
 
-            L_rat1 = nt_xent(h_a1, h_r1, temperature=tau)
-            L_comp1 = nt_xent(h_a1, h_c1, temperature=tau)
+            L_rat1 = nt_xent(h_r1, h_a1, temperature=tau)
+            L_comp1 = complement_null_loss(h_c1, h_a1)
             L_s1 = sparsity_loss(g1, attention_mask)
             L_tv1 = total_variation_1d(g1, attention_mask)
 
@@ -133,8 +147,8 @@ class Trainer:
                 out2 = self.model2(embeddings, attention_mask, incoming, outgoing)
                 h_a2, h_r2, h_c2, g2 = out2["h_anchor"], out2["h_rat"], out2["h_comp"], out2["gates"]
 
-                L_rat2 = nt_xent(h_a2, h_r2, temperature=tau)
-                L_comp2 = nt_xent(h_a2, h_c2, temperature=tau)
+                L_rat2 = nt_xent(h_r2, h_a2, temperature=tau)
+                L_comp2 = complement_null_loss(h_c2, h_a2)
                 L_s2 = sparsity_loss(g2, attention_mask)
                 L_tv2 = total_variation_1d(g2, attention_mask)
 
@@ -149,13 +163,13 @@ class Trainer:
                 ls_2 = self.cfg.model.dual.ls_2
 
                 loss = (
-                    (L_rat1 - l_comp * L_comp1 + ls_1 * L_s1 + l_tv * L_tv1)
-                    + (L_rat2 - l_comp * L_comp2 + ls_2 * L_s2 + l_tv * L_tv2)
+                    (L_rat1 + l_comp * L_comp1 + ls_1 * L_s1 + l_tv * L_tv1)
+                    + (L_rat2 + l_comp * L_comp2 + ls_2 * L_s2 + l_tv * L_tv2)
                     + kl_weight * kl_loss
                 )
                 params = list(self.model1.parameters()) + list(self.model2.parameters())
             else:
-                loss = L_rat1 - l_comp * L_comp1 + l_s * L_s1 + l_tv * L_tv1
+                loss = L_rat1 + l_comp * L_comp1 + l_s * L_s1 + l_tv * L_tv1
                 params = self.model1.parameters()
 
             # Backward
@@ -169,7 +183,7 @@ class Trainer:
 
         return total / len(loader.dataset)
 
-    def eval(self, xp, model, eval_dl, tok):
+    def eval(self, xp, model, eval_dl, tok, per_sentence_stats=False):
         import datetime
 
         dataset_name = self.cfg.data.eval.dataset
@@ -181,7 +195,7 @@ class Trainer:
 
         if self.cfg.eval.samples.show:
             for i, s in enumerate(samples):
-                extra = f"\nWord stats: {word_stats[i]}\n" if i < len(word_stats) else ""
+                extra = f"\nWord stats: {word_stats[i]}\n" if i < len(word_stats) and per_sentence_stats else ""
                 self.logger.info(f"{s}{extra}")
 
         self.logger.info(f"dataset: {dataset_name}\nmetrics: {metrics}")
@@ -199,7 +213,7 @@ class Trainer:
                 self.logger.info("No highlighted words to compute average proportions.")
         return metrics
 
-    def train(self, train_dl, eval_dl, tok, xp):
+    def train(self, train_dl, eval_dl, tok, xp, per_sentence_stats=False):
         best_f1 = 0.0
         for epoch in range(self.cfg.train.epochs):
             avg = self.train_epoch(train_dl, epoch)
@@ -209,8 +223,8 @@ class Trainer:
                 self.model1.eval()
                 self.model2.eval()
                 with torch.no_grad():
-                    metrics1 = self.eval(xp, self.model1, eval_dl, tok)
-                    metrics2 = self.eval(xp, self.model2, eval_dl, tok)
+                    metrics1 = self.eval(xp, self.model1, eval_dl, tok, per_sentence_stats)
+                    metrics2 = self.eval(xp, self.model2, eval_dl, tok, per_sentence_stats)
                 f1_1, f1_2 = metrics1.get("f1", 0.0), metrics2.get("f1", 0.0)
                 if max(f1_1, f1_2) > best_f1:
                     best_f1 = max(f1_1, f1_2)
@@ -222,7 +236,7 @@ class Trainer:
             else:
                 self.model1.eval()
                 with torch.no_grad():
-                    metrics = self.eval(xp, self.model1, eval_dl, tok)
+                    metrics = self.eval(xp, self.model1, eval_dl, tok, per_sentence_stats)
                 if metrics.get("f1", 0.0) > best_f1:
                     best_f1 = metrics["f1"]
                     self.logger.info(f"New best F1: {best_f1:.4f}, saving model to model.pth")
@@ -230,14 +244,14 @@ class Trainer:
 
         self.logger.info(f"Best F1: {best_f1:.4f}")
 
-    def eval_only(self, eval_dl, tok, xp):
+    def eval_only(self, eval_dl, tok, xp, per_sentence_stats=False):
         if self.use_dual:
             self.logger.info("Eval-only mode: evaluating model1")
-            self.eval(xp, self.model1, eval_dl, tok)
+            self.eval(xp, self.model1, eval_dl, tok, per_sentence_stats)
             self.logger.info("Eval-only mode: evaluating model2")
-            self.eval(xp, self.model2, eval_dl, tok)
+            self.eval(xp, self.model2, eval_dl, tok, per_sentence_stats)
         else:
-            self.eval(xp, self.model1, eval_dl, tok)
+            self.eval(xp, self.model1, eval_dl, tok, per_sentence_stats)
 
 
 # -------------------------------------------------------------------
@@ -295,6 +309,6 @@ def main(cfg):
     # Train or eval
     trainer = Trainer(cfg, logger)
     if cfg.eval.eval_only:
-        trainer.eval_only(eval_dl, tok, xp)
+        trainer.eval_only(eval_dl, tok, xp, eval.per_sentence_stats)
     else:
-        trainer.train(train_dl, eval_dl, tok, xp)
+        trainer.train(train_dl, eval_dl, tok, xp, eval.per_sentence_stats)

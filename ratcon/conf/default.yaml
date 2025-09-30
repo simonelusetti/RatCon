@@ -46,6 +46,7 @@ train:
   grad_clip: 1.0
 
 eval:
+  per_sentence_stats: False
   eval_only: False
   verbose: False
   thresh: 0.5

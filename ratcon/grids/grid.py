@@ -10,6 +10,7 @@ from dora import Explorer, Launcher
 
 @Explorer
 def explorer(launcher: Launcher):
+    launcher = launcher.bind({"data.train.subset":0.1})
     for l_comp in [0.01, 0.1, 1.0]:
         for l_s in [0.01, 0.1, 1.0]:
             for l_tv in [0.01, 0.1, 1.0]:

@@ -58,5 +58,8 @@ eval:
 
 device: "cpu"
 
+logging:
+  metrics_only: False
+
 dora:
   exclude: ["train.retrain", "eval.*", "data.rebuild_ds"]

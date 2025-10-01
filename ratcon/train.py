@@ -30,7 +30,7 @@ class TqdmLoggingHandler(logging.Handler):
             self.handleError(record)
 
 
-def get_logger(logfile="train.log"):
+def get_logger(logfile="train.log", metrics_only=False):
     logger = logging.getLogger("train")
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
@@ -39,7 +39,8 @@ def get_logger(logfile="train.log"):
 
     ch = TqdmLoggingHandler()
     ch.setLevel(logging.INFO)
-    ch.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    ch_format = "%(message)s" if metrics_only else "%(asctime)s - %(levelname)s - %(message)s"
+    ch.setFormatter(logging.Formatter(ch_format))
 
     fh = logging.FileHandler(logfile)
     fh.setLevel(logging.DEBUG)
@@ -66,11 +67,12 @@ def complement_loss(h_comp, h_anchor, null_vec=None, use_null_target=False, temp
 # Trainer
 # -------------------------------------------------------------------
 class Trainer:
-    def __init__(self, cfg, logger):
+    def __init__(self, cfg, logger, metrics_only=False):
         self.cfg = cfg
         self.logger = logger
         self.use_dual = cfg.model.dual.use
         self.use_null_target = getattr(cfg.model.loss, "use_null_target", False)
+        self.metrics_only = metrics_only
         self.model1, self.model2, self.optimizer = self.build_models_and_optimizer()
 
     def build_models_and_optimizer(self):
@@ -82,11 +84,13 @@ class Trainer:
             for idx, model in enumerate([model1, model2], start=1):
                 path = f"model{idx}.pth"
                 if os.path.exists(path) and (not self.cfg.train.retrain or self.cfg.eval.eval_only):
-                    self.logger.info(f"Loading model{idx} from {path}")
+                    if not self.metrics_only:
+                        self.logger.info(f"Loading model{idx} from {path}")
                     state = torch.load(path, map_location=self.cfg.device)
                     model.load_state_dict(state)
                 else:
-                    self.logger.info(f"Training model{idx} from scratch")
+                    if not self.metrics_only:
+                        self.logger.info(f"Training model{idx} from scratch")
 
             optimizer = torch.optim.AdamW(
                 list(model1.parameters()) + list(model2.parameters()),
@@ -97,11 +101,13 @@ class Trainer:
         else:
             # Single model
             if os.path.exists("model.pth") and (not self.cfg.train.retrain or self.cfg.eval.eval_only):
-                self.logger.info("Loading model from model.pth")
+                if not self.metrics_only:
+                    self.logger.info("Loading model from model.pth")
                 state = torch.load("model.pth", map_location=self.cfg.device)
                 model1.load_state_dict(state)
             else:
-                self.logger.info("Training model from scratch")
+                if not self.metrics_only:
+                    self.logger.info("Training model from scratch")
 
             optimizer = torch.optim.AdamW(
                 model1.parameters(),
@@ -127,7 +133,7 @@ class Trainer:
         if self.model2:
             self.model2.train()
 
-        for batch in tqdm(loader, desc=f"Epoch {epoch+1}"):
+        for batch in tqdm(loader, desc=f"Epoch {epoch+1}", disable=self.metrics_only):
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
             embeddings, attention_mask = batch["embeddings"], batch["attention_mask"]
             incoming = batch["incoming"] if self.cfg.model.attention_augment else None
@@ -188,30 +194,37 @@ class Trainer:
         import datetime
 
         dataset_name = self.cfg.data.eval.dataset
-        metrics, samples, word_stats = evaluate(model, eval_dl, tok, cfg=self.cfg, logger=self.logger)
+        metrics, samples, word_stats = evaluate(
+            model,
+            eval_dl,
+            tok,
+            cfg=self.cfg,
+            logger=self.logger if not self.metrics_only else None,
+        )
         timestamp = datetime.datetime.now().isoformat()
         xp.link.push_metrics(
             {"dataset": dataset_name, "metrics": metrics, "timestamp": timestamp, "word_stats": word_stats}
         )
 
-        if self.cfg.eval.samples.show:
-            for i, s in enumerate(samples):
-                extra = f"\nWord stats: {word_stats[i]}\n" if i < len(word_stats) and per_sentence_stats else ""
-                self.logger.info(f"{s}{extra}")
+        if not self.metrics_only:
+            if self.cfg.eval.samples.show:
+                for i, s in enumerate(samples):
+                    extra = f"\nWord stats: {word_stats[i]}\n" if i < len(word_stats) and per_sentence_stats else ""
+                    self.logger.info(f"{s}{extra}")
 
-        self.logger.info(f"dataset: {dataset_name}\nmetrics: {metrics}")
+            self.logger.info(f"dataset: {dataset_name}\nmetrics: {metrics}")
 
-        # Aggregate avg word stats
-        if word_stats:
-            total_words = sum(d["total"] for d in word_stats if d["total"] > 0)
-            if total_words > 0:
-                avg_props = {
-                    k: sum(d.get(k, 0) for d in word_stats if d["total"] > 0) / total_words
-                    for k in ["nouns", "proper_nouns", "verbs", "conjugations", "stopwords"]
-                }
-                self.logger.info(f"Average highlighted word proportions: {avg_props}")
-            else:
-                self.logger.info("No highlighted words to compute average proportions.")
+            # Aggregate avg word stats
+            if word_stats:
+                total_words = sum(d["total"] for d in word_stats if d["total"] > 0)
+                if total_words > 0:
+                    avg_props = {
+                        k: sum(d.get(k, 0) for d in word_stats if d["total"] > 0) / total_words
+                        for k in ["nouns", "proper_nouns", "verbs", "conjugations", "stopwords"]
+                    }
+                    self.logger.info(f"Average highlighted word proportions: {avg_props}")
+                else:
+                    self.logger.info("No highlighted words to compute average proportions.")
         return metrics
 
     def train(self, train_dl, eval_dl, tok, xp, per_sentence_stats=False):
@@ -221,7 +234,8 @@ class Trainer:
         best_model_name = None
         for epoch in range(self.cfg.train.epochs):
             avg = self.train_epoch(train_dl, epoch)
-            self.logger.info(f"epoch {epoch+1}: loss {avg:.4f}")
+            if not self.metrics_only:
+                self.logger.info(f"epoch {epoch+1}: loss {avg:.4f}")
 
             if self.use_dual:
                 self.model1.eval()
@@ -229,6 +243,9 @@ class Trainer:
                 with torch.no_grad():
                     metrics1 = self.eval(xp, self.model1, eval_dl, tok, per_sentence_stats)
                     metrics2 = self.eval(xp, self.model2, eval_dl, tok, per_sentence_stats)
+                if self.metrics_only:
+                    self.logger.info(f"epoch {epoch+1}: model1 metrics {metrics1}")
+                    self.logger.info(f"epoch {epoch+1}: model2 metrics {metrics2}")
                 f1_1, f1_2 = metrics1.get("f1", 0.0), metrics2.get("f1", 0.0)
                 if max(f1_1, f1_2) > best_f1:
                     best_f1 = max(f1_1, f1_2)
@@ -239,20 +256,24 @@ class Trainer:
                     else:
                         best_metrics = metrics2
                         best_model_name = "model2"
-                    self.logger.info(
-                        f"New best F1: {best_f1:.4f}, saving models to model1.pth and model2.pth"
-                    )
+                    if not self.metrics_only:
+                        self.logger.info(
+                            f"New best F1: {best_f1:.4f}, saving models to model1.pth and model2.pth"
+                        )
                     torch.save(self.model1.state_dict(), "model1.pth")
                     torch.save(self.model2.state_dict(), "model2.pth")
             else:
                 self.model1.eval()
                 with torch.no_grad():
                     metrics = self.eval(xp, self.model1, eval_dl, tok, per_sentence_stats)
+                if self.metrics_only:
+                    self.logger.info(f"epoch {epoch+1}: metrics {metrics}")
                 if metrics.get("f1", 0.0) > best_f1:
                     best_f1 = metrics["f1"]
                     best_epoch = epoch + 1
                     best_metrics = metrics
-                    self.logger.info(f"New best F1: {best_f1:.4f}, saving model to model.pth")
+                    if not self.metrics_only:
+                        self.logger.info(f"New best F1: {best_f1:.4f}, saving model to model.pth")
                     torch.save(self.model1.state_dict(), "model.pth")
 
         if best_f1 == float('-inf'):
@@ -280,12 +301,20 @@ class Trainer:
 
     def eval_only(self, eval_dl, tok, xp, per_sentence_stats=False):
         if self.use_dual:
-            self.logger.info("Eval-only mode: evaluating model1")
-            self.eval(xp, self.model1, eval_dl, tok, per_sentence_stats)
-            self.logger.info("Eval-only mode: evaluating model2")
-            self.eval(xp, self.model2, eval_dl, tok, per_sentence_stats)
+            if not self.metrics_only:
+                self.logger.info("Eval-only mode: evaluating model1")
+            metrics1 = self.eval(xp, self.model1, eval_dl, tok, per_sentence_stats)
+            if self.metrics_only:
+                self.logger.info(f"eval metrics model1: {metrics1}")
+            if not self.metrics_only:
+                self.logger.info("Eval-only mode: evaluating model2")
+            metrics2 = self.eval(xp, self.model2, eval_dl, tok, per_sentence_stats)
+            if self.metrics_only:
+                self.logger.info(f"eval metrics model2: {metrics2}")
         else:
-            self.eval(xp, self.model1, eval_dl, tok, per_sentence_stats)
+            metrics = self.eval(xp, self.model1, eval_dl, tok, per_sentence_stats)
+            if self.metrics_only:
+                self.logger.info(f"eval metrics: {metrics}")
 
 
 # -------------------------------------------------------------------
@@ -293,12 +322,14 @@ class Trainer:
 # -------------------------------------------------------------------
 @hydra_main(config_path="conf", config_name="default", version_base="1.1")
 def main(cfg):
-    logger = get_logger("train.log")
+    metrics_only = getattr(getattr(cfg, "logging", None), "metrics_only", False)
+    logger = get_logger("train.log", metrics_only=metrics_only)
     xp = get_xp()
     logger.info(f"Exp signature: {xp.sig}")
-    logger.info(repr(cfg))
-    logger.info(f"Work dir: {os.getcwd()}")
-    logger.info(f"Exec file: {__file__}")
+    if not metrics_only:
+        logger.info(repr(cfg))
+        logger.info(f"Work dir: {os.getcwd()}")
+        logger.info(f"Exec file: {__file__}")
 
     # Device setup
     if cfg.device == "cuda" and not torch.cuda.is_available():
@@ -341,7 +372,7 @@ def main(cfg):
     )
 
     # Train or eval
-    trainer = Trainer(cfg, logger)
+    trainer = Trainer(cfg, logger, metrics_only=metrics_only)
     if cfg.eval.eval_only:
         trainer.eval_only(eval_dl, tok, xp, cfg.eval.per_sentence_stats)
     else:

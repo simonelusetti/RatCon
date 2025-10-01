@@ -25,13 +25,12 @@ are rendered as a Markdown table printed to stdout and saved to
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
-
-import re
 
 import pandas as pd
 import yaml
@@ -153,7 +152,7 @@ def load_metrics_from_history(signature: str) -> Optional[Dict[str, float]]:
                 if combined:
                     return combined
         time.sleep(HISTORY_POLL_DELAY)
-    print(f"⚠️ Unable to read metrics for experiment {xp_dir}")
+    print(f"⚠️ Unable to read metrics for experiment {signature}")
     return None
 
 
@@ -226,6 +225,8 @@ def main() -> None:
     with tqdm(total=total_runs, desc="Grid sweep", unit="run") as pbar:
         for overrides in sweep:
             setting_overrides = list(baseline) + list(overrides)
+            if not any(str(ov).startswith("logging.metrics_only") for ov in setting_overrides):
+                setting_overrides.append("logging.metrics_only=true")
             setting_label = format_setting(overrides)
 
             pbar.write(f"\n=== Setting: {setting_label} ===")

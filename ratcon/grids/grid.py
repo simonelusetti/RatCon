@@ -1,5 +1,11 @@
-# grid.py
-import ratcon.grids.patch_local  # applies monkeypatch
+"""Dora grid definition for RatCon.
+
+Runs hyper-parameter sweeps via Slurm using the defaults declared in the Hydra
+configuration (`slurm` section).
+"""
+
+from __future__ import annotations
+
 from dora import Explorer, Launcher
 
 @Explorer
@@ -8,7 +14,7 @@ def explorer(launcher: Launcher):
         for l_s in [0.01, 0.1, 1.0]:
             for l_tv in [0.01, 0.1, 1.0]:
                 launcher({
-                    "train.loss.l_comp": l_comp,
-                    "train.loss.l_s": l_s,
-                    "train.loss.l_tv": l_tv,
+                    "model.loss.l_comp": l_comp,
+                    "model.loss.l_s": l_s,
+                    "model.loss.l_tv": l_tv,
                 })

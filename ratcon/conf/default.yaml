@@ -63,3 +63,13 @@ logging:
 
 dora:
   exclude: ["train.retrain", "eval.*", "data.rebuild_ds"]
+
+slurm:
+  partition: "boost_usr_prod"
+  gpus: 1
+  mem_per_gpu: 32
+  time: 240          # minutes
+  cpus_per_gpu: 8
+  setup:
+    - "module load python/3.11.7"
+    - "source $HOME/RatCon/.venv/bin/activate"

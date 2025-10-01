@@ -55,9 +55,11 @@ def get_logger(logfile="train.log"):
 # -------------------------------------------------------------------
 
 
-def complement_null_loss(h_comp, null_vec):
-    """Encourage complements to match the encoded null embedding."""
-    return (h_comp - null_vec).pow(2).mean()
+def complement_loss(h_comp, h_anchor, null_vec=None, use_null_target=False, temperature=0.07):
+    """Push complements toward the null embedding or repel them from anchors."""
+    if use_null_target and null_vec is not None:
+        return (h_comp - null_vec).pow(2).mean()
+    return -nt_xent(h_comp, h_anchor, temperature=temperature)
 
 
 # -------------------------------------------------------------------
@@ -68,6 +70,7 @@ class Trainer:
         self.cfg = cfg
         self.logger = logger
         self.use_dual = cfg.model.dual.use
+        self.use_null_target = getattr(cfg.model.loss, "use_null_target", False)
         self.model1, self.model2, self.optimizer = self.build_models_and_optimizer()
 
     def build_models_and_optimizer(self):
@@ -134,8 +137,9 @@ class Trainer:
             out1 = self.model1(embeddings, attention_mask, incoming, outgoing)
             h_a1, h_r1, h_c1, g1 = out1["h_anchor"], out1["h_rat"], out1["h_comp"], out1["gates"]
 
+            null_vec1 = out1["null"] if self.use_null_target else None
             L_rat1 = nt_xent(h_r1, h_a1, temperature=tau)
-            L_comp1 = complement_null_loss(h_c1, out1["null"])
+            L_comp1 = complement_loss(h_c1, h_a1, null_vec1, self.use_null_target, tau)
             L_s1 = sparsity_loss(g1, attention_mask)
             L_tv1 = total_variation_1d(g1, attention_mask)
 
@@ -143,8 +147,9 @@ class Trainer:
                 out2 = self.model2(embeddings, attention_mask, incoming, outgoing)
                 h_a2, h_r2, h_c2, g2 = out2["h_anchor"], out2["h_rat"], out2["h_comp"], out2["gates"]
 
+                null_vec2 = out2["null"] if self.use_null_target else None
                 L_rat2 = nt_xent(h_r2, h_a2, temperature=tau)
-                L_comp2 = complement_null_loss(h_c2, out2["null"])
+                L_comp2 = complement_loss(h_c2, h_a2, null_vec2, self.use_null_target, tau)
                 L_s2 = sparsity_loss(g2, attention_mask)
                 L_tv2 = total_variation_1d(g2, attention_mask)
 

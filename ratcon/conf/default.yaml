@@ -54,9 +54,9 @@ eval:
   samples:
     num: 10
     show: True
-  spacy_model: "en_core_web_sm"  # Options: en_core_web_sm, en_core_web_md, en_core_web_lg, etc.
+  spacy_model: "en_core_web_sm"
 
-device: "cpu"
+device: "cuda"
 
 logging:
   metrics_only: False

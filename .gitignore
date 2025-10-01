@@ -4,3 +4,8 @@ data/*
 outputs/
 ratcon/__pycache__
 playground.ipynb
+test.sbatch
+slurm-*.out
+.DS_Store
+.vscode/
+slurm-*.err

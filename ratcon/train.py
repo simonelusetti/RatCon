@@ -2,7 +2,6 @@ import os
 import sys
 import logging
 import torch
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -56,12 +55,9 @@ def get_logger(logfile="train.log"):
 # -------------------------------------------------------------------
 
 
-def complement_null_loss(h_comp, h_anchor):
-    """Encourage complements to collapse to a null embedding while remaining orthogonal to anchors."""
-    null_loss = h_comp.pow(2).sum(dim=-1).mean()
-    cosine = F.cosine_similarity(h_comp, h_anchor, dim=-1)
-    orth_loss = cosine.pow(2).mean()
-    return null_loss + orth_loss
+def complement_null_loss(h_comp, null_vec):
+    """Encourage complements to match the encoded null embedding."""
+    return (h_comp - null_vec).pow(2).mean()
 
 
 # -------------------------------------------------------------------
@@ -139,7 +135,7 @@ class Trainer:
             h_a1, h_r1, h_c1, g1 = out1["h_anchor"], out1["h_rat"], out1["h_comp"], out1["gates"]
 
             L_rat1 = nt_xent(h_r1, h_a1, temperature=tau)
-            L_comp1 = complement_null_loss(h_c1, h_a1)
+            L_comp1 = complement_null_loss(h_c1, out1["null"])
             L_s1 = sparsity_loss(g1, attention_mask)
             L_tv1 = total_variation_1d(g1, attention_mask)
 
@@ -148,7 +144,7 @@ class Trainer:
                 h_a2, h_r2, h_c2, g2 = out2["h_anchor"], out2["h_rat"], out2["h_comp"], out2["gates"]
 
                 L_rat2 = nt_xent(h_r2, h_a2, temperature=tau)
-                L_comp2 = complement_null_loss(h_c2, h_a2)
+                L_comp2 = complement_null_loss(h_c2, out2["null"])
                 L_s2 = sparsity_loss(g2, attention_mask)
                 L_tv2 = total_variation_1d(g2, attention_mask)
 
@@ -309,6 +305,6 @@ def main(cfg):
     # Train or eval
     trainer = Trainer(cfg, logger)
     if cfg.eval.eval_only:
-        trainer.eval_only(eval_dl, tok, xp, eval.per_sentence_stats)
+        trainer.eval_only(eval_dl, tok, xp, cfg.eval.per_sentence_stats)
     else:
-        trainer.train(train_dl, eval_dl, tok, xp, eval.per_sentence_stats)
+        trainer.train(train_dl, eval_dl, tok, xp, cfg.eval.per_sentence_stats)

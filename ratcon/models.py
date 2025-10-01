@@ -101,6 +101,10 @@ class RationaleSelectorModel(nn.Module):
         
         if cfg.fourier.use:
             self.fourier = FourierFilter(mode=cfg.fourier.mode, keep_ratio=cfg.fourier.keep_ratio)
+
+        with torch.no_grad():
+            null_emb = self.sbert.encode([""], convert_to_tensor=True)
+        self.register_buffer("null_embedding", null_emb.squeeze(0))
         
 
     def forward(self, embeddings, attention_mask, incoming=None, outgoing=None):
@@ -131,9 +135,12 @@ class RationaleSelectorModel(nn.Module):
             h_rat = self.fourier(h_rat)
             h_comp = self.fourier(h_comp)
 
+        null_vec = self.null_embedding.to(embeddings.device).unsqueeze(0).expand(h_comp.size(0), -1)
+
         return {
             "h_anchor": h_anchor, "h_rat": h_rat, "h_comp": h_comp,
-            "gates": g, "alpha": alpha, "beta": beta
+            "gates": g, "alpha": alpha, "beta": beta,
+            "null": null_vec
         }
 
 

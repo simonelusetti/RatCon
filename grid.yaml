@@ -1,6 +1,5 @@
 baseline:
   - data.train.subset=0.1
-
 sweep:
   - - model.fourier.use=True
     - model.fourier.mode=lowpass

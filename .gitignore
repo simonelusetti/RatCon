@@ -3,4 +3,4 @@ __pycache__/
 data/*
 outputs/
 ratcon/__pycache__
-aggregated_metrics.csv
+playground.ipynb

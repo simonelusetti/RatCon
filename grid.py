@@ -31,9 +31,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
+import re
+
 import pandas as pd
 import yaml
 from tabulate import tabulate
+from tqdm import tqdm
 
 
 # ---------------------------------------------------------------------------
@@ -105,14 +108,8 @@ def load_config(path: Path) -> tuple[List[str], List[List[str]]]:
 # ---------------------------------------------------------------------------
 
 
-def list_xp_dirs() -> set[str]:
-    if not XP_ROOT.exists():
-        return set()
-    return {p.name for p in XP_ROOT.iterdir() if p.is_dir()}
-
-
-def load_metrics_from_history(xp_dir: str) -> Optional[Dict[str, float]]:
-    history_path = XP_ROOT / xp_dir / "history.json"
+def load_metrics_from_history(signature: str) -> Optional[Dict[str, float]]:
+    history_path = XP_ROOT / signature / "history.json"
     for _ in range(HISTORY_POLL_RETRIES):
         if history_path.exists():
             with history_path.open("r", encoding="utf-8") as fh:
@@ -121,9 +118,40 @@ def load_metrics_from_history(xp_dir: str) -> Optional[Dict[str, float]]:
                 except json.JSONDecodeError:
                     history = None
             if isinstance(history, list) and history:
-                metrics = history[-1].get("metrics", {})
-                if metrics:
-                    return metrics
+                summary_metrics: Dict[str, float] = {}
+                last_metrics: Dict[str, float] = {}
+
+                for entry in reversed(history):
+                    if not isinstance(entry, dict):
+                        continue
+                    if not last_metrics and "metrics" in entry:
+                        metrics = entry.get("metrics", {})
+                        if isinstance(metrics, dict) and metrics:
+                            last_metrics = metrics
+                    if not summary_metrics and "summary" in entry:
+                        summary = entry.get("summary", {})
+                        if isinstance(summary, dict):
+                            best_metrics = summary.get("best_metrics", {})
+                            if isinstance(best_metrics, dict):
+                                for key, value in best_metrics.items():
+                                    summary_metrics[f"best_{key}"] = value
+                            if "best_epoch" in summary:
+                                summary_metrics["best_epoch"] = summary.get("best_epoch")
+                            if "best_f1" in summary and "best_f1" not in summary_metrics:
+                                summary_metrics["best_f1"] = summary.get("best_f1")
+                            if "best_model" in summary:
+                                summary_metrics["best_model"] = summary.get("best_model")
+
+                    if summary_metrics and last_metrics:
+                        break
+
+                combined: Dict[str, float] = {}
+                if last_metrics:
+                    combined.update({f"final_{k}": v for k, v in last_metrics.items()})
+                combined.update(summary_metrics)
+
+                if combined:
+                    return combined
         time.sleep(HISTORY_POLL_DELAY)
     print(f"⚠️ Unable to read metrics for experiment {xp_dir}")
     return None
@@ -145,6 +173,38 @@ def format_setting(overrides: Sequence[str]) -> str:
     return " ".join(overrides) if overrides else "<no overrides>"
 
 
+def run_and_capture_signature(cmd: List[str], pbar: tqdm) -> str:
+    signature: Optional[str] = None
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        universal_newlines=True,
+    )
+
+    assert process.stdout is not None
+    signature_pattern = re.compile(r"Exp signature:\s*([a-fA-F0-9]+)")
+
+    for line in process.stdout:
+        line = line.rstrip()
+        if line:
+            pbar.write(line)
+        match = signature_pattern.search(line)
+        if match:
+            signature = match.group(1)
+
+    returncode = process.wait()
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, cmd)
+
+    if not signature:
+        raise RuntimeError("Experiment signature not found in output")
+
+    return signature
+
+
 # ---------------------------------------------------------------------------
 # Sweep logic
 # ---------------------------------------------------------------------------
@@ -160,59 +220,55 @@ def main() -> None:
     XP_ROOT.mkdir(parents=True, exist_ok=True)
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
-    initial_dirs = list_xp_dirs()
-    seen_dirs = set(initial_dirs)
-
     summary_rows: List[Dict[str, object]] = []
 
-    total_settings = len(sweep)
+    total_runs = len(sweep) * NUM_RUNS
+    with tqdm(total=total_runs, desc="Grid sweep", unit="run") as pbar:
+        for overrides in sweep:
+            setting_overrides = list(baseline) + list(overrides)
+            setting_label = format_setting(overrides)
 
-    for idx, overrides in enumerate(sweep, start=1):
-        setting_overrides = list(baseline) + list(overrides)
-        setting_label = format_setting(overrides)
+            pbar.write(f"\n=== Setting: {setting_label} ===")
+            pbar.write(f"Baseline overrides: {baseline}")
+            pbar.write(f"Sweep overrides   : {overrides}")
 
-        print(f"\n=== Setting {idx}/{total_settings}: {setting_label} ===")
-        print(f"Baseline overrides: {baseline}")
-        print(f"Sweep overrides   : {overrides}")
+            per_run_metrics: List[Dict[str, float]] = []
+            failures = 0
 
-        per_run_metrics: List[Dict[str, float]] = []
-        failures = 0
+            for _ in range(NUM_RUNS):
+                cmd = ["dora", "run"] + setting_overrides
+                signature = None
+                try:
+                    signature = run_and_capture_signature(cmd, pbar)
+                except subprocess.CalledProcessError as exc:
+                    failures += 1
+                    pbar.write(f"    ⚠️ Run failed: {exc}")
+                    pbar.update(1)
+                    continue
+                except RuntimeError as exc:
+                    failures += 1
+                    pbar.write(f"    ⚠️ {exc}")
+                    pbar.update(1)
+                    continue
 
-        for run_idx in range(1, NUM_RUNS + 1):
-            print(f"  → Run {run_idx}/{NUM_RUNS}")
-            before_run = set(seen_dirs)
-
-            cmd = ["dora", "run"] + setting_overrides
-            try:
-                subprocess.run(cmd, check=True)
-            except subprocess.CalledProcessError as exc:
-                failures += 1
-                print(f"    ⚠️ Run failed: {exc}")
-                continue
-
-            after_run = list_xp_dirs()
-            new_dirs = sorted(after_run - before_run)
-            seen_dirs.update(after_run)
-
-            if not new_dirs:
-                print("    ⚠️ No new experiment directory detected; skipping metric collection.")
-                continue
-
-            for xp_name in new_dirs:
-                metrics = load_metrics_from_history(xp_name)
+                metrics = load_metrics_from_history(signature)
                 if metrics:
                     per_run_metrics.append(metrics)
-                    print("    ✓ Collected metrics", {k: round(v, 4) for k, v in metrics.items()})
+                    pbar.write("    ✓ Collected metrics " + str({k: round(v, 4) for k, v in metrics.items()}))
+                else:
+                    pbar.write(f"    ⚠️ Metrics unavailable for signature {signature}")
 
-        avg_metrics = average_metrics(per_run_metrics)
-        row: Dict[str, object] = {
-            "setting": setting_label,
-            "runs": len(per_run_metrics),
-            "failures": failures,
-        }
-        for metric_name, value in avg_metrics.items():
-            row[f"avg_{metric_name}"] = value
-        summary_rows.append(row)
+                pbar.update(1)
+
+            avg_metrics = average_metrics(per_run_metrics)
+            row: Dict[str, object] = {
+                "setting": setting_label,
+                "runs": len(per_run_metrics),
+                "failures": failures,
+            }
+            for metric_name, value in avg_metrics.items():
+                row[f"avg_{metric_name}"] = value
+            summary_rows.append(row)
 
     if not summary_rows:
         print("No successful runs to summarise.")

@@ -215,7 +215,10 @@ class Trainer:
         return metrics
 
     def train(self, train_dl, eval_dl, tok, xp, per_sentence_stats=False):
-        best_f1 = 0.0
+        best_f1 = float('-inf')
+        best_epoch = None
+        best_metrics = {}
+        best_model_name = None
         for epoch in range(self.cfg.train.epochs):
             avg = self.train_epoch(train_dl, epoch)
             self.logger.info(f"epoch {epoch+1}: loss {avg:.4f}")
@@ -229,6 +232,13 @@ class Trainer:
                 f1_1, f1_2 = metrics1.get("f1", 0.0), metrics2.get("f1", 0.0)
                 if max(f1_1, f1_2) > best_f1:
                     best_f1 = max(f1_1, f1_2)
+                    best_epoch = epoch + 1
+                    if f1_1 >= f1_2:
+                        best_metrics = metrics1
+                        best_model_name = "model1"
+                    else:
+                        best_metrics = metrics2
+                        best_model_name = "model2"
                     self.logger.info(
                         f"New best F1: {best_f1:.4f}, saving models to model1.pth and model2.pth"
                     )
@@ -240,10 +250,33 @@ class Trainer:
                     metrics = self.eval(xp, self.model1, eval_dl, tok, per_sentence_stats)
                 if metrics.get("f1", 0.0) > best_f1:
                     best_f1 = metrics["f1"]
+                    best_epoch = epoch + 1
+                    best_metrics = metrics
                     self.logger.info(f"New best F1: {best_f1:.4f}, saving model to model.pth")
                     torch.save(self.model1.state_dict(), "model.pth")
 
-        self.logger.info(f"Best F1: {best_f1:.4f}")
+        if best_f1 == float('-inf'):
+            best_f1 = float('nan')
+        self.logger.info(
+            f"Best metrics at epoch {best_epoch if best_epoch is not None else 'n/a'}: {best_metrics}"
+        )
+        if self.use_dual and best_model_name is not None:
+            self.logger.info(f"Best-performing model: {best_model_name}")
+
+        summary = {
+            "best_epoch": best_epoch,
+            "best_f1": best_f1,
+            "best_metrics": best_metrics,
+        }
+        if self.use_dual:
+            summary["best_model"] = best_model_name
+
+        try:
+            xp.link.push_metrics({"summary": summary})
+        except Exception as ex:
+            self.logger.warning(f"Could not push summary metrics: {ex}")
+
+        return summary
 
     def eval_only(self, eval_dl, tok, xp, per_sentence_stats=False):
         if self.use_dual:
@@ -312,4 +345,5 @@ def main(cfg):
     if cfg.eval.eval_only:
         trainer.eval_only(eval_dl, tok, xp, cfg.eval.per_sentence_stats)
     else:
-        trainer.train(train_dl, eval_dl, tok, xp, cfg.eval.per_sentence_stats)
+        summary = trainer.train(train_dl, eval_dl, tok, xp, cfg.eval.per_sentence_stats)
+        logger.info(f"Training summary: {summary}")

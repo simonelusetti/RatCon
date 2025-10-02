@@ -134,9 +134,9 @@ class Trainer:
             # Forward pass model1
             out1 = self.model1(embeddings, attention_mask, incoming, outgoing)
             h_a1, h_r1, h_c1, g1 = out1["h_anchor"], out1["h_rat"], out1["h_comp"], out1["gates"]
+            token_emb1 = out1["token_embeddings"]
 
             null_vec1 = out1["null"] if self.use_null_target else None
-            L_rat1 = nt_xent(h_r1, h_a1, temperature=tau)
             L_comp1 = complement_loss(h_c1, h_a1, null_vec1, self.use_null_target, tau)
             L_s1 = sparsity_loss(g1, attention_mask)
             L_tv1 = total_variation_1d(g1, attention_mask)
@@ -144,12 +144,33 @@ class Trainer:
             if self.model2:
                 out2 = self.model2(embeddings, attention_mask, incoming, outgoing)
                 h_a2, h_r2, h_c2, g2 = out2["h_anchor"], out2["h_rat"], out2["h_comp"], out2["gates"]
+                token_emb2 = out2["token_embeddings"]
 
                 null_vec2 = out2["null"] if self.use_null_target else None
-                L_rat2 = nt_xent(h_r2, h_a2, temperature=tau)
                 L_comp2 = complement_loss(h_c2, h_a2, null_vec2, self.use_null_target, tau)
                 L_s2 = sparsity_loss(g2, attention_mask)
                 L_tv2 = total_variation_1d(g2, attention_mask)
+
+                # Union rationale gate used for correlation
+                shared_gate = 1.0 - (1.0 - g1) * (1.0 - g2)
+                shared_gate = torch.clamp(shared_gate, 1e-6, 1.0)
+                shared_mask = attention_mask * shared_gate
+
+                h_shared1 = self.model1.pooler({
+                    "token_embeddings": token_emb1,
+                    "attention_mask": shared_mask,
+                })["sentence_embedding"]
+                h_shared2 = self.model2.pooler({
+                    "token_embeddings": token_emb2,
+                    "attention_mask": shared_mask,
+                })["sentence_embedding"]
+                if hasattr(self.model1, "fourier"):
+                    h_shared1 = self.model1.fourier(h_shared1)
+                if hasattr(self.model2, "fourier"):
+                    h_shared2 = self.model2.fourier(h_shared2)
+
+                L_rat1 = nt_xent(h_shared1, h_a1, temperature=tau)
+                L_rat2 = nt_xent(h_shared2, h_a2, temperature=tau)
 
                 # Symmetric KL loss that pushes gates toward complementary behaviour
                 kl_weight = self.cfg.model.dual.kl_weight
@@ -184,6 +205,7 @@ class Trainer:
                 )
                 params = list(self.model1.parameters()) + list(self.model2.parameters())
             else:
+                L_rat1 = nt_xent(h_r1, h_a1, temperature=tau)
                 loss = L_rat1 + l_comp * L_comp1 + l_s * L_s1 + l_tv * L_tv1
                 params = self.model1.parameters()
 
@@ -269,8 +291,7 @@ class Trainer:
                 dataset=self.cfg.data.eval.dataset,
                 precision=4,
             )
-            for line in table.splitlines():
-                self.logger.info(line)
+            self.logger.info(table)
 
             best_label_epoch = None
             best_metrics_epoch = None
@@ -355,8 +376,7 @@ class Trainer:
             dataset=self.cfg.data.eval.dataset,
             precision=4,
         )
-        for line in table.splitlines():
-            self.logger.info(line)
+        self.logger.info(table)
 
 
 

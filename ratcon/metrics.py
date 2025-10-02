@@ -174,46 +174,34 @@ def render_metrics_table(
     precision: int = 4,
 ) -> str:
     if not results:
-        header = f"Metrics table{f' (dataset: {dataset})' if dataset else ''}"
-        return f"{header}\n(no results)"
+        prefix = "Metrics"
+        if dataset:
+            prefix += f" (dataset: {dataset})"
+        return f"{prefix}: none"
 
-    headers = ["Model", "F1", "Precision", "Recall", "Highlighted", "Top words"]
-    rows = []
+    pieces = []
     for label in sorted(results.keys()):
         result = results[label]
-        metrics = result.metrics or {}
-        f1 = metrics.get("f1")
-        precision_val = metrics.get("precision")
-        recall_val = metrics.get("recall")
-        highlight_total = result.word_summary.get("total_highlighted_words", 0) if result.word_summary else 0
+        metrics_str = format_metric_values(result.metrics, precision=precision)
+        highlight_total = (
+            result.word_summary.get("total_highlighted_words", 0)
+            if result.word_summary
+            else 0
+        )
         top_words = _format_top_words(result.word_summary)
-        def fmt(value):
-            return f"{value:.{precision}f}" if value is not None else "-"
-        rows.append([
-            label,
-            fmt(f1),
-            fmt(precision_val),
-            fmt(recall_val),
-            str(highlight_total),
-            top_words,
-        ])
 
-    col_widths = [len(h) for h in headers]
-    for row in rows:
-        for idx, cell in enumerate(row):
-            col_widths[idx] = max(col_widths[idx], len(cell))
+        extras = []
+        if highlight_total:
+            extras.append(f"highlighted={highlight_total}")
+        if top_words and top_words != "-":
+            extras.append(f"top={top_words}")
 
-    def render_row(cells):
-        return " | ".join(cell.ljust(col_widths[idx]) for idx, cell in enumerate(cells))
+        extra = f" ({', '.join(extras)})" if extras else ""
+        pieces.append(f"{label}: {metrics_str}{extra}")
 
-    separator = "-+-".join("-" * width for width in col_widths)
-    lines = []
-    title = "Metrics table"
+    prefix = "Metrics"
     if dataset:
-        title += f" (dataset: {dataset})"
-    lines.append(title)
-    lines.append(render_row(headers))
-    lines.append(separator)
-    for row in rows:
-        lines.append(render_row(row))
-    return "\n".join(lines)
+        prefix += f" (dataset: {dataset})"
+    return f"{prefix}: {'; '.join(pieces)}"
+
+

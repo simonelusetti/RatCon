@@ -140,7 +140,8 @@ class RationaleSelectorModel(nn.Module):
         return {
             "h_anchor": h_anchor, "h_rat": h_rat, "h_comp": h_comp,
             "gates": g, "alpha": alpha, "beta": beta,
-            "null": null_vec
+            "null": null_vec,
+            "token_embeddings": embeddings,
         }
 
 

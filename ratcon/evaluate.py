@@ -62,6 +62,7 @@ import torch, spacy
 from tqdm import tqdm
 from .utils import should_disable_tqdm
 from sklearn.metrics import precision_recall_fscore_support
+from .metrics import EvaluationResult, summarize_word_stats
 
 def merge_subwords(ids, tokens, tokenizer):
     # --- Phase 1: merge subwords ---
@@ -135,8 +136,6 @@ def merge_spans(ids, tokens, gates, tokenizer, thresh=0.2):
     return " ".join(out_tokens) + "\n"
 
 
-from sklearn.metrics import precision_recall_fscore_support
-
 def evaluate(model, data, tok, cfg, logger=None):
     """
     Evaluate model by comparing gate activations against gold NER labels (if present).
@@ -162,7 +161,10 @@ def evaluate(model, data, tok, cfg, logger=None):
 
     model_device = next(model.parameters()).device
 
-    disable_progress = should_disable_tqdm()
+    logging_cfg = getattr(cfg, "logging", None)
+    disable_progress = should_disable_tqdm(
+        metrics_only=getattr(logging_cfg, "metrics_only", False) if logging_cfg is not None else False
+    )
 
     with torch.no_grad():
         for batch in tqdm(data, desc="Evaluating: ", disable=disable_progress):
@@ -195,20 +197,22 @@ def evaluate(model, data, tok, cfg, logger=None):
                 # ---- pretty printing ----
                 tokens = tok.convert_ids_to_tokens(ids)
                 pretty = merge_spans(ids, tokens, g, tok, thresh=thresh)
-                # For original spans, merge words and gold labels, then format with brackets
                 if "ner_tags" in batch:
                     gold = batch["ner_tags"][i].cpu().tolist()
                     orig_pretty = format_gold_spans(ids, tokens, gold, tok)
                 else:
                     orig_pretty = " ".join(merge_subwords(ids, tokens, tok))
-                if len(highlighted_samples) < num_samples:
-                    highlighted_samples.append(
-                        f"\nOrig: {orig_pretty}\nPred: {pretty}"
-                    )
 
-                # --- Word stats for highlighted words (for all examples) ---
+                sample_entry = None
+                if len(highlighted_samples) < num_samples:
+                    sample_entry = {
+                        "original": orig_pretty,
+                        "predicted": pretty.strip(),
+                    }
+
                 if nlp is not None:
                     import re, string
+
                     highlighted = re.findall(r'\[\[(.*?)\]\]', pretty)
                     cleaned_words = []
                     for span in highlighted:
@@ -216,6 +220,7 @@ def evaluate(model, data, tok, cfg, logger=None):
                             w = word.strip(string.punctuation + string.whitespace)
                             if w:
                                 cleaned_words.append(w.lower())
+
                     doc = nlp(" ".join(cleaned_words))
                     noun_count = sum(1 for t in doc if t.pos_ == "NOUN")
                     propn_count = sum(1 for t in doc if t.pos_ == "PROPN")
@@ -224,23 +229,42 @@ def evaluate(model, data, tok, cfg, logger=None):
                     stopword_count = sum(1 for t in doc if t.is_stop)
                     recognized = noun_count + propn_count + verb_count + conj_count + stopword_count
                     other = len(doc) - recognized
-                    highlighted_word_stats.append({
+                    stats_entry = {
                         "nouns": noun_count,
                         "proper_nouns": propn_count,
                         "verbs": verb_count,
                         "conjugations": conj_count,
                         "stopwords": stopword_count,
                         "other": other,
-                        "total": len(doc)
-                    })
+                        "total": len(doc),
+                    }
+                    highlighted_word_stats.append(stats_entry)
+                    if sample_entry is not None:
+                        sample_entry["word_stats"] = stats_entry
+
+                if sample_entry is not None:
+                    highlighted_samples.append(sample_entry)
+
 
 
     # ---- metrics summary ----
+    summary = summarize_word_stats(highlighted_word_stats)
+
     if len(y_true) == 0:
-        return None, highlighted_samples, highlighted_word_stats
+        return EvaluationResult(
+            metrics=None,
+            samples=highlighted_samples,
+            word_stats=highlighted_word_stats,
+            word_summary=summary,
+        )
 
     precision, recall, f1, _ = precision_recall_fscore_support(
         y_true, y_pred, average="binary", zero_division=0
     )
     metrics = {"precision": precision, "recall": recall, "f1": f1}
-    return metrics, highlighted_samples, highlighted_word_stats
+    return EvaluationResult(
+        metrics=metrics,
+        samples=highlighted_samples,
+        word_stats=highlighted_word_stats,
+        word_summary=summary,
+    )

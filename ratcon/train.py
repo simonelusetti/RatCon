@@ -8,6 +8,12 @@ from .models import RationaleSelectorModel, nt_xent
 from .data import get_dataset, collate
 from .losses import complement_loss, kumaraswamy_log_pdf, sparsity_loss, total_variation_1d
 from .evaluate import evaluate
+from .metrics import (
+    EvaluationResult,
+    build_evaluation_payload,
+    log_evaluation_result,
+    render_metrics_table,
+)
 from dora import get_xp, hydra_main
 
 # -------------------------------------------------------------------
@@ -48,20 +54,22 @@ class Trainer:
         for label, model in self._iter_models():
             yield label, model, self.model_paths[label]
 
-    def _evaluate_models(self, xp, eval_dl, tok, per_sentence_stats, avg, avg_kl):
+    def _evaluate_models(self, xp, eval_dl, tok, per_sentence_stats, avg, avg_kl, epoch_idx):
         results = {}
         with torch.no_grad():
             for label, model in self._iter_models():
-                metrics = self.eval(xp, model, eval_dl, tok, per_sentence_stats, model_label=label, avg=avg, avg_kl=avg_kl)
-                results[label] = metrics or {}
+                results[label] = self.eval(
+                    xp,
+                    model,
+                    eval_dl,
+                    tok,
+                    per_sentence_stats,
+                    model_label=label,
+                    avg=avg,
+                    avg_kl=avg_kl,
+                    log_prefix=f"epoch {epoch_idx}",
+                )
         return results
-
-    def _log_epoch_metrics(self, epoch, metrics_map):
-        for label, metrics in metrics_map.items():
-            if self.use_dual:
-                self.logger.info(f"epoch {epoch}: {label} metrics {metrics}")
-            else:
-                self.logger.info(f"epoch {epoch}: metrics {metrics}")
 
     def _format_checkpoint_names(self):
         paths = sorted(self.model_paths.values())
@@ -189,50 +197,55 @@ class Trainer:
 
         return total / len(loader.dataset), total_kl_loss / len(loader.dataset) if self.model2 else None
 
-    def eval(self, xp, model, eval_dl, tok, per_sentence_stats=False, model_label="model", avg=None, avg_kl=None):
+    def eval(
+        self,
+        xp,
+        model,
+        eval_dl,
+        tok,
+        per_sentence_stats=False,
+        model_label="model",
+        avg=None,
+        avg_kl=None,
+        log_prefix=None,
+    ) -> EvaluationResult:
         import datetime
 
         dataset_name = self.cfg.data.eval.dataset
-        metrics, samples, word_stats = evaluate(
+        result = evaluate(
             model,
             eval_dl,
             tok,
             cfg=self.cfg,
-            logger=self.logger
+            logger=self.logger,
         )
+
         timestamp = datetime.datetime.now().isoformat()
-        payload = {
-            "dataset": dataset_name,
-            "model": model_label,
-            "metrics": metrics,
-            "timestamp": timestamp,
-            "word_stats": word_stats,
-            "avg_train_loss": avg,
-            "avg_train_kl": avg_kl,
-        }
+        extra = {}
+        if avg is not None:
+            extra["avg_train_loss"] = avg
+        if avg_kl is not None:
+            extra["avg_train_kl"] = avg_kl
+        payload = build_evaluation_payload(
+            dataset_name,
+            model_label,
+            result,
+            timestamp=timestamp,
+            extra=extra or None,
+        )
         xp.link.push_metrics(payload)
 
-        if self.cfg.eval.samples.show:
-            for i, s in enumerate(samples):
-                extra = f"\nWord stats: {word_stats[i]}\n" if i < len(word_stats) and per_sentence_stats else ""
-                self.logger.info(f"{s}{extra}")
+        log_evaluation_result(
+            self.logger,
+            dataset_name,
+            model_label,
+            result,
+            prefix=log_prefix,
+            show_samples=self.cfg.eval.samples.show,
+            per_sentence_stats=per_sentence_stats,
+        )
 
-        label_info = f" ({model_label})" if model_label else ""
-        self.logger.info(f"dataset: {dataset_name}{label_info}\nmetrics: {metrics}")
-
-        # Aggregate avg word stats
-        if word_stats:
-            total_words = sum(d["total"] for d in word_stats if d["total"] > 0)
-            if total_words > 0:
-                avg_props = {
-                    k: sum(d.get(k, 0) for d in word_stats if d["total"] > 0) / total_words
-                    for k in ["nouns", "proper_nouns", "verbs", "conjugations", "stopwords"]
-                }
-                self.logger.info(f"Average highlighted word proportions: {avg_props}")
-            else:
-                self.logger.info("No highlighted words to compute average proportions.")
-                
-        return metrics
+        return result
 
     def train(self, train_dl, eval_dl, tok, xp, per_sentence_stats=False):
         best_f1 = float('-inf')
@@ -242,39 +255,51 @@ class Trainer:
 
         for epoch in range(self.cfg.train.epochs):
             avg, avg_kl = self.train_epoch(train_dl, epoch)
-            metrics_map = self._evaluate_models(xp, eval_dl, tok, per_sentence_stats, avg, avg_kl)
-            message = f"epoch {epoch + 1}, loss {avg:.4f}, metrics {metrics_map}"
-            if avg_kl is not None: message = f"epoch {epoch + 1}, loss {avg:.4f}, kl_loss {avg_kl:.4f}, metrics {metrics_map}"
-            self.logger.info(message)
-
-            if self.use_dual:
-                current_label, current_metrics = max(
-                    metrics_map.items(), key=lambda item: item[1].get("f1", 0.0)
-                )
-                current_f1 = current_metrics.get("f1", 0.0)
-                if current_f1 > best_f1:
-                    best_f1 = current_f1
-                    best_epoch = epoch + 1
-                    best_metrics = current_metrics
-                    best_model_name = current_label
-                    message = (
-                        f"New best F1: {best_f1:.4f}, saving models to {self._format_checkpoint_names()}"
-                    )
-                    self.logger.info(message)
-                    for _, model, path in self._iter_model_specs():
-                        torch.save(model.state_dict(), path)
+            if avg_kl is not None:
+                self.logger.info(f"epoch {epoch + 1}: train_loss={avg:.4f}, kl_loss={avg_kl:.4f}")
             else:
-                metrics = metrics_map.get("model", {})
-                current_f1 = metrics.get("f1", 0.0)
-                if current_f1 > best_f1:
-                    best_f1 = current_f1
-                    best_epoch = epoch + 1
-                    best_metrics = metrics
-                    message = (
-                        f"New best F1: {best_f1:.4f}, saving model to {self._format_checkpoint_names()}"
-                    )
-                    self.logger.info(message)
-                    torch.save(self.model1.state_dict(), self.model_paths["model"])
+                self.logger.info(f"epoch {epoch + 1}: train_loss={avg:.4f}")
+
+            eval_results = self._evaluate_models(
+                xp, eval_dl, tok, per_sentence_stats, avg, avg_kl, epoch + 1
+            )
+
+            table = render_metrics_table(
+                eval_results,
+                dataset=self.cfg.data.eval.dataset,
+                precision=4,
+            )
+            for line in table.splitlines():
+                self.logger.info(line)
+
+            best_label_epoch = None
+            best_metrics_epoch = None
+            best_f1_epoch = float('-inf')
+            for label, result in eval_results.items():
+                metrics = result.metrics or {}
+                f1_value = metrics.get('f1')
+                if f1_value is None:
+                    continue
+                if f1_value > best_f1_epoch:
+                    best_f1_epoch = f1_value
+                    best_label_epoch = label
+                    best_metrics_epoch = metrics
+
+            if best_label_epoch is None:
+                continue
+
+            if best_f1_epoch > best_f1:
+                best_f1 = best_f1_epoch
+                best_epoch = epoch + 1
+                best_metrics = best_metrics_epoch or {}
+                if self.use_dual:
+                    best_model_name = best_label_epoch
+                message = (
+                    f"New best F1: {best_f1:.4f}, saving model(s) to {self._format_checkpoint_names()}"
+                )
+                self.logger.info(message)
+                for _, model, path in self._iter_model_specs():
+                    torch.save(model.state_dict(), path)
 
         if best_f1 == float('-inf'):
             best_f1 = float('nan')
@@ -300,14 +325,38 @@ class Trainer:
         return summary
 
     def eval_only(self, eval_dl, tok, xp, per_sentence_stats=False):
+        results = {}
         if self.use_dual:
             for label, model in self._iter_models():
                 self.logger.info(f"Eval-only mode: evaluating {label}")
-                metrics = self.eval(xp, model, eval_dl, tok, per_sentence_stats, model_label=label)
-                self.logger.info(f"eval metrics {label}: {metrics}")
+                results[label] = self.eval(
+                    xp,
+                    model,
+                    eval_dl,
+                    tok,
+                    per_sentence_stats,
+                    model_label=label,
+                    log_prefix="eval-only",
+                )
         else:
-            metrics = self.eval(xp, self.model1, eval_dl, tok, per_sentence_stats, model_label="model")
-            self.logger.info(f"eval metrics: {metrics}")
+            self.logger.info("Eval-only mode: evaluating model")
+            results["model"] = self.eval(
+                xp,
+                self.model1,
+                eval_dl,
+                tok,
+                per_sentence_stats,
+                model_label="model",
+                log_prefix="eval-only",
+            )
+
+        table = render_metrics_table(
+            results,
+            dataset=self.cfg.data.eval.dataset,
+            precision=4,
+        )
+        for line in table.splitlines():
+            self.logger.info(line)
 
 
 

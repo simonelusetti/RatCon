@@ -36,6 +36,7 @@ import pandas as pd
 import yaml
 from tabulate import tabulate
 from tqdm import tqdm
+from ratcon.utils import should_disable_tqdm
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +223,8 @@ def main() -> None:
     summary_rows: List[Dict[str, object]] = []
 
     total_runs = len(sweep) * NUM_RUNS
-    with tqdm(total=total_runs, desc="Grid sweep", unit="run") as pbar:
+    disable_progress = should_disable_tqdm()
+    with tqdm(total=total_runs, desc="Grid sweep", unit="run", disable=disable_progress) as pbar:
         for overrides in sweep:
             setting_overrides = list(baseline) + list(overrides)
             if not any(str(ov).startswith("logging.metrics_only") for ov in setting_overrides):

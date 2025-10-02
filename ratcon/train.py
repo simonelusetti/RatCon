@@ -4,6 +4,7 @@ import logging
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from .utils import should_disable_tqdm
 
 from .models import RationaleSelectorModel, nt_xent
 from .data import get_dataset, collate
@@ -133,7 +134,7 @@ class Trainer:
         if self.model2:
             self.model2.train()
 
-        for batch in tqdm(loader, desc=f"Epoch {epoch+1}", disable=self.metrics_only):
+        for batch in tqdm(loader, desc=f"Epoch {epoch+1}", disable=should_disable_tqdm(metrics_only=self.metrics_only)):
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
             embeddings, attention_mask = batch["embeddings"], batch["attention_mask"]
             incoming = batch["incoming"] if self.cfg.model.attention_augment else None

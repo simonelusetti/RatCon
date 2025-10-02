@@ -60,6 +60,7 @@ def merge_gold_labels(ids, tokens, gold_labels, tokenizer):
 
 import torch, spacy
 from tqdm import tqdm
+from .utils import should_disable_tqdm
 from sklearn.metrics import precision_recall_fscore_support
 
 def merge_subwords(ids, tokens, tokenizer):
@@ -161,8 +162,13 @@ def evaluate(model, data, tok, cfg, logger=None):
 
     model_device = next(model.parameters()).device
 
+    logging_cfg = getattr(cfg, "logging", None)
+    disable_progress = should_disable_tqdm(
+        metrics_only=getattr(logging_cfg, "metrics_only", False) if logging_cfg is not None else False
+    )
+
     with torch.no_grad():
-        for batch in tqdm(data, desc="Evaluating: "):
+        for batch in tqdm(data, desc="Evaluating: ", disable=disable_progress):
             embeddings = batch["embeddings"].to(model_device, non_blocking=True)        # [B,L,D]
             attention_mask = batch["attention_mask"].to(model_device, non_blocking=True) # [B,L]
             input_ids = batch["input_ids"]

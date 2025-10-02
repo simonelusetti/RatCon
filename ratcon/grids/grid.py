@@ -1,16 +1,61 @@
-"""Dora grid definition for RatCon.
-
-Runs hyper-parameter sweeps via Slurm using the defaults declared in the Hydra
-configuration (`slurm` section).
-"""
+"""Dora grid definition that mirrors the local YAML-driven sweep."""
 
 from __future__ import annotations
 
-from dora import Explorer, Launcher
+from pathlib import Path
+from typing import Iterable, List
+
 import treetable as tt
+import yaml
+from dora import Explorer, Launcher
+
+CONFIG_PATH = Path(__file__).resolve().parents[2] / "grid.yaml"
 
 
-class RatConExplorer(Explorer):
+def _ensure_str_list(values: Iterable[object]) -> List[str]:
+    tokens: List[str] = []
+    for item in values:
+        if item is None:
+            continue
+        if isinstance(item, str):
+            token = item.strip()
+            if token:
+                tokens.append(token)
+        else:
+            token = str(item).strip()
+            if token:
+                tokens.append(token)
+    return tokens
+
+
+def load_yaml_sweep(path: Path) -> tuple[List[str], List[List[str]]]:
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+    baseline_raw = data.get("baseline", [])
+    sweep_raw = data.get("sweep", [])
+
+    baseline = _ensure_str_list(
+        baseline_raw if isinstance(baseline_raw, (list, tuple)) else [baseline_raw]
+    )
+
+    sweep: List[List[str]] = []
+    for entry in sweep_raw:
+        if isinstance(entry, (list, tuple)):
+            tokens = _ensure_str_list(entry)
+        elif isinstance(entry, str):
+            tokens = _ensure_str_list(entry.split())
+        else:
+            tokens = _ensure_str_list([entry])
+        if tokens:
+            sweep.append(tokens)
+
+    if not sweep:
+        raise ValueError("No sweep entries defined in grid.yaml")
+
+    return baseline, sweep
+
+
+class YAMLExplorer(Explorer):
     metric_names = ("precision", "recall", "f1")
 
     def get_grid_metrics(self):
@@ -43,14 +88,14 @@ class RatConExplorer(Explorer):
         return result
 
 
-@RatConExplorer
+@YAMLExplorer
 def explorer(launcher: Launcher):
-    launcher = launcher.bind({"data.train.subset": 0.1})
-    for l_comp in [0.01, 0.1, 1.0]:
-        for l_s in [0.01, 0.1, 1.0]:
-            for l_tv in [0.01, 0.1, 1.0]:
-                launcher({
-                    "model.loss.l_comp": l_comp,
-                    "model.loss.l_s": l_s,
-                    "model.loss.l_tv": l_tv,
-                })
+    baseline, sweep = load_yaml_sweep(CONFIG_PATH)
+
+    configured_launcher = launcher.bind(baseline) if baseline else launcher
+
+    for overrides in sweep:
+        overrides = list(overrides)
+        if not any(str(ov).startswith("logging.metrics_only") for ov in overrides + baseline):
+            overrides.append("logging.metrics_only=true")
+        configured_launcher(overrides)

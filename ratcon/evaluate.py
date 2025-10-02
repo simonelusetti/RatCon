@@ -159,15 +159,18 @@ def evaluate(model, data, tok, cfg, logger=None):
             logger.warning(f"spaCy model {spacy_model} not found. Word stats will be skipped.")
 
 
+    model_device = next(model.parameters()).device
+
     with torch.no_grad():
         for batch in tqdm(data, desc="Evaluating: "):
-            embeddings = batch["embeddings"]        # [B,L,D]
-            attention_mask = batch["attention_mask"] # [B,L]
+            embeddings = batch["embeddings"].to(model_device, non_blocking=True)        # [B,L,D]
+            attention_mask = batch["attention_mask"].to(model_device, non_blocking=True) # [B,L]
             input_ids = batch["input_ids"]
             incoming = outgoing = None
             if cfg.model.attention_augment:
-                incoming = batch["incoming"]
-                outgoing = batch["outgoing"]
+                incoming = batch["incoming"].to(model_device, non_blocking=True)
+                outgoing = batch["outgoing"].to(model_device, non_blocking=True)
+
             out = model(embeddings, attention_mask, incoming, outgoing)
             gates = out["gates"].cpu().numpy()      # [B,L]
 

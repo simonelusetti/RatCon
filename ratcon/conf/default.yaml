@@ -30,7 +30,7 @@ data:
   rebuild_ds: False
   train:
     dataset: "cnn"
-    batch_size: 128
+    batch_size: 32
     num_workers: 4
     subset: 1.0
     shuffle: True
@@ -73,6 +73,7 @@ slurm:
   setup:
     - "module load python/3.11.7"
     - "source $HOME/RatCon/.venv/bin/activate"
+    - "export SLURM_CPU_BIND=none"
     - "export HF_HOME=$HOME/hf-cache"
     - "export TRANSFORMERS_CACHE=$HF_HOME/transformers"
     - "export HF_DATASETS_CACHE=$HF_HOME/datasets"

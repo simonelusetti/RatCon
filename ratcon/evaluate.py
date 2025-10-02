@@ -162,10 +162,7 @@ def evaluate(model, data, tok, cfg, logger=None):
 
     model_device = next(model.parameters()).device
 
-    logging_cfg = getattr(cfg, "logging", None)
-    disable_progress = should_disable_tqdm(
-        metrics_only=getattr(logging_cfg, "metrics_only", False) if logging_cfg is not None else False
-    )
+    disable_progress = should_disable_tqdm()
 
     with torch.no_grad():
         for batch in tqdm(data, desc="Evaluating: ", disable=disable_progress):

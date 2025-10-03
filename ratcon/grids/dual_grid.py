@@ -45,4 +45,14 @@ class RatConExplorer(Explorer):
 
 @RatConExplorer
 def explorer(launcher: Launcher):
-    launcher({"data.train.subset": 0.1, "train.epochs":10})
+    launcher = launcher.bind({
+        "data.train.subset": 0.1,
+        "model.dual.use":True,
+
+    })
+    for kl_weight in [10, 1, 0.1, 0.01]:
+        for ls_2 in [10, 1, 0.1, 0.01]:
+            launcher({
+                "model.dual.kl_weight": kl_weight,
+                "model.dual.ls_2": ls_2,
+            })

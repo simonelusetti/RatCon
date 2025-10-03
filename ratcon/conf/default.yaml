@@ -49,16 +49,20 @@ train:
 eval:
   per_sentence_stats: False
   eval_only: False
+  verbose: False
   thresh: 0.5
-  spacy_model: "en_core_web_sm"
   samples:
     num: 10
-    show: False
+    show: True
+  spacy_model: "en_core_web_sm"
 
 device: "cuda"
 
+logging:
+  metrics_only: False
+
 dora:
-  exclude: ["train.retrain", "eval.*", "data.rebuild_ds","logging.*"]
+  exclude: ["train.retrain", "eval.*", "data.rebuild_ds"]
 
 slurm:
   partition: "boost_usr_prod"

@@ -2,11 +2,16 @@ import os
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from .utils import should_disable_tqdm, get_logger
+from .utils import (
+    should_disable_tqdm,
+    get_logger,
+    shared_distribution,
+    shared_complement_distribution,
+)
 
 from .models import RationaleSelectorModel, nt_xent
 from .data import get_dataset, collate
-from .losses import complement_loss, kumaraswamy_log_pdf, sparsity_loss, total_variation_1d
+from .losses import complement_loss, kl_loss, sparsity_loss, total_variation_1d
 from .evaluate import evaluate
 from .metrics import (
     EvaluationResult,
@@ -108,6 +113,60 @@ class Trainer:
         )
 
         return model1, model2, optimizer
+    
+    def train_dual(self, embeddings, attention_mask, incoming, outgoing):
+        # Params
+        l_comp, l_tv = self.cfg.model.loss.l_comp, self.cfg.model.loss.l_tv,
+        ls_1 = self.cfg.model.dual.ls_1
+        ls_2 = self.cfg.model.dual.ls_2
+        l_kl = self.cfg.model.dual.kl_weight
+        tau = self.cfg.model.loss.tau
+        
+        # Forward pass
+        out1 = self.model1(embeddings, attention_mask, incoming, outgoing)
+        h_a1, _, h_c1, g1 = out1["h_anchor"], out1["h_rat"], out1["h_comp"], out1["gates"]
+        null_vec1 = out1["null"] if self.use_null_target else None
+        token_emb1 = out1["token_embeddings"]
+
+        out2 = self.model2(embeddings, attention_mask, incoming, outgoing)
+        h_a2, _, h_c2, g2 = out2["h_anchor"], out2["h_rat"], out2["h_comp"], out2["gates"]
+        null_vec2 = out2["null"] if self.use_null_target else None
+        token_emb2 = out2["token_embeddings"]
+
+        h_shared_rat1, h_shared_rat2, shared_mask = shared_distribution(
+            g1, g2, token_emb1, token_emb2, attention_mask, self.model1, self.model2
+        )
+
+        h_shared_comp1, h_shared_comp2, shared_comp_mask = shared_complement_distribution(
+            g1, g2, token_emb1, token_emb2, attention_mask, self.model1, self.model2,
+        )
+        
+        L_shared_comp1 = complement_loss(h_shared_comp1, h_a1, null_vec1, self.use_null_target, tau)
+
+        # Losses
+        L_s1 = sparsity_loss(g1, attention_mask)
+        L_tv1 = total_variation_1d(g1, attention_mask)
+
+        L_s2 = sparsity_loss(g2, attention_mask)
+        L_tv2 = total_variation_1d(g2, attention_mask)
+
+        L_rat1 = nt_xent(h_shared_rat1, h_a1, temperature=tau)
+        #L_rat2 = nt_xent(h_shared_rat_2, h_a2, temperature=tau)
+
+        # Symmetric KL loss that pushes gates toward complementary behaviour
+        alpha1, beta1 = out1["alpha"], out1["beta"]
+        alpha2, beta2 = out2["alpha"], out2["beta"]
+        L_kl = kl_loss(g1, g2, alpha1, beta1, alpha2, beta2)
+        
+        loss = L_rat1 + l_comp * L_shared_comp1 + \
+            ls_1 * L_s1 + l_tv * L_tv1 \
+            + ls_2 * L_s2 + l_tv * L_tv2 \
+            + l_kl * L_kl
+
+        #loss = L_rat1 + l_comp * L_shared_comp1 + ls_1 * L_s1 + l_tv * L_tv1 + + kl_weight * kl_loss \
+        #    + (L_rat2 + l_comp * L_comp2 + ls_2 * L_s2 + l_tv * L_tv2)
+
+        return loss, L_kl
 
     def train_epoch(self, loader, epoch):
         tau = self.cfg.model.loss.tau
@@ -134,7 +193,6 @@ class Trainer:
             # Forward pass model1
             out1 = self.model1(embeddings, attention_mask, incoming, outgoing)
             h_a1, h_r1, h_c1, g1 = out1["h_anchor"], out1["h_rat"], out1["h_comp"], out1["gates"]
-            token_emb1 = out1["token_embeddings"]
 
             null_vec1 = out1["null"] if self.use_null_target else None
             L_comp1 = complement_loss(h_c1, h_a1, null_vec1, self.use_null_target, tau)
@@ -142,68 +200,9 @@ class Trainer:
             L_tv1 = total_variation_1d(g1, attention_mask)
 
             if self.model2:
-                out2 = self.model2(embeddings, attention_mask, incoming, outgoing)
-                h_a2, h_r2, h_c2, g2 = out2["h_anchor"], out2["h_rat"], out2["h_comp"], out2["gates"]
-                token_emb2 = out2["token_embeddings"]
-
-                null_vec2 = out2["null"] if self.use_null_target else None
-                L_comp2 = complement_loss(h_c2, h_a2, null_vec2, self.use_null_target, tau)
-                L_s2 = sparsity_loss(g2, attention_mask)
-                L_tv2 = total_variation_1d(g2, attention_mask)
-
-                # Union rationale gate used for correlation
-                shared_gate = 1.0 - (1.0 - g1) * (1.0 - g2)
-                shared_gate = torch.clamp(shared_gate, 1e-6, 1.0)
-                shared_mask = attention_mask * shared_gate
-
-                h_shared1 = self.model1.pooler({
-                    "token_embeddings": token_emb1,
-                    "attention_mask": shared_mask,
-                })["sentence_embedding"]
-                h_shared2 = self.model2.pooler({
-                    "token_embeddings": token_emb2,
-                    "attention_mask": shared_mask,
-                })["sentence_embedding"]
-                if hasattr(self.model1, "fourier"):
-                    h_shared1 = self.model1.fourier(h_shared1)
-                if hasattr(self.model2, "fourier"):
-                    h_shared2 = self.model2.fourier(h_shared2)
-
-                L_rat1 = nt_xent(h_shared1, h_a1, temperature=tau)
-                L_rat2 = nt_xent(h_shared2, h_a2, temperature=tau)
-
-                # Symmetric KL loss that pushes gates toward complementary behaviour
-                kl_weight = self.cfg.model.dual.kl_weight
-                g1_soft = torch.clamp(g1, 1e-6, 1 - 1e-6)
-                g2_soft = torch.clamp(g2, 1e-6, 1 - 1e-6)
-                g1_comp = torch.clamp(1.0 - g1, 1e-6, 1 - 1e-6)
-                g2_comp = torch.clamp(1.0 - g2, 1e-6, 1 - 1e-6)
-
-                alpha1, beta1 = out1["alpha"], out1["beta"]
-                alpha2, beta2 = out2["alpha"], out2["beta"]
-
-                # KL(K(a1,b1) || distribution of 1 - g2)
-                log_p1 = kumaraswamy_log_pdf(g1_soft, alpha1, beta1)
-                log_q1 = kumaraswamy_log_pdf(g1_comp, alpha2, beta2)
-                kl_1_2 = (log_p1 - log_q1).sum(dim=1).mean()
-
-                # KL(K(a2,b2) || distribution of 1 - g1)
-                log_p2 = kumaraswamy_log_pdf(g2_soft, alpha2, beta2)
-                log_q2 = kumaraswamy_log_pdf(g2_comp, alpha1, beta1)
-                kl_2_1 = (log_p2 - log_q2).sum(dim=1).mean()
-
-                kl_loss = 0.5 * (kl_1_2 + kl_2_1)
-                total_kl_loss += kl_loss.item() * embeddings.size(0)
-                
-                ls_1 = self.cfg.model.dual.ls_1
-                ls_2 = self.cfg.model.dual.ls_2
-
-                loss = (
-                    (L_rat1 + l_comp * L_comp1 + ls_1 * L_s1 + l_tv * L_tv1)
-                    + (L_rat2 + l_comp * L_comp2 + ls_2 * L_s2 + l_tv * L_tv2)
-                    + kl_weight * kl_loss
-                )
+                loss, L_kl = self.train_dual(embeddings, attention_mask, incoming, outgoing)
                 params = list(self.model1.parameters()) + list(self.model2.parameters())
+                total_kl_loss += L_kl.item() * embeddings.size(0)
             else:
                 L_rat1 = nt_xent(h_r1, h_a1, temperature=tau)
                 loss = L_rat1 + l_comp * L_comp1 + l_s * L_s1 + l_tv * L_tv1

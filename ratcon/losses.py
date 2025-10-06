@@ -43,3 +43,21 @@ def kumaraswamy_log_pdf(x, alpha, beta, eps=1e-6):
         + (alpha - 1.0) * torch.log(x)
         + (beta - 1.0) * torch.log1p(-x_pow_alpha)
     )
+
+def kl_loss(g1, g2, alpha1, beta1, alpha2, beta2):
+    g1_soft = torch.clamp(g1, 1e-6, 1 - 1e-6)
+    g2_soft = torch.clamp(g2, 1e-6, 1 - 1e-6)
+    g1_comp = torch.clamp(1.0 - g1, 1e-6, 1 - 1e-6)
+    g2_comp = torch.clamp(1.0 - g2, 1e-6, 1 - 1e-6)
+
+    # KL(K(a1,b1) || distribution of 1 - g2)
+    log_p1 = kumaraswamy_log_pdf(g1_soft, alpha1, beta1)
+    log_q1 = kumaraswamy_log_pdf(g1_comp, alpha2, beta2)
+    kl_1_2 = (log_p1 - log_q1).sum(dim=1).mean()
+
+    # KL(K(a2,b2) || distribution of 1 - g1)
+    log_p2 = kumaraswamy_log_pdf(g2_soft, alpha2, beta2)
+    log_q2 = kumaraswamy_log_pdf(g2_comp, alpha1, beta1)
+    kl_2_1 = (log_p2 - log_q2).sum(dim=1).mean()
+
+    return 0.5 * (kl_1_2 + kl_2_1)

@@ -1,3 +1,8 @@
+import torch, spacy, re, string
+from tqdm import tqdm
+from sklearn.metrics import precision_recall_fscore_support
+from .metrics import summarize_word_stats
+
 def format_gold_spans(ids, tokens, gold_labels, tokenizer):
     """
     Merge subwords and gold labels, then format as bracketed spans for entity words.
@@ -56,13 +61,6 @@ def merge_gold_labels(ids, tokens, gold_labels, tokenizer):
     if buf_labels:
         word_labels.append(1.0 if any(l != 0 for l in buf_labels) else 0.0)
     return word_labels
-# evaluate.py
-
-import torch, spacy
-from tqdm import tqdm
-from .utils import should_disable_tqdm
-from sklearn.metrics import precision_recall_fscore_support
-from .metrics import EvaluationResult, summarize_word_stats
 
 def merge_subwords(ids, tokens, tokenizer):
     # --- Phase 1: merge subwords ---
@@ -135,136 +133,193 @@ def merge_spans(ids, tokens, gates, tokenizer, thresh=0.2):
 
     return " ".join(out_tokens) + "\n"
 
-
-def evaluate(model, data, tok, cfg, logger=None):
-    """
-    Evaluate model by comparing gate activations against gold NER labels (if present).
-    Works with full batches instead of only the first example.
-    """
-    model.eval()
-
-    y_true, y_pred = [], []
-    highlighted_samples = []
-    highlighted_word_stats = []
-    thresh = cfg.eval.thresh
-    num_samples = cfg.eval.samples.num
-
-    # Load spaCy English model
-    spacy_model = getattr(cfg.eval, "spacy_model", "en_core_web_sm")
+def _load_spacy_model(name, logger=None):
     try:
-        nlp = spacy.load(spacy_model)
+        return spacy.load(name)
     except OSError:
-        nlp = None
         if logger:
-            logger.warning(f"spaCy model {spacy_model} not found. Word stats will be skipped.")
+            logger.warning(f"spaCy model {name} not found. Word stats will be skipped.")
+        return None
 
 
-    model_device = next(model.parameters()).device
+def _run_inference_examples(model, data, tok, disable_progress, attention_augment):
+    model.eval()
+    device = next(model.parameters()).device
 
-    logging_cfg = getattr(cfg, "logging", None)
-    disable_progress = should_disable_tqdm(
-        metrics_only=getattr(logging_cfg, "metrics_only", False) if logging_cfg is not None else False
-    )
-
+    examples = []
     with torch.no_grad():
         for batch in tqdm(data, desc="Evaluating: ", disable=disable_progress):
-            embeddings = batch["embeddings"].to(model_device, non_blocking=True)        # [B,L,D]
-            attention_mask = batch["attention_mask"].to(model_device, non_blocking=True) # [B,L]
+            embeddings = batch["embeddings"].to(device, non_blocking=True)
+            attention_mask = batch["attention_mask"].to(device, non_blocking=True)
             input_ids = batch["input_ids"]
             incoming = outgoing = None
-            if cfg.model.attention_augment:
-                incoming = batch["incoming"].to(model_device, non_blocking=True)
-                outgoing = batch["outgoing"].to(model_device, non_blocking=True)
+            if attention_augment:
+                incoming = batch["incoming"].to(device, non_blocking=True)
+                outgoing = batch["outgoing"].to(device, non_blocking=True)
 
             out = model(embeddings, attention_mask, incoming, outgoing)
-            gates = out["gates"].cpu().numpy()      # [B,L]
+            gates_tensor = out["gates"]
+            use_cluster = False
+            if hasattr(model, "get_cluster_info"):
+                info = model.get_cluster_info()
+                if info:
+                    use_cluster = True
+            if use_cluster:
+                gates_tensor = model.apply_cluster_filter(
+                    out["token_embeddings"],
+                    gates_tensor,
+                    attention_mask,
+                )
+            filtered_gates = gates_tensor.cpu()
 
-            # ---- loop over batch ----
             for i in range(embeddings.size(0)):
                 ids = input_ids[i].cpu().tolist()
-                g   = gates[i]
-                mask = attention_mask[i].cpu().tolist()
-
-                # ---- metrics ----
-                if "ner_tags" in batch:
-                    gold = batch["ner_tags"][i].cpu().tolist()
-                    for gi, lab, m in zip(g, gold, mask):
-                        if m == 0:  # skip padding
-                            continue
-                        y_pred.append(int(gi >= thresh))
-                        y_true.append(int(lab != 0))  # non-O = entity
-
-                # ---- pretty printing ----
                 tokens = tok.convert_ids_to_tokens(ids)
-                pretty = merge_spans(ids, tokens, g, tok, thresh=thresh)
+                mask = attention_mask[i].cpu().tolist()
+                gates = filtered_gates[i].tolist()
+                gold = None
                 if "ner_tags" in batch:
                     gold = batch["ner_tags"][i].cpu().tolist()
-                    orig_pretty = format_gold_spans(ids, tokens, gold, tok)
-                else:
-                    orig_pretty = " ".join(merge_subwords(ids, tokens, tok))
 
-                sample_entry = None
-                if len(highlighted_samples) < num_samples:
-                    sample_entry = {
-                        "original": orig_pretty,
-                        "predicted": pretty.strip(),
+                examples.append(
+                    {
+                        "ids": ids,
+                        "tokens": tokens,
+                        "mask": mask,
+                        "gates": gates,
+                        "gold": gold,
                     }
-
-                if nlp is not None:
-                    import re, string
-
-                    highlighted = re.findall(r'\[\[(.*?)\]\]', pretty)
-                    cleaned_words = []
-                    for span in highlighted:
-                        for word in span.split():
-                            w = word.strip(string.punctuation + string.whitespace)
-                            if w:
-                                cleaned_words.append(w.lower())
-
-                    doc = nlp(" ".join(cleaned_words))
-                    noun_count = sum(1 for t in doc if t.pos_ == "NOUN")
-                    propn_count = sum(1 for t in doc if t.pos_ == "PROPN")
-                    verb_count = sum(1 for t in doc if t.pos_ == "VERB")
-                    conj_count = sum(1 for t in doc if t.tag_ in ["VBD", "VBG", "VBN", "VBP", "VBZ"])
-                    stopword_count = sum(1 for t in doc if t.is_stop)
-                    recognized = noun_count + propn_count + verb_count + conj_count + stopword_count
-                    other = len(doc) - recognized
-                    stats_entry = {
-                        "nouns": noun_count,
-                        "proper_nouns": propn_count,
-                        "verbs": verb_count,
-                        "conjugations": conj_count,
-                        "stopwords": stopword_count,
-                        "other": other,
-                        "total": len(doc),
-                    }
-                    highlighted_word_stats.append(stats_entry)
-                    if sample_entry is not None:
-                        sample_entry["word_stats"] = stats_entry
-
-                if sample_entry is not None:
-                    highlighted_samples.append(sample_entry)
+                )
+    return examples
 
 
+def _collect_samples(
+    examples,
+    tok,
+    thresh,
+    num_samples,
+):
+    samples = []
+    highlights = []
 
-    # ---- metrics summary ----
-    summary = summarize_word_stats(highlighted_word_stats)
+    for example in examples:
+        highlight = merge_spans(example["ids"], example["tokens"], example["gates"], tok, thresh=thresh)
+        if num_samples == 0 or len(highlights) < num_samples:
+            highlights.append(highlight)
 
-    if len(y_true) == 0:
-        return EvaluationResult(
-            metrics=None,
-            samples=highlighted_samples,
-            word_stats=highlighted_word_stats,
-            word_summary=summary,
-        )
+        if num_samples == 0 or len(samples) < num_samples:
+            if example["gold"] is not None:
+                original = format_gold_spans(example["ids"], example["tokens"], example["gold"], tok)
+            else:
+                original = " ".join(merge_subwords(example["ids"], example["tokens"], tok))
+            samples.append({
+                "original": original,
+                "predicted": highlight.strip(),
+            })
+
+    return samples, highlights
+
+
+def _compute_metrics_from_examples(examples, threshold):
+    y_true, y_pred = [], []
+    for example in examples:
+        if example["gold"] is None:
+            continue
+        for gate, lab, mask in zip(example["gates"], example["gold"], example["mask"]):
+            if mask == 0:
+                continue
+            y_pred.append(int(gate >= threshold))
+            y_true.append(int(lab != 0))
+
+    if not y_true:
+        return None
 
     precision, recall, f1, _ = precision_recall_fscore_support(
         y_true, y_pred, average="binary", zero_division=0
     )
-    metrics = {"precision": precision, "recall": recall, "f1": f1}
-    return EvaluationResult(
-        metrics=metrics,
-        samples=highlighted_samples,
-        word_stats=highlighted_word_stats,
-        word_summary=summary,
-    )
+    return {
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
+    }
+
+
+def _compute_word_statistics(
+    highlights,
+    nlp,
+):
+    if nlp is None:
+        return []
+
+    stats = []
+    for highlight in highlights:
+        highlighted = re.findall(r"\[\[(.*?)\]\]", highlight)
+        cleaned_words = []
+        for span in highlighted:
+            for word in span.split():
+                w = word.strip(string.punctuation + string.whitespace)
+                if w:
+                    cleaned_words.append(w.lower())
+
+        if cleaned_words:
+            doc = nlp(" ".join(cleaned_words))
+        else:
+            doc = []
+
+        noun_count = sum(1 for t in doc if getattr(t, "pos_", None) == "NOUN")
+        propn_count = sum(1 for t in doc if getattr(t, "pos_", None) == "PROPN")
+        verb_count = sum(1 for t in doc if getattr(t, "pos_", None) == "VERB")
+        conj_count = sum(
+            1 for t in doc if getattr(t, "tag_", None) in {"VBD", "VBG", "VBN", "VBP", "VBZ"}
+        )
+        stopword_count = sum(1 for t in doc if getattr(t, "is_stop", False))
+        recognized = noun_count + propn_count + verb_count + conj_count + stopword_count
+        total = len(doc)
+        stats.append(
+            {
+                "nouns": noun_count,
+                "proper_nouns": propn_count,
+                "verbs": verb_count,
+                "conjugations": conj_count,
+                "stopwords": stopword_count,
+                "other": total - recognized,
+                "total": total,
+            }
+        )
+
+    return stats
+
+
+def evaluate(
+    model,
+    data,
+    tok,
+    tresh,
+    disable_progress=False,
+    attention_augment=False,
+    thresh=0.5,
+    samples_num=0,
+    spacy_model="en_core_web_sm",
+    logger=None,
+):
+    """High-level evaluation orchestrator."""
+
+    nlp = _load_spacy_model(spacy_model, logger=logger)
+
+    examples = _run_inference_examples(model, data, tok, disable_progress, attention_augment)
+    samples, highlights = _collect_samples(examples, tok, thresh, samples_num)
+    word_stats = _compute_word_statistics(highlights, nlp)
+
+    for idx, sample in enumerate(samples):
+        if idx < len(word_stats):
+            sample["word_stats"] = word_stats[idx]
+
+    metrics = _compute_metrics_from_examples(examples, tresh)
+    word_summary = summarize_word_stats(word_stats)
+
+    return {
+        "metrics": metrics,
+        "samples": samples,
+        "word_stats": word_stats,
+        "word_summary": word_summary
+    }

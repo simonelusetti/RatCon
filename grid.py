@@ -22,15 +22,12 @@ are rendered as a Markdown table printed to stdout and saved to
 `outputs/grid_runs/grid_results_<timestamp>.md`.
 """
 
-from __future__ import annotations
-
 import json
 import re
 import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
 
 import pandas as pd
 import yaml
@@ -44,7 +41,7 @@ from ratcon.utils import should_disable_tqdm
 # ---------------------------------------------------------------------------
 
 CONFIG_PATH = Path("grid.yaml")
-NUM_RUNS: int = 3
+NUM_RUNS = 3
 XP_ROOT = Path("outputs/xps")
 RUNS_DIR = Path("outputs/grid_runs")
 
@@ -56,10 +53,8 @@ HISTORY_POLL_RETRIES = 5
 # ---------------------------------------------------------------------------
 # YAML loading
 # ---------------------------------------------------------------------------
-
-
-def _ensure_str_list(values: Sequence[object]) -> List[str]:
-    tokens: List[str] = []
+def _ensure_str_list(values):
+    tokens = []
     for item in values:
         if item is None:
             continue
@@ -72,9 +67,7 @@ def _ensure_str_list(values: Sequence[object]) -> List[str]:
             if token:
                 tokens.append(token)
     return tokens
-
-
-def load_config(path: Path) -> tuple[List[str], List[List[str]]]:
+def load_config(path):
     if not path.exists():
         raise FileNotFoundError(f"Config file not found: {path}")
 
@@ -84,9 +77,9 @@ def load_config(path: Path) -> tuple[List[str], List[List[str]]]:
     baseline_raw = data.get("baseline", [])
     sweep_raw = data.get("sweep", [])
 
-    baseline = _ensure_str_list(baseline_raw if isinstance(baseline_raw, Sequence) else [baseline_raw])
+    baseline = _ensure_str_list(baseline_raw if isinstance(baseline_raw, (list, tuple)) else [baseline_raw])
 
-    sweep: List[List[str]] = []
+    sweep = []
     for entry in sweep_raw:
         if isinstance(entry, (list, tuple)):
             tokens = _ensure_str_list(entry)
@@ -106,9 +99,7 @@ def load_config(path: Path) -> tuple[List[str], List[List[str]]]:
 # ---------------------------------------------------------------------------
 # Metrics helpers
 # ---------------------------------------------------------------------------
-
-
-def load_metrics_from_history(signature: str) -> Optional[Dict[str, float]]:
+def load_metrics_from_history(signature):
     history_path = XP_ROOT / signature / "history.json"
     for _ in range(HISTORY_POLL_RETRIES):
         if history_path.exists():
@@ -118,8 +109,8 @@ def load_metrics_from_history(signature: str) -> Optional[Dict[str, float]]:
                 except json.JSONDecodeError:
                     history = None
             if isinstance(history, list) and history:
-                summary_metrics: Dict[str, float] = {}
-                last_metrics: Dict[str, float] = {}
+                summary_metrics = {}
+                last_metrics = {}
 
                 for entry in reversed(history):
                     if not isinstance(entry, dict):
@@ -145,7 +136,7 @@ def load_metrics_from_history(signature: str) -> Optional[Dict[str, float]]:
                     if summary_metrics and last_metrics:
                         break
 
-                combined: Dict[str, float] = {}
+                combined = {}
                 if last_metrics:
                     combined.update({f"final_{k}": v for k, v in last_metrics.items()})
                 combined.update(summary_metrics)
@@ -155,26 +146,24 @@ def load_metrics_from_history(signature: str) -> Optional[Dict[str, float]]:
         time.sleep(HISTORY_POLL_DELAY)
     print(f"⚠️ Unable to read metrics for experiment {signature}")
     return None
-
-
-def average_metrics(metric_dicts: Iterable[Dict[str, float]]) -> Dict[str, Optional[float]]:
+def average_metrics(metric_dicts):
     metric_dicts = list(metric_dicts)
     if not metric_dicts:
         return {}
     keys = sorted({k for d in metric_dicts for k in d})
-    averages: Dict[str, Optional[float]] = {}
+    averages = {}
     for key in keys:
         values = [d[key] for d in metric_dicts if key in d and d[key] is not None]
         averages[key] = sum(values) / len(values) if values else None
     return averages
 
 
-def format_setting(overrides: Sequence[str]) -> str:
+def format_setting(overrides):
     return " ".join(overrides) if overrides else "<no overrides>"
 
 
-def run_and_capture_signature(cmd: List[str], pbar: tqdm) -> str:
-    signature: Optional[str] = None
+def run_and_capture_signature(cmd, pbar):
+    signature = None
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -210,7 +199,7 @@ def run_and_capture_signature(cmd: List[str], pbar: tqdm) -> str:
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
+def main():
     try:
         baseline, sweep = load_config(CONFIG_PATH)
     except (FileNotFoundError, ValueError) as exc:
@@ -220,7 +209,7 @@ def main() -> None:
     XP_ROOT.mkdir(parents=True, exist_ok=True)
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
-    summary_rows: List[Dict[str, object]] = []
+    summary_rows = []
 
     total_runs = len(sweep) * NUM_RUNS
     disable_progress = should_disable_tqdm()
@@ -235,7 +224,7 @@ def main() -> None:
             pbar.write(f"Baseline overrides: {baseline}")
             pbar.write(f"Sweep overrides   : {overrides}")
 
-            per_run_metrics: List[Dict[str, float]] = []
+            per_run_metrics = []
             failures = 0
 
             for _ in range(NUM_RUNS):
@@ -264,7 +253,7 @@ def main() -> None:
                 pbar.update(1)
 
             avg_metrics = average_metrics(per_run_metrics)
-            row: Dict[str, object] = {
+            row = {
                 "setting": setting_label,
                 "runs": len(per_run_metrics),
                 "failures": failures,

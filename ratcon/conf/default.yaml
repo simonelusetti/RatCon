@@ -25,6 +25,15 @@ model:
     lr_adv: 5e-5
     weight_decay_adv: 1e-2
     betas: [0.9, 0.999]
+  clustering:
+    use: False
+    show_details: False
+    proposal_thresh: 0.5
+    num_clusters: 2
+    max_tokens: -1
+    iters: 25
+    tol: 1e-4
+    seed: 42
 
 data:
   rebuild_ds: False
@@ -47,14 +56,27 @@ train:
   grad_clip: 1.0
 
 eval:
-  per_sentence_stats: False
   eval_only: False
   verbose: False
   thresh: 0.5
-  samples:
-    num: 10
-    show: True
   spacy_model: "en_core_web_sm"
+  report:
+    epoch:
+      metrics: False
+      summary: False
+      clustering: False
+      samples:
+        num: 10
+        show: False
+        per_sentence_stats: False
+    final:
+      metrics: False
+      summary: False
+      clustering: False
+      samples:
+        num: 10
+        show: False
+        per_sentence_stats: False
 
 device: "cuda"
 

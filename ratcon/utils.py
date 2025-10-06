@@ -1,6 +1,6 @@
 import os, sys, torch
 
-def should_disable_tqdm(*, metrics_only: bool = False) -> bool:
+def should_disable_tqdm(*, metrics_only=False):
     """Return True when tqdm progress bars should be disabled."""
     if metrics_only:
         return True

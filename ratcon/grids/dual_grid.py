@@ -4,8 +4,6 @@ Runs hyper-parameter sweeps via Slurm using the defaults declared in the Hydra
 configuration (`slurm` section).
 """
 
-from __future__ import annotations
-
 from dora import Explorer, Launcher
 import treetable as tt
 
@@ -44,7 +42,7 @@ class RatConExplorer(Explorer):
 
 
 @RatConExplorer
-def explorer(launcher: Launcher):
+def explorer(launcher):
     launcher = launcher.bind({
         "data.train.subset": 0.1,
         "model.dual.use":True,

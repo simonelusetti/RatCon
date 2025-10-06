@@ -1,5 +1,4 @@
-import os
-import torch
+import os, torch, datetime
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from .utils import (
@@ -14,10 +13,9 @@ from .data import get_dataset, collate
 from .losses import complement_loss, kl_loss, sparsity_loss, total_variation_1d
 from .evaluate import evaluate
 from .metrics import (
-    EvaluationResult,
-    build_evaluation_payload,
-    log_evaluation_result,
-    render_metrics_table,
+    build_report,
+    log_report,
+    render_reports_table,
 )
 from dora import get_xp, hydra_main
 
@@ -37,6 +35,7 @@ class Trainer:
         self.use_dual = cfg.model.dual.use
         self.use_null_target = getattr(cfg.model.loss, "use_null_target", False)
         self.model1, self.model2, self.optimizer = self.build_models_and_optimizer()
+        self.cluster_metadata = {}
 
     def _load_or_initialize_model(self, model, path, label):
         if model is None:
@@ -58,23 +57,6 @@ class Trainer:
     def _iter_model_specs(self):
         for label, model in self._iter_models():
             yield label, model, self.model_paths[label]
-
-    def _evaluate_models(self, xp, eval_dl, tok, per_sentence_stats, avg, avg_kl, epoch_idx):
-        results = {}
-        with torch.no_grad():
-            for label, model in self._iter_models():
-                results[label] = self.eval(
-                    xp,
-                    model,
-                    eval_dl,
-                    tok,
-                    per_sentence_stats,
-                    model_label=label,
-                    avg=avg,
-                    avg_kl=avg_kl,
-                    log_prefix=f"epoch {epoch_idx}",
-                )
-        return results
 
     def _format_checkpoint_names(self):
         paths = sorted(self.model_paths.values())
@@ -113,7 +95,7 @@ class Trainer:
         )
 
         return model1, model2, optimizer
-    
+
     def train_dual(self, embeddings, attention_mask, incoming, outgoing):
         # Params
         l_comp, l_tv = self.cfg.model.loss.l_comp, self.cfg.model.loss.l_tv,
@@ -218,61 +200,51 @@ class Trainer:
 
         return total / len(loader.dataset), total_kl_loss / len(loader.dataset) if self.model2 else None
 
-    def eval(
-        self,
-        xp,
-        model,
-        eval_dl,
-        tok,
-        per_sentence_stats=False,
-        model_label="model",
-        avg=None,
-        avg_kl=None,
-        log_prefix=None,
-    ) -> EvaluationResult:
-        import datetime
+    def _fit_cluster_filter(self, model, train_dl, label):
+        cluster_metadata = model.fit_cluster_filter_from_loader(
+            train_dl,
+            self.cfg.model.clustering,
+            logger=self.logger,
+            label=label,
+        )
+        self.cluster_metadata[label] = cluster_metadata
+        
+        
+    def make_report(self, model, eval_dl, tok, label, report_cfg):
+        logging_cfg = getattr(self.cfg, "logging", None)
+        disable_progress = should_disable_tqdm(
+            metrics_only=getattr(logging_cfg, "metrics_only", False) if logging_cfg is not None else False
+        )
 
-        dataset_name = self.cfg.data.eval.dataset
-        result = evaluate(
+        samples_cfg = getattr(report_cfg, "samples", None)
+        samples_num = getattr(samples_cfg, "num", 0) if samples_cfg is not None else 0
+
+        evaluation = evaluate(
             model,
             eval_dl,
             tok,
-            cfg=self.cfg,
+            self.cfg.eval.thresh,
+            disable_progress=disable_progress,
+            attention_augment=getattr(self.cfg.model, "attention_augment", False),
+            thresh=self.cfg.eval.thresh,
+            samples_num=samples_num,
+            spacy_model=getattr(self.cfg.eval, "spacy_model", "en_core_web_sm"),
             logger=self.logger,
         )
 
-        timestamp = datetime.datetime.now().isoformat()
-        extra = {}
-        if avg is not None:
-            extra["avg_train_loss"] = avg
-        if avg_kl is not None:
-            extra["avg_train_kl"] = avg_kl
-        payload = build_evaluation_payload(
-            dataset_name,
-            model_label,
-            result,
-            timestamp=timestamp,
-            extra=extra or None,
-        )
-        xp.link.push_metrics(payload)
+        cluster_info = None
+        clustering_cfg = getattr(self.cfg.model, "clustering", None)
+        if clustering_cfg and getattr(clustering_cfg, "use", False):
+            cluster_info = self.cluster_metadata.get(label)
 
-        log_evaluation_result(
-            self.logger,
-            dataset_name,
-            model_label,
-            result,
-            prefix=log_prefix,
-            show_samples=self.cfg.eval.samples.show,
-            per_sentence_stats=per_sentence_stats,
-        )
+        return build_report(evaluation, cluster_info)
 
-        return result
 
-    def train(self, train_dl, eval_dl, tok, xp, per_sentence_stats=False):
+    def train(self, train_dl, eval_dl, tok, xp):
         best_f1 = float('-inf')
         best_epoch = None
-        best_metrics = {}
-        best_model_name = None
+        best_model_label = "model"
+        best_report = None
 
         for epoch in range(self.cfg.train.epochs):
             avg, avg_kl = self.train_epoch(train_dl, epoch)
@@ -280,103 +252,67 @@ class Trainer:
                 self.logger.info(f"epoch {epoch + 1}: train_loss={avg:.4f}, kl_loss={avg_kl:.4f}")
             else:
                 self.logger.info(f"epoch {epoch + 1}: train_loss={avg:.4f}")
+                
+            reports = {}
+            with torch.no_grad():
+                for label, model in self._iter_models():
+                    if self.cfg.model.clustering.use:
+                        self._fit_cluster_filter(model, train_dl, label)
+                    report = self.make_report(model, eval_dl, tok, label, self.cfg.eval.report.epoch)
+                    log_report(self.logger, report, report_cfg=self.cfg.eval.report.epoch, report_name="Epoch "+str(epoch+1)+" "+label)
+                    xp.link.push_metrics({f"eval/{epoch}/{label}/{self.cfg.data.eval.dataset}": report})
+                    reports[label] = report
 
-            eval_results = self._evaluate_models(
-                xp, eval_dl, tok, per_sentence_stats, avg, avg_kl, epoch + 1
-            )
-
-            table = render_metrics_table(
-                eval_results,
-                dataset=self.cfg.data.eval.dataset,
+            table = render_reports_table(
+                reports,
+                eval_cfg=self.cfg.eval,
                 precision=4,
             )
             self.logger.info(table)
 
             best_label_epoch = None
-            best_metrics_epoch = None
             best_f1_epoch = float('-inf')
-            for label, result in eval_results.items():
-                metrics = result.metrics or {}
-                f1_value = metrics.get('f1')
-                if f1_value is None:
-                    continue
-                if f1_value > best_f1_epoch:
-                    best_f1_epoch = f1_value
-                    best_label_epoch = label
-                    best_metrics_epoch = metrics
+            for label, report in reports.items():
+                f1 = report.get("metrics").get('f1')
 
-            if best_label_epoch is None:
-                continue
+                if f1 > best_f1_epoch:
+                    best_f1_epoch = f1
+                    best_label_epoch = label
 
             if best_f1_epoch > best_f1:
                 best_f1 = best_f1_epoch
                 best_epoch = epoch + 1
-                best_metrics = best_metrics_epoch or {}
                 if self.use_dual:
-                    best_model_name = best_label_epoch
-                message = (
+                    best_model_label = best_label_epoch
+                    best_report = reports[best_model_label]
+                self.logger.info(
                     f"New best F1: {best_f1:.4f}, saving model(s) to {self._format_checkpoint_names()}"
                 )
-                self.logger.info(message)
                 for _, model, path in self._iter_model_specs():
                     torch.save(model.state_dict(), path)
 
-        if best_f1 == float('-inf'):
-            best_f1 = float('nan')
-        self.logger.info(
-            f"Best metrics at epoch {best_epoch if best_epoch is not None else 'n/a'}: {best_metrics}"
-        )
-        if self.use_dual and best_model_name is not None:
-            self.logger.info(f"Best-performing model: {best_model_name}")
+        self.logger.info(f"Best model: {best_model_label} at epoch {best_epoch} with F1 {best_f1:.4f}")
+        self.logger.info(f"Best report: {best_report}")
+        report = self.make_report(model, eval_dl, tok, best_model_label, self.cfg.eval.report.final)
+        log_report(self.logger, report, report_cfg=self.cfg.eval.report.final, report_name="Final best "+best_model_label)
+        xp.link.push_metrics({f"eval/{epoch}/{label}/{self.cfg.data.eval.dataset}": report})
+        
+        return best_report, best_model_label
 
-        summary = {
-            "best_epoch": best_epoch,
-            "best_f1": best_f1,
-            "best_metrics": best_metrics,
-        }
-        if self.use_dual:
-            summary["best_model"] = best_model_name
 
-        try:
-            xp.link.push_metrics({"summary": summary})
-        except Exception as ex:
-            self.logger.warning(f"Could not push summary metrics: {ex}")
+    def evaluate(self, eval_dl, tok):
+        reports = {}
+        for label, model in self._iter_models():
+            report = self.make_report(model, eval_dl, tok, label, self.cfg.eval.report.final)
+            reports[label] = report
 
-        return summary
-
-    def eval_only(self, eval_dl, tok, xp, per_sentence_stats=False):
-        results = {}
-        if self.use_dual:
-            for label, model in self._iter_models():
-                self.logger.info(f"Eval-only mode: evaluating {label}")
-                results[label] = self.eval(
-                    xp,
-                    model,
-                    eval_dl,
-                    tok,
-                    per_sentence_stats,
-                    model_label=label,
-                    log_prefix="eval-only",
-                )
-        else:
-            self.logger.info("Eval-only mode: evaluating model")
-            results["model"] = self.eval(
-                xp,
-                self.model1,
-                eval_dl,
-                tok,
-                per_sentence_stats,
-                model_label="model",
-                log_prefix="eval-only",
-            )
-
-        table = render_metrics_table(
-            results,
-            dataset=self.cfg.data.eval.dataset,
+        table = render_reports_table(
+            reports,
+            eval_cfg=self.cfg.eval,
             precision=4,
         )
+        
         self.logger.info(table)
-
 
 
 # -------------------------------------------------------------------
@@ -434,7 +370,6 @@ def main(cfg):
     # Train or eval
     trainer = Trainer(cfg, logger)
     if cfg.eval.eval_only:
-        trainer.eval_only(eval_dl, tok, xp, cfg.eval.per_sentence_stats)
+        trainer.evaluate(eval_dl, tok)
     else:
-        summary = trainer.train(train_dl, eval_dl, tok, xp, cfg.eval.per_sentence_stats)
-        logger.info(f"Training summary: {summary}")
+        trainer.train(train_dl, eval_dl, tok, xp)   

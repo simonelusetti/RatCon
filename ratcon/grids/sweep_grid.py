@@ -1,9 +1,6 @@
 """Dora grid definition that mirrors the local YAML-driven sweep."""
 
-from __future__ import annotations
-
 from pathlib import Path
-from typing import Iterable, List
 
 import treetable as tt
 import yaml
@@ -11,9 +8,8 @@ from dora import Explorer, Launcher
 
 CONFIG_PATH = Path(__file__).resolve().parents[2] / "grid.yaml"
 
-
-def _ensure_str_list(values: Iterable[object]) -> List[str]:
-    tokens: List[str] = []
+def _ensure_str_list(values):
+    tokens = []
     for item in values:
         if item is None:
             continue
@@ -26,9 +22,7 @@ def _ensure_str_list(values: Iterable[object]) -> List[str]:
             if token:
                 tokens.append(token)
     return tokens
-
-
-def load_yaml_sweep(path: Path) -> tuple[List[str], List[List[str]]]:
+def load_yaml_sweep(path):
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
     baseline_raw = data.get("baseline", [])
@@ -38,7 +32,7 @@ def load_yaml_sweep(path: Path) -> tuple[List[str], List[List[str]]]:
         baseline_raw if isinstance(baseline_raw, (list, tuple)) else [baseline_raw]
     )
 
-    sweep: List[List[str]] = []
+    sweep = []
     for entry in sweep_raw:
         if isinstance(entry, (list, tuple)):
             tokens = _ensure_str_list(entry)
@@ -89,7 +83,7 @@ class YAMLExplorer(Explorer):
 
 
 @YAMLExplorer
-def explorer(launcher: Launcher):
+def explorer(launcher):
     baseline, sweep = load_yaml_sweep(CONFIG_PATH)
 
     configured_launcher = launcher.bind(baseline) if baseline else launcher

@@ -5,6 +5,9 @@ import torch.nn.functional as F
 import torch.fft
 from transformers import AutoModel
 from sentence_transformers import SentenceTransformer
+from tqdm import tqdm
+
+from .utils import should_disable_tqdm
 
 EPS = 1e-8
 
@@ -80,6 +83,169 @@ class Selector(nn.Module):
         beta  = (self.softplus(beta)  + 1.0).clamp(1.0, 10.0)
         return alpha, beta
 
+class ClusterFilter:
+    def __init__(self):
+        self.centroids = None
+        self.counts = None
+        self.entity_cluster = None
+        self.token_count = None
+        self.metadata = {}
+
+    def info(self):
+        if self.centroids is None or self.entity_cluster is None:
+            return None
+        counts_list = self.counts.detach().cpu().tolist() if self.counts is not None else None
+        payload = {
+            "tokens": self.token_count,
+            "cluster_counts": counts_list,
+            "entity_cluster": self.entity_cluster,
+        }
+        payload.update(self.metadata)
+        return payload
+
+    def fit_from_loader(
+        self,
+        model,
+        loader,
+        cluster_cfg,
+        *,
+        logger=None,
+        label="model",
+    ):
+        if cluster_cfg is None or not getattr(cluster_cfg, "use", False):
+            self.centroids = None
+            self.counts = None
+            self.entity_cluster = None
+            self.token_count = None
+            self.metadata = {}
+            return None
+
+        threshold = float(cluster_cfg.proposal_thresh)
+        max_tokens = int(cluster_cfg.max_tokens)
+        num_clusters = int(cluster_cfg.num_clusters)
+        num_iters = int(cluster_cfg.iters)
+        tol = float(cluster_cfg.tol)
+        seed = int(cluster_cfg.seed)
+
+        if num_clusters <= 0:
+            if logger:
+                logger.warning("Cluster config: num_clusters <= 0; skipping filter")
+            return None
+
+        collected = []
+        total = 0
+        device = next(model.parameters()).device
+        model.eval()
+
+        disable_progress = should_disable_tqdm()
+        desc = f"Collecting gates for {label}"
+        with torch.no_grad():
+            for batch in tqdm(loader, desc=desc, disable=disable_progress):
+                batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
+                embeddings = batch["embeddings"]
+                attention_mask = batch["attention_mask"]
+                incoming = batch.get("incoming") if model.cfg.attention_augment else None
+                outgoing = batch.get("outgoing") if model.cfg.attention_augment else None
+
+                out = model(embeddings, attention_mask, incoming, outgoing)
+                gates = out["gates"]
+                valid = attention_mask > 0
+                mask = (gates >= threshold) & valid
+
+                if not mask.any():
+                    continue
+
+                selected = out["token_embeddings"][mask]
+                if selected.ndim == 1:
+                    selected = selected.unsqueeze(0)
+
+                collected.append(selected.cpu())
+                total += selected.size(0)
+                if total >= max_tokens and max_tokens > 0:
+                    break
+
+        if not collected:
+            if logger:
+                logger.warning(
+                    f"Insufficient gated tokens to fit clusters for {label}; skipping filter"
+                )
+            return None
+
+        features = torch.cat(collected, dim=0)
+        if features.size(0) > max_tokens and max_tokens > 0:
+            generator = torch.Generator(device="cpu")
+            generator.manual_seed(seed)
+            perm = torch.randperm(features.size(0), generator=generator)[:max_tokens]
+            features = features[perm]
+
+        features = features.to(dtype=torch.float32)
+        num_clusters = min(num_clusters, features.size(0))
+        if num_clusters < 1:
+            if logger:
+                logger.warning(f"Need at least one cluster for {label}; skipping filter")
+            return None
+
+        generator = torch.Generator(device=features.device)
+        generator.manual_seed(seed)
+        perm_init = torch.randperm(features.size(0), generator=generator)
+        centroids = features[perm_init[:num_clusters]].clone()
+        for _ in range(max(1, num_iters)):
+            distances = torch.cdist(features, centroids)
+            assignments = distances.argmin(dim=1)
+            new_centroids = []
+            for idx in range(num_clusters):
+                mask = assignments == idx
+                if mask.any():
+                    new_centroids.append(features[mask].mean(dim=0))
+                else:
+                    new_centroids.append(centroids[idx])
+            new_centroids = torch.stack(new_centroids)
+            shift = (new_centroids - centroids).abs().max().item()
+            centroids = new_centroids
+            if shift <= tol:
+                break
+
+        distances = torch.cdist(features, centroids)
+        assignments = distances.argmin(dim=1)
+        counts = torch.bincount(assignments, minlength=num_clusters)
+        entity_cluster = int(counts.argmax().item())
+
+        self.centroids = centroids.detach().to(device)
+        self.counts = counts.detach().to(device)
+        self.entity_cluster = entity_cluster
+        self.token_count = int(features.size(0))
+        self.metadata = {
+            "proposal_thresh": threshold,
+            "num_clusters": int(cluster_cfg.num_clusters),
+        }
+
+        if logger:
+            logger.info(
+                f"Cluster filter for {label}: tokens={self.token_count}, "
+                f"counts={self.counts.cpu().tolist()}, entity_cluster={entity_cluster}"
+            )
+
+        return self.info()
+
+    def apply(
+        self,
+        token_embeddings,
+        gates,
+        attention_mask,
+    ):
+        if self.centroids is None or self.entity_cluster is None:
+            return gates
+
+        centroids = self.centroids.to(token_embeddings.device)
+        flat = token_embeddings.reshape(-1, token_embeddings.size(-1))
+        distances = torch.cdist(flat, centroids)
+        assignments = distances.argmin(dim=1)
+        assignments = assignments.view(token_embeddings.shape[:-1])
+        entity_mask = assignments.eq(self.entity_cluster).float()
+        entity_mask = entity_mask * attention_mask.float()
+        return gates * entity_mask
+
+
 class RationaleSelectorModel(nn.Module):
     """
     Inputs are already SBERT token embeddings.
@@ -105,7 +271,9 @@ class RationaleSelectorModel(nn.Module):
         with torch.no_grad():
             null_emb = self.sbert.encode([""], convert_to_tensor=True)
         self.register_buffer("null_embedding", null_emb.squeeze(0))
-        
+
+        self.cluster_filter = ClusterFilter()
+
 
     def forward(self, embeddings, attention_mask, incoming=None, outgoing=None):
         if self.cfg.attention_augment:
@@ -143,6 +311,35 @@ class RationaleSelectorModel(nn.Module):
             "null": null_vec,
             "token_embeddings": embeddings,
         }
+
+    def apply_cluster_filter(
+        self,
+        token_embeddings,
+        gates,
+        attention_mask,
+    ):
+        return self.cluster_filter.apply(token_embeddings, gates, attention_mask)
+
+    def get_cluster_info(self):
+        return self.cluster_filter.info()
+
+    def fit_cluster_filter_from_loader(
+        self,
+        loader,
+        cluster_cfg,
+        *,
+        logger=None,
+        label="model",
+    ):
+        return self.cluster_filter.fit_from_loader(
+            self,
+            loader,
+            cluster_cfg,
+            logger=logger,
+            label=label,
+        )
+
+
 
 
 def nt_xent(anchor, positive, temperature=0.07):

@@ -1,13 +1,10 @@
 """Dataset caching helpers for RatCon sweeps."""
 
-from __future__ import annotations
-
 import argparse
 import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterable
 
 __all__ = [
     "cache_datasets",
@@ -15,14 +12,13 @@ __all__ = [
     "main",
 ]
 
-
-def repo_root() -> Path:
+def repo_root():
     """Return the absolute path to the repository root."""
 
     return Path(__file__).resolve().parent.parent
 
 
-def ensure_repo_on_path() -> Path:
+def ensure_repo_on_path():
     """Ensure imports resolve relative to the repo root and set cwd."""
 
     root = repo_root()
@@ -32,20 +28,16 @@ def ensure_repo_on_path() -> Path:
     if root_str not in sys.path:
         sys.path.insert(0, root_str)
     return root
-
-
-def _normalize_subset(subset: float | int | None) -> float | int | None:
+def _normalize_subset(subset):
     if subset is None:
         return None
     if subset <= 0:
         raise ValueError("subset must be positive when provided")
     return subset
-
-
-def cache_datasets(*, subset: float | int | None = 1.0, rebuild: bool = True,
-                   cnn_splits: Iterable[str] | None = None,
-                   wiki_splits: Iterable[str] | None = None,
-                   include: Iterable[str] | None = None) -> None:
+def cache_datasets(*, subset=1.0, rebuild=True,
+                   cnn_splits=None,
+                   wiki_splits=None,
+                   include=None):
     """Materialise dataset caches used by RatCon grid sweeps."""
 
     from ratcon.data import get_dataset  # import after path setup
@@ -68,9 +60,7 @@ def cache_datasets(*, subset: float | int | None = 1.0, rebuild: bool = True,
             get_dataset(name="wikiann", split=split, rebuild=rebuild)
 
     print("Dataset caching complete.", flush=True)
-
-
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--subset", type=float, default=1.0,
                         help="Fraction (<=1) or absolute count of CNN train examples to keep (default: full train set).")
@@ -90,13 +80,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Grid name to restart when --rerun-grid is used (default: grid).")
     parser.set_defaults(rebuild=True)
     return parser.parse_args(argv)
-
-
-def main(argv: list[str] | None = None) -> None:
+def main(argv=None):
     args = parse_args(argv)
     ensure_repo_on_path()
 
-    targets: set[str] = set()
+    targets = set()
     if not args.skip_cnn:
         targets.add("cnn")
     if not args.skip_wiki:

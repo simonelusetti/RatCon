@@ -45,4 +45,26 @@ class RatConExplorer(Explorer):
 
 @RatConExplorer
 def explorer(launcher: Launcher):
-    launcher({"data.train.subset": 0.1, "train.epochs":10})
+    launcher = launcher.bind({
+        "data.train.subset":1.0,
+        "data.train.dataset":"wikiann"
+    })
+
+    for i in [0,1,2]:
+        launcher({
+            "array":i
+        })
+    
+    """
+    with launcher.job_array():
+        for l_comp in [0.1, 1.0, 10.0]:
+            for l_s in [0.1, 1.0, 10.0]:
+                for l_tv in [0.1, 1.0, 10.0]:
+                    for i in [0,1,2]:
+                        launcher({
+                            "model.loss.l_comp": l_comp,
+                            "model.loss.l_s": l_s,
+                            "model.loss.l_tv": l_tv,
+                            "array":i
+                        })
+    """

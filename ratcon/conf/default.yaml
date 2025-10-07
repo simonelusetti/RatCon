@@ -31,6 +31,7 @@ model:
     proposal_thresh: 0.5
     num_clusters: 2
     max_tokens: -1
+    max_fit_batches: 50
     iters: 25
     tol: 1e-4
     seed: 42

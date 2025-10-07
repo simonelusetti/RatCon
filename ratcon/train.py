@@ -22,7 +22,13 @@ from dora import get_xp, hydra_main
 # -------------------------------------------------------------------
 # Torch setup
 # -------------------------------------------------------------------
-torch.set_num_threads(os.cpu_count())
+_slurm_threads = os.getenv("SLURM_CPUS_PER_TASK") or os.getenv("SLURM_CPUS_PER_GPU")
+try:
+    _slurm_threads = int(_slurm_threads) if _slurm_threads else 0
+except ValueError:
+    _slurm_threads = 0
+_threads = _slurm_threads or (os.cpu_count() or 1)
+torch.set_num_threads(max(1, _threads))
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # -------------------------------------------------------------------
@@ -252,14 +258,14 @@ class Trainer:
                 self.logger.info(f"epoch {epoch + 1}: train_loss={avg:.4f}, kl_loss={avg_kl:.4f}")
             else:
                 self.logger.info(f"epoch {epoch + 1}: train_loss={avg:.4f}")
-                
+
             reports = {}
             with torch.no_grad():
                 for label, model in self._iter_models():
                     if self.cfg.model.clustering.use:
                         self._fit_cluster_filter(model, train_dl, label)
                     report = self.make_report(model, eval_dl, tok, label, self.cfg.eval.report.epoch)
-                    log_report(self.logger, report, report_cfg=self.cfg.eval.report.epoch, report_name="Epoch "+str(epoch+1)+" "+label)
+                    log_report(self.logger, report, report_cfg=self.cfg.eval.report.epoch, report_name=f"Epoch {epoch + 1} {label}")
                     xp.link.push_metrics({f"eval/{epoch}/{label}/{self.cfg.data.eval.dataset}": report})
                     reports[label] = report
 
@@ -293,9 +299,8 @@ class Trainer:
 
         self.logger.info(f"Best model: {best_model_label} at epoch {best_epoch} with F1 {best_f1:.4f}")
         self.logger.info(f"Best report: {best_report}")
-        report = self.make_report(model, eval_dl, tok, best_model_label, self.cfg.eval.report.final)
-        log_report(self.logger, report, report_cfg=self.cfg.eval.report.final, report_name="Final best "+best_model_label)
-        xp.link.push_metrics({f"best_eval/{best_epoch}/{label}/{self.cfg.data.eval.dataset}": report})
+        log_report(self.logger, best_report, report_cfg=self.cfg.eval.report.final, report_name="Final best "+best_model_label)
+        xp.link.push_metrics({f"best_eval/{best_epoch}/{best_model_label}/{self.cfg.data.eval.dataset}": best_report})
         
         return best_report, best_model_label
 

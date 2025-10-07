@@ -138,9 +138,10 @@ class ClusterFilter:
         model.eval()
 
         disable_progress = should_disable_tqdm()
+        max_fit_batches = int(getattr(cluster_cfg, "max_fit_batches", 0) or 0)
         desc = f"Collecting gates for {label}"
         with torch.no_grad():
-            for batch in tqdm(loader, desc=desc, disable=disable_progress):
+            for batch_idx, batch in enumerate(tqdm(loader, desc=desc, disable=disable_progress)):
                 batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
                 embeddings = batch["embeddings"]
                 attention_mask = batch["attention_mask"]
@@ -162,6 +163,8 @@ class ClusterFilter:
                 collected.append(selected.cpu())
                 total += selected.size(0)
                 if total >= max_tokens and max_tokens > 0:
+                    break
+                if max_fit_batches and (batch_idx + 1) >= max_fit_batches:
                     break
 
         if not collected:

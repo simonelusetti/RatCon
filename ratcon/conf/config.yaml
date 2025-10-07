@@ -62,20 +62,20 @@ eval:
   spacy_model: "en_core_web_sm"
   report:
     epoch:
-      metrics: False
-      summary: False
-      clustering: False
+      metrics: True
+      summary: True
+      clustering: True
       samples:
         num: 10
-        show: False
+        show: True
         per_sentence_stats: False
     final:
-      metrics: False
-      summary: False
-      clustering: False
+      metrics: True
+      summary: True
+      clustering: True
       samples:
         num: 10
-        show: False
+        show: True
         per_sentence_stats: False
 
 device: "cuda"

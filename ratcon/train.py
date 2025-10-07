@@ -318,8 +318,9 @@ class Trainer:
 # -------------------------------------------------------------------
 # Main
 # -------------------------------------------------------------------
-@hydra_main(config_path="conf", config_name="default", version_base="1.1")
+@hydra_main(config_path="conf", config_name="config", version_base="1.1")
 def main(cfg):
+    
     logger = get_logger("train.log")
     xp = get_xp()
     logger.info(f"Exp signature: {xp.sig}")

@@ -295,7 +295,7 @@ class Trainer:
         self.logger.info(f"Best report: {best_report}")
         report = self.make_report(model, eval_dl, tok, best_model_label, self.cfg.eval.report.final)
         log_report(self.logger, report, report_cfg=self.cfg.eval.report.final, report_name="Final best "+best_model_label)
-        xp.link.push_metrics({f"eval/{epoch}/{label}/{self.cfg.data.eval.dataset}": report})
+        xp.link.push_metrics({f"best_eval/{best_epoch}/{label}/{self.cfg.data.eval.dataset}": report})
         
         return best_report, best_model_label
 

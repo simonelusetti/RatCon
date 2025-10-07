@@ -1,0 +1,9 @@
+baseline:
+  data.train.subset: 1.0
+  data.train.dataset: wikiann
+  model.clustering.use: true
+  model.clustering.show_details: true
+
+sweep:
+  model.clustering.num_clusters: [1, 2, 5, 10]
+  array: [0, 1, 2]

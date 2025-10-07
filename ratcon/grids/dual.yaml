@@ -1,0 +1,7 @@
+baseline:
+  data.train.subset: 0.1
+  model.dual.use: true
+
+sweep:
+  model.dual.kl_weight: [10, 1, 0.1, 0.01]
+  model.dual.ls_2: [10, 1, 0.1, 0.01]

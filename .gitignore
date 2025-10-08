@@ -10,3 +10,5 @@ slurm-*.out
 .vscode/
 slurm-*.err
 logs/
+exploration/__pycache__/
+exploration/data/*

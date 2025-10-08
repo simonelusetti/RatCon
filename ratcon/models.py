@@ -236,17 +236,19 @@ class ClusterFilter:
         gates,
         attention_mask,
     ):
-        if self.centroids is None or self.entity_cluster is None:
-            return gates
+        if self.centroids is None:
+            return gates, None
 
         centroids = self.centroids.to(token_embeddings.device)
         flat = token_embeddings.reshape(-1, token_embeddings.size(-1))
         distances = torch.cdist(flat, centroids)
         assignments = distances.argmin(dim=1)
         assignments = assignments.view(token_embeddings.shape[:-1])
+        if self.entity_cluster is None:
+            return gates, assignments
         entity_mask = assignments.eq(self.entity_cluster).float()
         entity_mask = entity_mask * attention_mask.float()
-        return gates * entity_mask
+        return gates * entity_mask, assignments
 
 
 class RationaleSelectorModel(nn.Module):

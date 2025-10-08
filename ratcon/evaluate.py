@@ -165,7 +165,7 @@ def _run_inference_examples(model, data, tok, disable_progress, attention_augmen
                 if info:
                     use_cluster = True
             if use_cluster:
-                gates_tensor = model.apply_cluster_filter(
+                gates_tensor, _ = model.apply_cluster_filter(
                     out["token_embeddings"],
                     gates_tensor,
                     attention_mask,

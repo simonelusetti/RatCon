@@ -41,7 +41,6 @@ class Trainer:
         self.use_dual = cfg.model.dual.use
         self.use_null_target = getattr(cfg.model.loss, "use_null_target", False)
         self.model1, self.model2, self.optimizer = self.build_models_and_optimizer()
-        self.cluster_metadata = {}
 
     def _load_or_initialize_model(self, model, path, label):
         if model is None:
@@ -207,13 +206,12 @@ class Trainer:
         return total / len(loader.dataset), total_kl_loss / len(loader.dataset) if self.model2 else None
 
     def _fit_cluster_filter(self, model, train_dl, label):
-        cluster_metadata = model.fit_cluster_filter_from_loader(
+        model.fit_cluster_filter_from_loader(
             train_dl,
             self.cfg.model.clustering,
             logger=self.logger,
             label=label,
         )
-        self.cluster_metadata[label] = cluster_metadata
         
         
     def make_report(self, model, eval_dl, tok, label, report_cfg):
@@ -241,7 +239,7 @@ class Trainer:
         cluster_info = None
         clustering_cfg = getattr(self.cfg.model, "clustering", None)
         if clustering_cfg and getattr(clustering_cfg, "use", False):
-            cluster_info = self.cluster_metadata.get(label)
+            cluster_info = model.get_cluster_info()
 
         return build_report(evaluation, cluster_info)
 
@@ -288,9 +286,8 @@ class Trainer:
             if best_f1_epoch > best_f1:
                 best_f1 = best_f1_epoch
                 best_epoch = epoch + 1
-                if self.use_dual:
-                    best_model_label = best_label_epoch
-                    best_report = reports[best_model_label]
+                best_model_label = best_label_epoch
+                best_report = reports[best_model_label]
                 self.logger.info(
                     f"New best F1: {best_f1:.4f}, saving model(s) to {self._format_checkpoint_names()}"
                 )

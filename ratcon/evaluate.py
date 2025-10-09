@@ -496,6 +496,32 @@ def _compute_metrics_from_examples(examples, threshold, partition_idx=None):
     }
 
 
+
+def _compute_average_partition_length(examples, partition_idx=None):
+    total_length = 0.0
+    example_count = 0
+
+    for example in examples:
+        gates = _get_gates(example, partition_idx=partition_idx)
+        if gates is None:
+            continue
+
+        length = 0.0
+        for gate, mask in zip(gates, example["mask"]):
+            if mask == 0:
+                continue
+            if gate > 0.0:
+                length += 1.0
+
+        total_length += length
+        example_count += 1
+
+    if example_count == 0:
+        return None
+    return total_length / example_count
+
+
+
 def _compute_word_statistics(
     highlights,
     nlp,
@@ -585,6 +611,13 @@ def evaluate(
                 if s_idx < len(part_word_stats):
                     sample["word_stats"] = part_word_stats[s_idx]
             part_metrics = _compute_metrics_from_examples(examples, tresh, partition_idx=idx)
+            avg_length = _compute_average_partition_length(examples, partition_idx=idx)
+            if avg_length is not None:
+                if part_metrics is None:
+                    part_metrics = {}
+                else:
+                    part_metrics = dict(part_metrics)
+                part_metrics["avg_length"] = float(avg_length)
             partition_evaluations.append(
                 {
                     "label": f"partition_{idx + 1}",

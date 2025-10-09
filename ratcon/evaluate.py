@@ -164,7 +164,13 @@ def _generate_partition_templates(length):
             if canonical in seen:
                 continue
             seen.add(canonical)
-            templates.append((subset1, other))
+            mask1 = [0.0] * length
+            mask2 = [0.0] * length
+            for idx in subset1:
+                mask1[idx] = 1.0
+            for idx in other:
+                mask2[idx] = 1.0
+            templates.append((mask1, mask2))
     return templates
 
 
@@ -201,7 +207,9 @@ def _ensure_partition_cache_loaded(cache_cfg):
             if not isinstance(pair, list) or len(pair) != 2:
                 continue
             first, second = pair
-            templates.append((tuple(first), tuple(second)))
+            if len(first) != length or len(second) != length:
+                continue
+            templates.append((list(map(float, first)), list(map(float, second))))
         if templates:
             _PARTITION_TEMPLATE_CACHE[length] = templates
 
@@ -214,8 +222,8 @@ def _persist_partition_cache():
         formatted = []
         for first, second in pairs:
             formatted.append([
-                [int(idx) for idx in first],
-                [int(idx) for idx in second],
+                list(map(float, first)),
+                list(map(float, second)),
             ])
         data[str(length)] = formatted
     _PARTITION_TEMPLATE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -336,10 +344,17 @@ def _pool_embedding(model, token_embeddings, attention_mask, gate_mask):
 
 def _embedding_distance(anchor, other, partition_cfg):
     mode = getattr(partition_cfg, "distance", "cosine")
+    anchor_flat = anchor.reshape(-1)
+    other_flat = other.reshape(-1, anchor_flat.numel())
+    anchor_vec = anchor_flat.unsqueeze(0).expand(other_flat.size(0), -1)
     if mode == "euclidean":
-        return torch.norm(anchor - other, p=2)
-    cos = F.cosine_similarity(anchor.unsqueeze(0), other.unsqueeze(0), dim=-1)
-    return 1.0 - cos.squeeze(0)
+        dist = torch.norm(anchor_vec - other_flat, p=2, dim=-1)
+    else:
+        cos = F.cosine_similarity(anchor_vec, other_flat, dim=-1)
+        dist = 1.0 - cos
+    if dist.numel() == 1:
+        return dist.squeeze(0)
+    return dist
 
 
 def _compute_partition_gates(model, token_embeddings, attention_mask, gates, partition_cfg, thresh):
@@ -365,36 +380,52 @@ def _compute_partition_gates(model, token_embeddings, attention_mask, gates, par
     if not templates:
         return None
 
-    selected_positions = selected_idx.tolist()
+    template_tensor = torch.tensor(
+        [[first, second] for first, second in templates],
+        device=device,
+        dtype=token_embeddings.dtype,
+    )
+    mask_rel_1 = template_tensor[:, 0, :]
+    mask_rel_2 = template_tensor[:, 1, :]
 
-    best = None
+    num_templates = mask_rel_1.size(0)
+    seq_len = att_mask.size(0)
 
-    for subset1_rel, subset2_rel in templates:
-        subset1 = [selected_positions[idx] for idx in subset1_rel]
-        subset2 = [selected_positions[idx] for idx in subset2_rel]
-        if not subset1 or not subset2:
-            continue
+    gate_matrix_1 = torch.zeros(num_templates, seq_len, device=device, dtype=token_embeddings.dtype)
+    gate_matrix_2 = torch.zeros_like(gate_matrix_1)
+    gate_matrix_1[:, selected_idx] = mask_rel_1
+    gate_matrix_2[:, selected_idx] = mask_rel_2
 
-        gate1 = torch.zeros_like(base_gate)
-        gate2 = torch.zeros_like(base_gate)
-        gate1[subset1] = 1.0
-        gate2[subset2] = 1.0
+    att_mask_unsq = att_mask.unsqueeze(0)
+    mask1 = gate_matrix_1 * att_mask_unsq
+    mask2 = gate_matrix_2 * att_mask_unsq
 
-        emb1 = _pool_embedding(model, token_embeddings, att_mask, gate1)
-        emb2 = _pool_embedding(model, token_embeddings, att_mask, gate2)
-        if emb1 is None or emb2 is None:
-            continue
+    valid_mask = (mask1.sum(dim=1) > 0) & (mask2.sum(dim=1) > 0)
+    if not valid_mask.any():
+        return None
 
-        dist = _embedding_distance(original, emb1, partition_cfg) + _embedding_distance(original, emb2, partition_cfg)
-        if best is None or dist < best[0]:
-            best = (dist, gate1.clone(), gate2.clone())
+    valid_indices = valid_mask.nonzero(as_tuple=False).flatten()
+    mask1_valid = mask1[valid_indices]
+    mask2_valid = mask2[valid_indices]
 
-    if best is None:
+    token_batch = token_embeddings.unsqueeze(0).expand(mask1_valid.size(0), -1, -1)
+    emb1 = model.pooler({
+        "token_embeddings": token_batch,
+        "attention_mask": mask1_valid,
+    })["sentence_embedding"]
+    emb2 = model.pooler({
+        "token_embeddings": token_batch,
+        "attention_mask": mask2_valid,
+    })["sentence_embedding"]
+
+    dist = _embedding_distance(original, emb1, partition_cfg) + _embedding_distance(original, emb2, partition_cfg)
+    best_val, best_idx = torch.min(dist, dim=0)
+    if not torch.isfinite(best_val):
         return None
 
     return [
-        best[1].detach().cpu().tolist(),
-        best[2].detach().cpu().tolist(),
+        mask1_valid[best_idx].detach().cpu().tolist(),
+        mask2_valid[best_idx].detach().cpu().tolist(),
     ]
 
 

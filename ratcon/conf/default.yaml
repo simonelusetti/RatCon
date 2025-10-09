@@ -17,7 +17,7 @@ model:
   dual:
     use: False           # Use two rationale models
     num_models: 2        # Number of rationale models when multi-model mode is enabled
-    kl_weight: 100.0      # Weight for KL divergence loss
+    kl_weight: 1.0      # Weight for KL divergence loss
     sparsity_weights: [5.0, 1.0]  # Optional explicit per-model sparsity weights
   optim:
     lr: 5e-5
@@ -78,6 +78,13 @@ eval:
         num: 10
         show: False
         per_sentence_stats: False
+  partition_dual:
+    use: False
+    distance: "cosine"   # options: cosine, euclidean
+    cache:
+      enable: True
+      path: "data/partition_cache.json"
+      max_length: 12
 
 device: "cuda"
 

@@ -272,6 +272,12 @@ class Trainer:
         samples_cfg = getattr(report_cfg, "samples", None)
         samples_num = getattr(samples_cfg, "num", 0) if samples_cfg is not None else 0
 
+        partition_cfg = None
+        if self.num_models == 1:
+            candidate = getattr(self.cfg.eval, "partition_dual", None)
+            if candidate is not None and getattr(candidate, "use", False):
+                partition_cfg = candidate
+
         evaluation = evaluate(
             model,
             eval_dl,
@@ -283,6 +289,7 @@ class Trainer:
             samples_num=samples_num,
             spacy_model=getattr(self.cfg.eval, "spacy_model", "en_core_web_sm"),
             logger=self.logger,
+            partition_cfg=partition_cfg,
         )
 
         cluster_info = None
@@ -290,7 +297,16 @@ class Trainer:
         if clustering_cfg and getattr(clustering_cfg, "use", False):
             cluster_info = model.get_cluster_info()
 
-        return build_report(evaluation, cluster_info)
+        report = build_report(evaluation, cluster_info)
+
+        partition_reports = []
+        for idx, part_eval in enumerate(evaluation.get("partitions") or []):
+            base_label = part_eval.get("label") or f"partition_{idx + 1}"
+            part_label = f"{label}_{base_label}"
+            part_report = build_report(part_eval, None)
+            partition_reports.append((part_label, part_report))
+
+        return report, partition_reports
 
 
     def train(self, train_dl, eval_dl, tok, xp):
@@ -307,17 +323,29 @@ class Trainer:
                 self.logger.info(f"epoch {epoch + 1}: train_loss={avg:.4f}")
 
             reports = {}
+            display_reports = {}
             with torch.no_grad():
                 for label, model in self._iter_models():
                     if self.cfg.model.clustering.use:
                         self._fit_cluster_filter(model, train_dl, label)
-                    report = self.make_report(model, eval_dl, tok, label, self.cfg.eval.report.epoch)
+                    report, partition_reports = self.make_report(model, eval_dl, tok, label, self.cfg.eval.report.epoch)
                     log_report(self.logger, report, report_cfg=self.cfg.eval.report.epoch, report_name=f"Epoch {epoch + 1} {label}")
                     xp.link.push_metrics({f"eval/{epoch}/{label}/{self.cfg.data.eval.dataset}": report})
                     reports[label] = report
+                    display_reports[label] = report
+
+                    for part_label, part_report in partition_reports:
+                        log_report(
+                            self.logger,
+                            part_report,
+                            report_cfg=self.cfg.eval.report.epoch,
+                            report_name=f"Epoch {epoch + 1} {part_label}",
+                        )
+                        xp.link.push_metrics({f"eval/{epoch}/{part_label}/{self.cfg.data.eval.dataset}": part_report})
+                        display_reports[part_label] = part_report
 
             table = render_reports_table(
-                reports,
+                display_reports,
                 eval_cfg=self.cfg.eval,
                 precision=4,
             )
@@ -359,12 +387,17 @@ class Trainer:
 
     def evaluate(self, eval_dl, tok):
         reports = {}
+        display_reports = {}
         for label, model in self._iter_models():
-            report = self.make_report(model, eval_dl, tok, label, self.cfg.eval.report.final)
+            report, partition_reports = self.make_report(model, eval_dl, tok, label, self.cfg.eval.report.final)
             reports[label] = report
+            display_reports[label] = report
+
+            for part_label, part_report in partition_reports:
+                display_reports[part_label] = part_report
 
         table = render_reports_table(
-            reports,
+            display_reports,
             eval_cfg=self.cfg.eval,
             precision=4,
         )

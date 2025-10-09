@@ -12,3 +12,4 @@ slurm-*.err
 logs/
 exploration/__pycache__/
 exploration/data/*
+exploration/decomp/

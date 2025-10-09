@@ -16,9 +16,9 @@ model:
     use_null_target: False  # Push complement embeddings toward the encoded null vector
   dual:
     use: False           # Use two rationale models
-    kl_weight: 1.0      # Weight for KL divergence loss
-    ls_1: 0.1
-    ls_2: 0.1
+    num_models: 2        # Number of rationale models when multi-model mode is enabled
+    kl_weight: 100.0      # Weight for KL divergence loss
+    sparsity_weights: [5.0, 1.0]  # Optional explicit per-model sparsity weights
   optim:
     lr: 5e-5
     weight_decay: 1e-2

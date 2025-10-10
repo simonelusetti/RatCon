@@ -1,0 +1,26 @@
+baseline:
+  data.train.subset: 0.0
+  eval.reference_sentence.use: true
+
+sweep:
+  eval.reference_sentence.sentence: [
+      # Descriptive sentences
+      "The American actor who won several awards for his performances in historical dramas visited the capital of France to promote his latest movie.",
+      "A leading technology company from Japan recently partnered with a European university to develop renewable energy systems.",
+      "The president of a South American country held talks with the CEO of a global humanitarian organization.",
+      "An Italian painter from the Renaissance period is often compared to another master who worked in Florence.",
+      "The international football club from Spain recruited a striker who had previously played for an English team.",
+
+      # Example-based sentences
+      "Barack Obama met with Angela Merkel in Berlin to discuss climate policy.",
+      "Google announced a collaboration with the University of Oxford and NASA’s research division.",
+      "Lionel Messi scored twice for Inter Miami during the match against FC Barcelona.",
+      "The Louvre Museum in Paris hosted a joint exhibition with the Metropolitan Museum of Art in New York.",
+      "UNICEF and the World Health Organization launched a vaccination campaign in Kenya.",
+
+      # Hybrid sentences
+      "A well-known social activist from India collaborated with the United Nations and Google to promote digital education.",
+      "The mayor of New York met with the head of a leading European financial institution to discuss investment policies.",
+      "A global non-profit organization based in Switzerland invited scientists from MIT and Stanford University."
+  ]
+

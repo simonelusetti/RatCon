@@ -5,7 +5,7 @@ import yaml
 import itertools
 from ._history_utils import RatConExplorer
 
-CONFIG_PATH = "conll.yaml"
+CONFIG_PATH = "reference_sentence.yaml"
 
 def load_yaml_sweep(path: Path):
     """Load baseline and sweep configurations from a YAML file."""

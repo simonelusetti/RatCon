@@ -60,6 +60,10 @@ eval:
   eval_only: False
   verbose: False
   thresh: 0.5
+  reference_sentence:
+    use: False
+    sentence: "On 14 July 2019, Dr. Amelia Johnson met UN Secretary-General António Guterres in Paris to discuss AI ethics with Google, Microsoft, and IBM ahead of the World Economic Forum summit in Geneva."
+    threshold: 0.5
   spacy_model: "en_core_web_sm"
   report:
     epoch:

@@ -278,6 +278,18 @@ class Trainer:
             if candidate is not None and getattr(candidate, "use", False):
                 partition_cfg = candidate
 
+        reference_cfg = getattr(self.cfg.eval, "reference_sentence", None)
+        reference_sentence = None
+        reference_threshold = 0.5
+        if reference_cfg is not None:
+            reference_threshold = getattr(reference_cfg, "threshold", 0.5)
+            if getattr(reference_cfg, "use", False):
+                reference_sentence = getattr(reference_cfg, "sentence", None)
+                if reference_sentence is None:
+                    self.logger.warning(
+                        "reference_sentence.use is True but no sentence provided; skipping reference filtering."
+                    )
+
         evaluation = evaluate(
             model,
             eval_dl,
@@ -290,6 +302,8 @@ class Trainer:
             spacy_model=getattr(self.cfg.eval, "spacy_model", "en_core_web_sm"),
             logger=self.logger,
             partition_cfg=partition_cfg,
+            reference_sentence=reference_sentence,
+            reference_threshold=reference_threshold,
         )
 
         cluster_info = None

@@ -148,6 +148,66 @@ def _load_spacy_model(name, logger=None):
         return None
 
 
+def _encode_reference_sentence(model, sentence, device, logger=None):
+    if not sentence:
+        return None
+    if not hasattr(model, "sbert"):
+        if logger:
+            logger.warning("Reference sentence provided but model lacks SBERT encoder; skipping similarity step.")
+        return None
+    try:
+        with torch.no_grad():
+            encoded = model.sbert.encode([sentence], convert_to_tensor=True)
+    except Exception as exc:
+        if logger:
+            logger.warning(f"Failed to encode reference sentence '{sentence}': {exc}")
+        return None
+    if encoded.dim() > 1:
+        encoded = encoded[0]
+    return encoded.to(device=device, dtype=torch.float32)
+
+
+def _compute_reference_token_scores(
+    token_embeddings,
+    attention_mask,
+    gates,
+    tokens,
+    reference_vector,
+    thresh,
+):
+    if reference_vector is None:
+        return None
+
+    token_vecs = token_embeddings.to(device=reference_vector.device, dtype=reference_vector.dtype)
+    att_mask = attention_mask.to(device=reference_vector.device)
+    gate_vals = gates.to(device=reference_vector.device)
+
+    if att_mask.dim() > 1:
+        att_mask = att_mask.squeeze(0)
+    if gate_vals.dim() > 1:
+        gate_vals = gate_vals.squeeze(0)
+    if token_vecs.dim() > 2:
+        token_vecs = token_vecs.squeeze(0)
+
+    valid_mask = (att_mask > 0) & (gate_vals >= thresh)
+    if not valid_mask.any():
+        return []
+
+    indices = torch.nonzero(valid_mask, as_tuple=False).flatten().tolist()
+    scores = []
+    for idx in indices:
+        vec = token_vecs[idx]
+        score = torch.dot(vec, reference_vector)
+        scores.append(
+            {
+                "token": tokens[idx],
+                "index": int(idx),
+                "score": float(score.item()),
+            }
+        )
+    return scores
+
+
 def _generate_partition_templates(length):
     indices = list(range(length))
     templates = []
@@ -253,7 +313,17 @@ def _get_partition_templates(length, partition_cfg):
     return templates
 
 
-def _run_inference_examples(model, data, tok, disable_progress, attention_augment, partition_cfg=None, thresh=0.5):
+def _run_inference_examples(
+    model,
+    data,
+    tok,
+    disable_progress,
+    attention_augment,
+    partition_cfg=None,
+    thresh=0.5,
+    reference_vector=None,
+    reference_threshold=0.5,
+):
     model.eval()
     device = next(model.parameters()).device
 
@@ -281,16 +351,36 @@ def _run_inference_examples(model, data, tok, disable_progress, attention_augmen
                     gates_tensor,
                     attention_mask,
                 )
-            filtered_gates = gates_tensor.cpu()
 
             for i in range(embeddings.size(0)):
                 ids = input_ids[i].cpu().tolist()
                 tokens = tok.convert_ids_to_tokens(ids)
                 mask = attention_mask[i].cpu().tolist()
-                gates = filtered_gates[i].tolist()
                 gold = None
                 if "ner_tags" in batch:
                     gold = batch["ner_tags"][i].cpu().tolist()
+
+                reference_scores = None
+                if reference_vector is not None:
+                    reference_scores = _compute_reference_token_scores(
+                        embeddings[i],
+                        attention_mask[i],
+                        gates_tensor[i],
+                        tokens,
+                        reference_vector,
+                        thresh,
+                    )
+                    if reference_scores:
+                        keep_scores = []
+                        zero_indices = []
+                        for entry in reference_scores:
+                            if entry["score"] > reference_threshold:
+                                keep_scores.append(entry)
+                            else:
+                                zero_indices.append(entry["index"])
+                        if zero_indices:
+                            gates_tensor[i, zero_indices] = 0.0
+                        reference_scores = keep_scores
 
                 partition_gates = None
                 if partition_cfg is not None and getattr(partition_cfg, "use", False):
@@ -303,15 +393,21 @@ def _run_inference_examples(model, data, tok, disable_progress, attention_augmen
                         thresh,
                     )
 
+                gates = gates_tensor[i].detach().cpu().tolist()
+
+                example_entry = {
+                    "ids": ids,
+                    "tokens": tokens,
+                    "mask": mask,
+                    "gates": gates,
+                    "gold": gold,
+                    "partition_gates": partition_gates,
+                }
+                if reference_scores is not None:
+                    example_entry["reference_dot_products"] = reference_scores
+
                 examples.append(
-                    {
-                        "ids": ids,
-                        "tokens": tokens,
-                        "mask": mask,
-                        "gates": gates,
-                        "gold": gold,
-                        "partition_gates": partition_gates,
-                    }
+                    example_entry
                 )
     return examples
 
@@ -461,10 +557,14 @@ def _collect_samples(
                 original = format_gold_spans(example["ids"], example["tokens"], example["gold"], tok)
             else:
                 original = " ".join(merge_subwords(example["ids"], example["tokens"], tok))
-            samples.append({
+            sample_entry = {
                 "original": original,
                 "predicted": highlight.strip(),
-            })
+            }
+            ref_scores = example.get("reference_dot_products")
+            if ref_scores is not None:
+                sample_entry["reference_dot_products"] = ref_scores
+            samples.append(sample_entry)
 
     return samples, highlights
 
@@ -580,12 +680,30 @@ def evaluate(
     spacy_model="en_core_web_sm",
     logger=None,
     partition_cfg=None,
+    reference_sentence=None,
+    reference_threshold=0.5,
 ):
     """High-level evaluation orchestrator."""
 
     nlp = _load_spacy_model(spacy_model, logger=logger)
 
-    examples = _run_inference_examples(model, data, tok, disable_progress, attention_augment, partition_cfg=partition_cfg, thresh=thresh)
+    try:
+        device = next(model.parameters()).device
+    except StopIteration:
+        device = torch.device("cpu")
+    reference_vector = _encode_reference_sentence(model, reference_sentence, device, logger=logger)
+
+    examples = _run_inference_examples(
+        model,
+        data,
+        tok,
+        disable_progress,
+        attention_augment,
+        partition_cfg=partition_cfg,
+        thresh=thresh,
+        reference_vector=reference_vector,
+        reference_threshold=reference_threshold,
+    )
     samples, highlights = _collect_samples(examples, tok, thresh, samples_num)
     word_stats = _compute_word_statistics(highlights, nlp)
 
@@ -634,4 +752,6 @@ def evaluate(
         "word_stats": word_stats,
         "word_summary": word_summary,
         "partitions": partition_evaluations,
+        "reference_sentence": reference_sentence,
+        "reference_threshold": reference_threshold,
     }

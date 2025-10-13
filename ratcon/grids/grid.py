@@ -39,5 +39,7 @@ def explorer(launcher):
     baseline, combinations = load_yaml_sweep(config_path)
     configured_launcher = launcher.bind(baseline) if baseline else launcher
 
+    print(baseline, combinations)
+
     for overrides in combinations:
         configured_launcher(overrides)

@@ -96,7 +96,7 @@ logging:
   metrics_only: False
 
 dora:
-  exclude: ["train.retrain", "eval.*", "data.rebuild_ds"]
+  exclude: ["train.retrain", "eval.report.*", "eval.eval_only", "eval.verbose", "data.rebuild_ds"]
 
 array: 0
 

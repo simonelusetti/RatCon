@@ -1,5 +1,5 @@
 baseline:
-  data.train.subset: 0.0
+  data.train.subset: 0.1
   eval.reference_sentence.use: true
 
 sweep:

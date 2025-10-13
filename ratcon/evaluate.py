@@ -729,10 +729,6 @@ def evaluate(
     samples, highlights = _collect_samples(examples, tok, thresh, samples_num)
     word_stats = _compute_word_statistics(highlights, nlp)
 
-    for idx, sample in enumerate(samples):
-        if idx < len(word_stats):
-            sample["word_stats"] = word_stats[idx]
-
     metrics = _compute_metrics_from_examples(examples, tresh)
     word_summary = summarize_word_stats(word_stats)
 
@@ -747,9 +743,6 @@ def evaluate(
         for idx in range(num_partitions):
             part_samples, part_highlights = _collect_samples(examples, tok, thresh, samples_num, partition_idx=idx)
             part_word_stats = _compute_word_statistics(part_highlights, nlp)
-            for s_idx, sample in enumerate(part_samples):
-                if s_idx < len(part_word_stats):
-                    sample["word_stats"] = part_word_stats[s_idx]
             part_metrics = _compute_metrics_from_examples(examples, tresh, partition_idx=idx)
             avg_length = _compute_average_partition_length(examples, partition_idx=idx)
             if avg_length is not None:

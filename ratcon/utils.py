@@ -1,4 +1,5 @@
 import os, sys, torch
+from typing import Any, Mapping, MutableSequence, Sequence
 
 def should_disable_tqdm(*, metrics_only=False):
     """Return True when tqdm progress bars should be disabled."""
@@ -94,3 +95,80 @@ def shared_complement_distribution(g1, g2, token_emb1, token_emb2, attention_mas
         h_shared_comp2 = model2.fourier(h_shared_comp2)
 
     return h_shared_comp1, h_shared_comp2, shared_comp_mask
+
+
+def resolve_sparsity_weights(model_cfg, num_models, *, logger=None):
+    """Determine sparsity weights for each model based on configuration."""
+    loss_cfg = getattr(model_cfg, "loss", None)
+    base = float(getattr(loss_cfg, "l_s", 0.0)) if loss_cfg is not None else 0.0
+    if num_models <= 1:
+        return [base]
+
+    dual_cfg = getattr(model_cfg, "dual", None)
+    weights: MutableSequence[float] = []
+
+    if dual_cfg is not None:
+        configured = getattr(dual_cfg, "sparsity_weights", None)
+        if configured is not None:
+            configured = list(configured)
+            if len(configured) == 1:
+                configured = configured * num_models
+            if len(configured) == num_models:
+                return [float(w) for w in configured]
+            if logger is not None:
+                logger.warning(
+                    "sparsity_weights length (%d) does not match num_models (%d); falling back to per-model defaults",
+                    len(configured),
+                    num_models,
+                )
+
+    for idx in range(num_models):
+        attr = f"ls_{idx + 1}"
+        value = base
+        if dual_cfg is not None and hasattr(dual_cfg, attr):
+            value = float(getattr(dual_cfg, attr))
+        weights.append(float(value))
+
+    return list(weights)
+
+
+def collect_joint_samples(reports, model_labels, samples_cfg):
+    """Collect aligned samples across multiple models for side-by-side comparison."""
+    if samples_cfg is None or len(model_labels) <= 1:
+        return []
+
+    if not bool(getattr(samples_cfg, "show", False)):
+        return []
+
+    num_limit = int(getattr(samples_cfg, "num", 0) or 0)
+    samples_per_label = {}
+    for label in model_labels:
+        samples = list(reports.get(label, {}).get("samples", []) or [])
+        if not samples:
+            return []
+        if num_limit > 0:
+            samples = samples[:num_limit]
+        samples_per_label[label] = samples
+
+    max_len = min(len(samples_per_label[label]) for label in model_labels)
+    joint_samples = []
+    for idx in range(max_len):
+        base_sample = samples_per_label[model_labels[0]][idx]
+        entry = {"original": base_sample.get("original", "")}
+        for label in model_labels:
+            entry[label] = samples_per_label[label][idx].get("predicted", "")
+        joint_samples.append(entry)
+    return joint_samples
+
+
+def log_joint_samples(logger, samples, model_labels, header):
+    """Log joint samples in a compact, readable format."""
+    if not samples:
+        return
+    lines = [header]
+    for sample in samples:
+        lines.append("")
+        lines.append(f"Original: {sample.get('original', '')}")
+        for label in model_labels:
+            lines.append(f"  Predicted ({label}): {sample.get(label, '')}")
+    logger.info("\n".join(lines))

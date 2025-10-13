@@ -16,12 +16,12 @@ model:
     use_null_target: False  # Push complement embeddings toward the encoded null vector
   dual:
     use: False           # Use two rationale models
-    num_models: 5        # Number of rationale models when multi-model mode is enabled
+    num: 5        # Number of rationale models when multi-model mode is enabled
     kl:
-      use: True
+      use: False
       weight: 1.0
     mutual_info:
-      use: False
+      use: True
       weight: 1.0
     sparsity_weights: [5.0, 1.0, 0.1, 0.1, 0.1]  # Optional explicit per-model sparsity weights
   optim:
@@ -54,7 +54,7 @@ data:
     batch_size: 32
     num_workers: 1
     subset: 1.0
-    shuffle: True
+    shuffle: False
 
 train:
   retrain: True

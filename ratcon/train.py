@@ -1,20 +1,17 @@
-import os, torch, datetime
+import os, torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from .utils import (
     should_disable_tqdm,
     get_logger,
+    resolve_sparsity_weights,
+    collect_joint_samples,
+    log_joint_samples,
 )
 
-from .models import RationaleSelectorModel, nt_xent
+from .models import RationaleSelectorModel
 from .data import get_dataset, collate
-from .losses import (
-    complement_loss,
-    kl_loss,
-    mutual_information_penalty,
-    sparsity_loss,
-    total_variation_1d,
-)
+from .losses import compute_training_objectives
 from .evaluate import evaluate
 from .metrics import (
     build_report,
@@ -46,7 +43,7 @@ class Trainer:
         self.num_models = self._determine_num_models()
         self.models, self.model_labels, self.model_paths, self.optimizer = self.build_models_and_optimizer()
         self._all_model_params = [param for model in self.models for param in model.parameters()]
-        self.sparsity_weights = self._resolve_sparsity_weights()
+        self.sparsity_weights = resolve_sparsity_weights(self.cfg.model, self.num_models, logger=self.logger)
         dual_cfg = getattr(self.cfg.model, "dual", None)
         self.use_kl = False
         self.kl_weight = 0.0
@@ -78,35 +75,6 @@ class Trainer:
             self.logger.warning("Configured num_models < 1; defaulting to 1.")
             return 1
         return num_models
-
-    def _resolve_sparsity_weights(self):
-        base = float(self.cfg.model.loss.l_s)
-        if self.num_models == 1:
-            return [base]
-
-        dual_cfg = getattr(self.cfg.model, "dual", None)
-        weights = []
-
-        if dual_cfg is not None:
-            configured = getattr(dual_cfg, "sparsity_weights", None)
-            if configured is not None:
-                configured = list(configured)
-                if len(configured) == 1:
-                    configured = configured * self.num_models
-                if len(configured) == self.num_models:
-                    return [float(w) for w in configured]
-                self.logger.warning(
-                    "sparsity_weights length does not match num_models; falling back to ls_1, ls_2, ..."
-                )
-
-        for idx in range(self.num_models):
-            attr = f"ls_{idx + 1}"
-            value = base
-            if dual_cfg is not None and hasattr(dual_cfg, attr):
-                value = float(getattr(dual_cfg, attr))
-            weights.append(float(value))
-
-        return weights
 
     def _load_or_initialize_model(self, model, path, label):
         if model is None:
@@ -159,117 +127,6 @@ class Trainer:
         self.model_paths = {label: path for label, _, path in specs}
         return models, labels, self.model_paths, optimizer
 
-    def _compute_shared_embeddings(self, outputs, attention_mask):
-        gates = [out["gates"] for out in outputs]
-        complement_product = torch.ones_like(gates[0])
-        for g in gates:
-            complement_product = complement_product * (1.0 - g)
-
-        shared_gate = 1.0 - complement_product
-        shared_gate = torch.clamp(shared_gate, 1e-6, 1.0)
-        shared_mask = attention_mask * shared_gate
-
-        shared_comp_gate = torch.clamp(complement_product, 1e-6, 1.0)
-        shared_comp_mask = attention_mask * shared_comp_gate
-
-        shared_rationales = []
-        shared_complements = []
-        for model, out in zip(self.models, outputs):
-            pooled_rat = model.pooler({
-                "token_embeddings": out["token_embeddings"],
-                "attention_mask": shared_mask,
-            })["sentence_embedding"]
-            pooled_comp = model.pooler({
-                "token_embeddings": out["token_embeddings"],
-                "attention_mask": shared_comp_mask,
-            })["sentence_embedding"]
-            if hasattr(model, "fourier"):
-                pooled_rat = model.fourier(pooled_rat)
-                pooled_comp = model.fourier(pooled_comp)
-            shared_rationales.append(pooled_rat)
-            shared_complements.append(pooled_comp)
-
-        return shared_rationales, shared_complements
-
-    def _compute_losses(self, outputs, attention_mask, tau):
-        anchors = [out["h_anchor"] for out in outputs]
-        device = anchors[0].device
-        loss = anchors[0].new_zeros(())
-
-        shared_rats, shared_comps = self._compute_shared_embeddings(outputs, attention_mask)
-
-        for idx, out in enumerate(outputs):
-            gates = out["gates"]
-            null_vec = out["null"] if self.use_null_target else None
-
-            l_rat = nt_xent(shared_rats[idx], anchors[idx], temperature=tau)
-            l_comp = complement_loss(shared_comps[idx], anchors[idx], null_vec, self.use_null_target, tau)
-            l_s = sparsity_loss(gates, attention_mask)
-            l_tv = total_variation_1d(gates, attention_mask)
-
-            loss = loss + l_rat
-            loss = loss + self.cfg.model.loss.l_comp * l_comp
-            loss = loss + self.sparsity_weights[idx] * l_s
-            loss = loss + self.cfg.model.loss.l_tv * l_tv
-
-        kl_total = anchors[0].new_zeros(())
-        kl_pairs = 0
-        if self.num_models > 1 and self.use_kl:
-            for i in range(self.num_models):
-                for j in range(i + 1, self.num_models):
-                    out_i = outputs[i]
-                    out_j = outputs[j]
-                    kl_val = kl_loss(
-                        out_i["gates"],
-                        out_j["gates"],
-                        out_i["alpha"],
-                        out_i["beta"],
-                        out_j["alpha"],
-                        out_j["beta"],
-                    )
-                    kl_total = kl_total + kl_val
-                    kl_pairs += 1
-
-        avg_kl = None
-        if kl_pairs > 0:
-            avg_kl = kl_total / kl_pairs
-            if self.kl_weight != 0.0:
-                loss = loss + self.kl_weight * avg_kl
-
-        mi_total = anchors[0].new_zeros(())
-        mi_pairs = 0
-        if self.num_models > 1 and self.use_mutual_info:
-            mask_float = attention_mask.to(dtype=anchors[0].dtype)
-            for i in range(self.num_models):
-                for j in range(i + 1, self.num_models):
-                    mi_val = mutual_information_penalty(
-                        outputs[i]["gates"],
-                        outputs[j]["gates"],
-                        mask_float,
-                    )
-                    mi_total = mi_total + mi_val
-                    mi_pairs += 1
-
-        avg_mi = None
-        if mi_pairs > 0:
-            avg_mi = mi_total / mi_pairs
-            if self.mutual_info_weight != 0.0:
-                loss = loss + self.mutual_info_weight * avg_mi
-
-        overlap_fraction = None
-        if self.num_models > 1:
-            with torch.no_grad():
-                valid_mask = (attention_mask > 0).float()
-                valid_counts = valid_mask.sum(dim=1).clamp_min(1.0)
-                gate_stack = torch.stack([out["gates"].detach() for out in outputs], dim=0)
-                selected_counts = (gate_stack >= self.overlap_threshold).float().sum(dim=0)
-                multi_mask = (selected_counts >= 2).float()
-                per_example_overlap = (multi_mask * valid_mask).sum(dim=1) / valid_counts
-                if torch.isfinite(per_example_overlap).any():
-                    overlap_fraction = float(per_example_overlap.mean().item())
-
-        return loss, avg_kl, avg_mi, overlap_fraction
-
     def train_epoch(self, loader, epoch):
         tau = self.cfg.model.loss.tau
         grad_clip = self.cfg.train.grad_clip
@@ -297,7 +154,20 @@ class Trainer:
                 for model in self.models
             ]
 
-            loss, kl_value, mi_value, overlap_fraction = self._compute_losses(outputs, attention_mask, tau)
+            loss, kl_value, mi_value, overlap_fraction = compute_training_objectives(
+                self.models,
+                outputs,
+                attention_mask,
+                self.cfg.model,
+                self.sparsity_weights,
+                temperature=tau,
+                use_null_target=self.use_null_target,
+                use_kl=self.use_kl,
+                kl_weight=self.kl_weight,
+                use_mutual_info=self.use_mutual_info,
+                mutual_info_weight=self.mutual_info_weight,
+                overlap_threshold=self.overlap_threshold,
+            )
 
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -398,6 +268,10 @@ class Trainer:
         best_epoch = None
         best_model_label = self.model_labels[0]
         best_report = None
+        epoch_samples_cfg = getattr(self.cfg.eval.report.epoch, "samples", None)
+        epoch_show_samples = bool(getattr(epoch_samples_cfg, "show", False))
+        final_samples_cfg = getattr(self.cfg.eval.report.final, "samples", None)
+        final_show_samples = bool(getattr(final_samples_cfg, "show", False))
 
         for epoch in range(self.cfg.train.epochs):
             avg, avg_kl, avg_mi, avg_overlap = self.train_epoch(train_dl, epoch)
@@ -417,7 +291,13 @@ class Trainer:
                     if self.cfg.model.clustering.use:
                         self._fit_cluster_filter(model, train_dl, label)
                     report, partition_reports = self.make_report(model, eval_dl, tok, label, self.cfg.eval.report.epoch)
-                    log_report(self.logger, report, report_cfg=self.cfg.eval.report.epoch, report_name=f"Epoch {epoch + 1} {label}")
+                    log_report(
+                        self.logger,
+                        report,
+                        report_cfg=self.cfg.eval.report.epoch,
+                        report_name=f"Epoch {epoch + 1} {label}",
+                        show_samples=epoch_show_samples,
+                    )
                     xp.link.push_metrics({f"eval/{epoch}/{label}/{self.cfg.data.eval.dataset}": report})
                     reports[label] = report
                     display_reports[label] = report
@@ -428,16 +308,20 @@ class Trainer:
                             part_report,
                             report_cfg=self.cfg.eval.report.epoch,
                             report_name=f"Epoch {epoch + 1} {part_label}",
+                            show_samples=epoch_show_samples,
                         )
                         xp.link.push_metrics({f"eval/{epoch}/{part_label}/{self.cfg.data.eval.dataset}": part_report})
                         display_reports[part_label] = part_report
 
             table = render_reports_table(
                 display_reports,
-                eval_cfg=self.cfg.eval,
-                precision=4,
+                precision=4
             )
             self.logger.info(table)
+
+            joint_samples = collect_joint_samples(reports, self.model_labels, epoch_samples_cfg)
+            if joint_samples:
+                log_joint_samples(self.logger, joint_samples, self.model_labels, f"Epoch {epoch + 1} joint samples:")
 
             best_label_epoch = None
             best_f1_epoch = float('-inf')
@@ -465,15 +349,28 @@ class Trainer:
         if best_report is not None:
             self.logger.info(f"Best model: {best_model_label} at epoch {best_epoch} with F1 {best_f1:.4f}")
             self.logger.info(f"Best report: {best_report}")
-            log_report(self.logger, best_report, report_cfg=self.cfg.eval.report.final, report_name="Final best "+best_model_label)
+            log_report(
+                self.logger,
+                best_report,
+                report_cfg=self.cfg.eval.report.final,
+                report_name="Final best " + best_model_label,
+                show_samples=final_show_samples,
+            )
             xp.link.push_metrics({f"best_eval/{best_epoch}/{best_model_label}/{self.cfg.data.eval.dataset}": best_report})
         else:
             self.logger.info("No best report recorded; skipping checkpoint summary.")
-        
+            
+        joint_samples = collect_joint_samples(reports, self.model_labels, final_samples_cfg)
+        if joint_samples:
+            log_joint_samples(self.logger, joint_samples, self.model_labels, "Evaluation joint samples:")
+
         return best_report, best_model_label
 
 
     def evaluate(self, eval_dl, tok):
+        final_samples_cfg = getattr(self.cfg.eval.report.final, "samples", None)
+        final_show_samples = bool(getattr(final_samples_cfg, "show", False))
+
         reports = {}
         display_reports = {}
         for label, model in self._iter_models():
@@ -481,16 +378,28 @@ class Trainer:
             reports[label] = report
             display_reports[label] = report
 
+            log_report(
+                self.logger,
+                report,
+                report_cfg=self.cfg.eval.report.final,
+                report_name="Eval " + label,
+                show_samples=final_show_samples,
+            )
+
             for part_label, part_report in partition_reports:
                 display_reports[part_label] = part_report
 
         table = render_reports_table(
             display_reports,
-            eval_cfg=self.cfg.eval,
-            precision=4,
+            precision=4
         )
         
+
         self.logger.info(table)
+
+        joint_samples = collect_joint_samples(reports, self.model_labels, final_samples_cfg)
+        if joint_samples:
+            log_joint_samples(self.logger, joint_samples, self.model_labels, "Evaluation joint samples:")
 
 
 # -------------------------------------------------------------------
@@ -517,12 +426,17 @@ def main(cfg):
         rebuild=cfg.data.rebuild_ds,
         shuffle=cfg.data.train.shuffle,
     )
+    eval_shuffle = bool(cfg.data.eval.shuffle)
+    if eval_shuffle:
+        logger.warning("Disabling shuffle for evaluation loader to preserve ordering across models.")
+        eval_shuffle = False
+
     eval_ds, _ = get_dataset(
         split="validation",
         name=cfg.data.eval.dataset,
         subset=cfg.data.eval.subset,
         rebuild=cfg.data.rebuild_ds,
-        shuffle=cfg.data.eval.shuffle,
+        shuffle=eval_shuffle,
     )
 
     train_dl = DataLoader(
@@ -542,7 +456,7 @@ def main(cfg):
         num_workers=cfg.data.eval.num_workers,
         pin_memory=(cfg.device == "cuda"),
         persistent_workers=(cfg.data.eval.num_workers > 0),
-        shuffle=cfg.data.eval.shuffle,
+        shuffle=eval_shuffle,
     )
 
     # Train or eval

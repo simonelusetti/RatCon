@@ -1,6 +1,7 @@
 # losses.py
 import torch
 import torch.nn.functional as F
+from typing import Sequence
 
 from .models import nt_xent
 
@@ -97,3 +98,135 @@ def mutual_information_penalty(g1, g2, mask, eps=1e-8):
         + _term(p00, p0, q0)
     )
     return mi.mean()
+
+
+def _compute_shared_embeddings(models, outputs, attention_mask):
+    shared_rationales = []
+    shared_complements = []
+    valid_mask = attention_mask
+
+    shared_gate_product = torch.ones_like(outputs[0]["gates"])
+    for out in outputs:
+        shared_gate_product = shared_gate_product * (1.0 - out["gates"])
+
+    shared_gate = torch.clamp(1.0 - shared_gate_product, 1e-6, 1.0)
+    shared_mask = valid_mask * shared_gate
+
+    shared_comp_gate = torch.clamp(shared_gate_product, 1e-6, 1.0)
+    shared_comp_mask = valid_mask * shared_comp_gate
+
+    for model, out in zip(models, outputs):
+        pooled_rat = model.pooler({
+            "token_embeddings": out["token_embeddings"],
+            "attention_mask": shared_mask,
+        })["sentence_embedding"]
+        pooled_comp = model.pooler({
+            "token_embeddings": out["token_embeddings"],
+            "attention_mask": shared_comp_mask,
+        })["sentence_embedding"]
+        if hasattr(model, "fourier"):
+            pooled_rat = model.fourier(pooled_rat)
+            pooled_comp = model.fourier(pooled_comp)
+        shared_rationales.append(pooled_rat)
+        shared_complements.append(pooled_comp)
+
+    return shared_rationales, shared_complements
+
+
+def compute_training_objectives(
+    models: Sequence,
+    outputs,
+    attention_mask,
+    model_cfg,
+    sparsity_weights,
+    *,
+    temperature,
+    use_null_target,
+    use_kl,
+    kl_weight,
+    use_mutual_info,
+    mutual_info_weight,
+    overlap_threshold,
+):
+    """Compute total loss and auxiliary statistics for multi-model training."""
+    anchors = [out["h_anchor"] for out in outputs]
+    device = anchors[0].device
+    loss = anchors[0].new_zeros(())
+
+    shared_rats, shared_comps = _compute_shared_embeddings(models, outputs, attention_mask)
+
+    loss_cfg = getattr(model_cfg, "loss", None)
+    l_comp_weight = float(getattr(loss_cfg, "l_comp", 0.0)) if loss_cfg is not None else 0.0
+    l_tv_weight = float(getattr(loss_cfg, "l_tv", 0.0)) if loss_cfg is not None else 0.0
+
+    for idx, out in enumerate(outputs):
+        gates = out["gates"]
+        null_vec = out["null"] if use_null_target else None
+
+        l_rat = nt_xent(shared_rats[idx], anchors[idx], temperature=temperature)
+        l_comp = complement_loss(shared_comps[idx], anchors[idx], null_vec, use_null_target, temperature)
+        l_s = sparsity_loss(gates, attention_mask)
+        l_tv = total_variation_1d(gates, attention_mask)
+
+        loss = loss + l_rat
+        loss = loss + l_comp_weight * l_comp
+        loss = loss + sparsity_weights[idx] * l_s
+        loss = loss + l_tv_weight * l_tv
+
+    kl_total = anchors[0].new_zeros(())
+    kl_pairs = 0
+    if use_kl and len(outputs) > 1:
+        for i in range(len(outputs)):
+            for j in range(i + 1, len(outputs)):
+                out_i = outputs[i]
+                out_j = outputs[j]
+                kl_val = kl_loss(
+                    out_i["gates"],
+                    out_j["gates"],
+                    out_i["alpha"],
+                    out_i["beta"],
+                    out_j["alpha"],
+                    out_j["beta"],
+                )
+                kl_total = kl_total + kl_val
+                kl_pairs += 1
+
+    avg_kl = None
+    if kl_pairs > 0:
+        avg_kl = kl_total / kl_pairs
+        if kl_weight != 0.0:
+            loss = loss + kl_weight * avg_kl
+
+    mi_total = anchors[0].new_zeros(())
+    mi_pairs = 0
+    if use_mutual_info and len(outputs) > 1:
+        mask_float = attention_mask.to(dtype=anchors[0].dtype)
+        for i in range(len(outputs)):
+            for j in range(i + 1, len(outputs)):
+                mi_val = mutual_information_penalty(
+                    outputs[i]["gates"],
+                    outputs[j]["gates"],
+                    mask_float,
+                )
+                mi_total = mi_total + mi_val
+                mi_pairs += 1
+
+    avg_mi = None
+    if mi_pairs > 0:
+        avg_mi = mi_total / mi_pairs
+        if mutual_info_weight != 0.0:
+            loss = loss + mutual_info_weight * avg_mi
+
+    overlap_fraction = None
+    if len(outputs) > 1:
+        with torch.no_grad():
+            valid_mask = (attention_mask > 0).float()
+            valid_counts = valid_mask.sum(dim=1).clamp_min(1.0)
+            gate_stack = torch.stack([out["gates"].detach() for out in outputs], dim=0)
+            selected_counts = (gate_stack >= overlap_threshold).float().sum(dim=0)
+            multi_mask = (selected_counts >= 2).float()
+            per_example_overlap = (multi_mask * valid_mask).sum(dim=1) / valid_counts
+            if torch.isfinite(per_example_overlap).any():
+                overlap_fraction = float(per_example_overlap.mean().item())
+
+    return loss, avg_kl, avg_mi, overlap_fraction

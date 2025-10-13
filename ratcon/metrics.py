@@ -87,7 +87,6 @@ def build_report(evaluation, cluster_info=None):
         "timestamp": _dt.datetime.now().isoformat(),
         "metrics": metrics,
         "samples": evaluation.get("samples") or [],
-        "word_stats": evaluation.get("word_stats") or [],
         "word_summary": evaluation.get("word_summary") or {},
     }
     if cluster_info:
@@ -95,7 +94,7 @@ def build_report(evaluation, cluster_info=None):
     return report
 
 
-def log_report(logger, report, report_cfg, report_name=None):
+def log_report(logger, report, report_cfg, report_name=None, show_samples=False):
     if report_name:
         parts = [f"Report: {report_name}\n"]
     else:
@@ -121,7 +120,7 @@ def log_report(logger, report, report_cfg, report_name=None):
             parts.append("cluster: " + ", ".join(cluster_parts)+"\n")
 
     # Samples (condensed)
-    if report_cfg.samples.show:
+    if show_samples:
         num_samples = report_cfg.samples.num
         if num_samples > 0:
             samples = report.get("samples", [])[:num_samples]
@@ -143,20 +142,7 @@ def log_report(logger, report, report_cfg, report_name=None):
     logger.info("\n".join(parts))
 
 
-def _format_top_words(summary, max_items=3):
-    proportions = summary.get("proportions", {}) if summary else {}
-    items = sorted(proportions.items(), key=lambda item: item[1], reverse=True)
-    chunks = []
-    for key, value in items:
-        if value <= 0:
-            continue
-        chunks.append(f"{key} {value * 100:.1f}%")
-        if len(chunks) == max_items:
-            break
-    return ", ".join(chunks) if chunks else "-"
-
-
-def render_reports_table(reports, eval_cfg, precision=4):    
+def render_reports_table(reports, precision=4):    
     if not reports:
         prefix = "Metrics"
         return f"{prefix}: none"

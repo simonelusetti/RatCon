@@ -265,7 +265,9 @@ def measure_sentence(model, batch, raw_tokens, tokenizer, args, device, rng, sen
     gates = full_gates[0].cpu()
     attention_mask = attention_masks[0].cpu()
 
-    threshold = getattr(model.cfg.clustering, "proposal_thresh", args.cluster_threshold or 0.5)
+    threshold = model.cfg.clustering.proposal_thresh
+    if args.cluster_threshold:
+        threshold = args.cluster_threshold
     clusters = collect_cluster_words(raw_tokens, tokenizer, gates, assignments, attention_mask, threshold, args.max_length)
     if not clusters:
         return []
@@ -436,7 +438,8 @@ def build_eval_loader(cfg_dict, args, model_cfg, device):
 
 def main():
     args = parse_args()
-    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(message)s")
+    level = logging._nameToLevel.get(args.log_level.upper(), logging.INFO)
+    logging.basicConfig(level=level, format="%(message)s")
     set_seed(args.seed)
 
     device = torch.device(args.device if torch.cuda.is_available() and args.device == "cuda" else "cpu")

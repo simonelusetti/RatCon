@@ -245,7 +245,7 @@ def _ensure_partition_cache_loaded(cache_cfg):
     if cache_cfg is None:
         return
 
-    path = getattr(cache_cfg, "path", None)
+    path = cache_cfg.path
     if not path:
         return
     path = Path(path)
@@ -307,15 +307,15 @@ def _persist_partition_cache():
 
 
 def _get_partition_templates(length, partition_cfg):
-    cache_cfg = getattr(partition_cfg, "cache", None) if partition_cfg is not None else None
+    cache_cfg = partition_cfg.cache if partition_cfg is not None else None
     cache_enabled = False
     max_length = None
-    if cache_cfg is not None and getattr(cache_cfg, "enable", True):
+    if cache_cfg is not None and cache_cfg.enable:
         cache_enabled = True
-        max_length = getattr(cache_cfg, "max_length", None)
+        max_length = cache_cfg.max_length
         _ensure_partition_cache_loaded(cache_cfg)
 
-    num_parts = max(2, int(getattr(partition_cfg, "parts", 2)))
+    num_parts = max(2, int(partition_cfg.parts))
 
     if cache_enabled:
         cached = _PARTITION_TEMPLATE_CACHE.get((length, num_parts))
@@ -401,7 +401,7 @@ def _run_inference_examples(
                         reference_scores = keep_scores
 
                 partition_gates = None
-                if partition_cfg is not None and getattr(partition_cfg, "use", False):
+                if partition_cfg is not None and partition_cfg.use:
                     partition_gates = _compute_partition_gates(
                         model,
                         out["token_embeddings"][i],
@@ -457,7 +457,7 @@ def _pool_embedding(model, token_embeddings, attention_mask, gate_mask):
 
 
 def _embedding_distance(anchor, other, partition_cfg):
-    mode = getattr(partition_cfg, "distance", "cosine")
+    mode = partition_cfg.distance
     anchor_flat = anchor.reshape(-1)
     other_flat = other.reshape(-1, anchor_flat.numel())
     anchor_vec = anchor_flat.unsqueeze(0).expand(other_flat.size(0), -1)
@@ -472,7 +472,7 @@ def _embedding_distance(anchor, other, partition_cfg):
 
 
 def _compute_partition_gates(model, token_embeddings, attention_mask, gates, partition_cfg, thresh):
-    if not getattr(partition_cfg, "use", False):
+    if not partition_cfg.use:
         return None
 
     device = token_embeddings.device
@@ -482,7 +482,7 @@ def _compute_partition_gates(model, token_embeddings, attention_mask, gates, par
 
     selected_idx = torch.nonzero(hard_mask, as_tuple=False).flatten()
 
-    num_parts = max(2, int(getattr(partition_cfg, "parts", 2)))
+    num_parts = max(2, int(partition_cfg.parts))
     if selected_idx.numel() < num_parts:
         return None
 
@@ -666,13 +666,11 @@ def _compute_word_statistics(
         else:
             doc = []
 
-        noun_count = sum(1 for t in doc if getattr(t, "pos_", None) == "NOUN")
-        propn_count = sum(1 for t in doc if getattr(t, "pos_", None) == "PROPN")
-        verb_count = sum(1 for t in doc if getattr(t, "pos_", None) == "VERB")
-        conj_count = sum(
-            1 for t in doc if getattr(t, "tag_", None) in {"VBD", "VBG", "VBN", "VBP", "VBZ"}
-        )
-        stopword_count = sum(1 for t in doc if getattr(t, "is_stop", False))
+        noun_count = sum(1 for t in doc if t.pos_ == "NOUN")
+        propn_count = sum(1 for t in doc if t.pos_ == "PROPN")
+        verb_count = sum(1 for t in doc if t.pos_ == "VERB")
+        conj_count = sum(1 for t in doc if t.tag_ in {"VBD", "VBG", "VBN", "VBP", "VBZ"})
+        stopword_count = sum(1 for t in doc if t.is_stop)
         recognized = noun_count + propn_count + verb_count + conj_count + stopword_count
         total = len(doc)
         stats.append(
@@ -733,7 +731,7 @@ def evaluate(
     word_summary = summarize_word_stats(word_stats)
 
     partition_evaluations = []
-    if partition_cfg is not None and getattr(partition_cfg, "use", False):
+    if partition_cfg is not None and partition_cfg.use:
         num_partitions = 0
         for example in examples:
             partitions = example.get("partition_gates") or []

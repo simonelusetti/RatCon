@@ -112,7 +112,7 @@ class ClusterFilter:
         logger=None,
         label="model",
     ):
-        if cluster_cfg is None or not getattr(cluster_cfg, "use", False):
+        if cluster_cfg is None or not cluster_cfg.use:
             self.centroids = None
             self.counts = None
             self.entity_cluster = None
@@ -138,7 +138,7 @@ class ClusterFilter:
         model.eval()
 
         disable_progress = should_disable_tqdm()
-        max_fit_batches = int(getattr(cluster_cfg, "max_fit_batches", 0) or 0)
+        max_fit_batches = int(cluster_cfg.max_fit_batches or 0)
         desc = f"Collecting gates for {label}"
         with torch.no_grad():
             for batch_idx, batch in enumerate(tqdm(loader, desc=desc, disable=disable_progress)):

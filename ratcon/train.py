@@ -39,38 +39,31 @@ class Trainer:
     def __init__(self, cfg, logger):
         self.cfg = cfg
         self.logger = logger
-        self.use_null_target = getattr(cfg.model.loss, "use_null_target", False)
+        self.use_null_target = cfg.model.loss.use_null_target
         self.num_models = self._determine_num_models()
         self.models, self.model_labels, self.model_paths, self.optimizer = self.build_models_and_optimizer()
         self._all_model_params = [param for model in self.models for param in model.parameters()]
         self.sparsity_weights = resolve_sparsity_weights(self.cfg.model, self.num_models, logger=self.logger)
-        dual_cfg = getattr(self.cfg.model, "dual", None)
+        dual_cfg = self.cfg.model.dual
         self.use_kl = False
         self.kl_weight = 0.0
         self.use_mutual_info = False
         self.mutual_info_weight = 0.0
         if dual_cfg is not None:
-            kl_cfg = getattr(dual_cfg, "kl", None)
-            if kl_cfg is not None:
-                self.use_kl = bool(getattr(kl_cfg, "use", False))
-                self.kl_weight = float(getattr(kl_cfg, "weight", 0.0))
-            else:
-                legacy_weight = getattr(dual_cfg, "kl_weight", None)
-                if legacy_weight is not None:
-                    self.kl_weight = float(legacy_weight)
-                    self.use_kl = self.kl_weight != 0.0
+            kl_cfg = dual_cfg.kl
+            self.use_kl = bool(kl_cfg.use)
+            self.kl_weight = float(kl_cfg.weight)
 
-            mi_cfg = getattr(dual_cfg, "mutual_info", None)
-            if mi_cfg is not None:
-                self.use_mutual_info = bool(getattr(mi_cfg, "use", False))
-                self.mutual_info_weight = float(getattr(mi_cfg, "weight", 0.0))
-        self.overlap_threshold = float(getattr(getattr(self.cfg, "eval", None), "thresh", 0.5))
+            mi_cfg = dual_cfg.mutual_info
+            self.use_mutual_info = bool(mi_cfg.use)
+            self.mutual_info_weight = float(mi_cfg.weight)
+        self.overlap_threshold = float(self.cfg.eval.thresh)
 
     def _determine_num_models(self):
-        dual_cfg = getattr(self.cfg.model, "dual", None)
-        if dual_cfg is None or not getattr(dual_cfg, "use", False):
+        dual_cfg = self.cfg.model.dual
+        if dual_cfg is None or not dual_cfg.use:
             return 1
-        num_models = int(getattr(dual_cfg, "num_models", 2))
+        num_models = int(dual_cfg.num)
         if num_models < 1:
             self.logger.warning("Configured num_models < 1; defaulting to 1.")
             return 1
@@ -204,31 +197,27 @@ class Trainer:
         
         
     def make_report(self, model, eval_dl, tok, label, report_cfg):
-        logging_cfg = getattr(self.cfg, "logging", None)
-        disable_progress = should_disable_tqdm(
-            metrics_only=getattr(logging_cfg, "metrics_only", False) if logging_cfg is not None else False
-        )
+        logging_cfg = self.cfg.logging
+        disable_progress = should_disable_tqdm(metrics_only=logging_cfg.metrics_only)
 
-        samples_cfg = getattr(report_cfg, "samples", None)
-        samples_num = getattr(samples_cfg, "num", 0) if samples_cfg is not None else 0
+        samples_cfg = report_cfg.samples
+        samples_num = samples_cfg.num
 
         partition_cfg = None
         if self.num_models == 1:
-            candidate = getattr(self.cfg.eval, "partition_dual", None)
-            if candidate is not None and getattr(candidate, "use", False):
+            candidate = self.cfg.eval.partition_dual
+            if candidate.use:
                 partition_cfg = candidate
 
-        reference_cfg = getattr(self.cfg.eval, "reference_sentence", None)
+        reference_cfg = self.cfg.eval.reference_sentence
         reference_sentence = None
-        reference_threshold = 0.5
-        if reference_cfg is not None:
-            reference_threshold = getattr(reference_cfg, "threshold", 0.5)
-            if getattr(reference_cfg, "use", False):
-                reference_sentence = getattr(reference_cfg, "sentence", None)
-                if reference_sentence is None:
-                    self.logger.warning(
-                        "reference_sentence.use is True but no sentence provided; skipping reference filtering."
-                    )
+        reference_threshold = reference_cfg.threshold
+        if reference_cfg.use:
+            reference_sentence = reference_cfg.sentence
+            if reference_sentence is None:
+                self.logger.warning(
+                    "reference_sentence.use is True but no sentence provided; skipping reference filtering."
+                )
 
         evaluation = evaluate(
             model,
@@ -236,10 +225,10 @@ class Trainer:
             tok,
             self.cfg.eval.thresh,
             disable_progress=disable_progress,
-            attention_augment=getattr(self.cfg.model, "attention_augment", False),
+            attention_augment=self.cfg.model.attention_augment,
             thresh=self.cfg.eval.thresh,
             samples_num=samples_num,
-            spacy_model=getattr(self.cfg.eval, "spacy_model", "en_core_web_sm"),
+            spacy_model=self.cfg.eval.spacy_model,
             logger=self.logger,
             partition_cfg=partition_cfg,
             reference_sentence=reference_sentence,
@@ -247,8 +236,8 @@ class Trainer:
         )
 
         cluster_info = None
-        clustering_cfg = getattr(self.cfg.model, "clustering", None)
-        if clustering_cfg and getattr(clustering_cfg, "use", False):
+        clustering_cfg = self.cfg.model.clustering
+        if clustering_cfg.use:
             cluster_info = model.get_cluster_info()
 
         report = build_report(evaluation, cluster_info)
@@ -268,10 +257,10 @@ class Trainer:
         best_epoch = None
         best_model_label = self.model_labels[0]
         best_report = None
-        epoch_samples_cfg = getattr(self.cfg.eval.report.epoch, "samples", None)
-        epoch_show_samples = bool(getattr(epoch_samples_cfg, "show", False))
-        final_samples_cfg = getattr(self.cfg.eval.report.final, "samples", None)
-        final_show_samples = bool(getattr(final_samples_cfg, "show", False))
+        epoch_samples_cfg = self.cfg.eval.report.epoch.samples
+        epoch_show_samples = bool(epoch_samples_cfg.show)
+        final_samples_cfg = self.cfg.eval.report.final.samples
+        final_show_samples = bool(final_samples_cfg.show)
 
         for epoch in range(self.cfg.train.epochs):
             avg, avg_kl, avg_mi, avg_overlap = self.train_epoch(train_dl, epoch)
@@ -281,7 +270,7 @@ class Trainer:
             if avg_mi is not None:
                 log_msg += f", mi_loss={avg_mi:.4f}"
             if avg_overlap is not None:
-                log_msg += f", multi_select={avg_overlap * 100:.2f}%"
+                log_msg += f", overlap={avg_overlap * 100:.2f}%"
             self.logger.info(log_msg)
 
             reports = {}
@@ -368,8 +357,8 @@ class Trainer:
 
 
     def evaluate(self, eval_dl, tok):
-        final_samples_cfg = getattr(self.cfg.eval.report.final, "samples", None)
-        final_show_samples = bool(getattr(final_samples_cfg, "show", False))
+        final_samples_cfg = self.cfg.eval.report.final.samples
+        final_show_samples = bool(final_samples_cfg.show)
 
         reports = {}
         display_reports = {}

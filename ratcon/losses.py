@@ -155,9 +155,9 @@ def compute_training_objectives(
 
     shared_rats, shared_comps = _compute_shared_embeddings(models, outputs, attention_mask)
 
-    loss_cfg = getattr(model_cfg, "loss", None)
-    l_comp_weight = float(getattr(loss_cfg, "l_comp", 0.0)) if loss_cfg is not None else 0.0
-    l_tv_weight = float(getattr(loss_cfg, "l_tv", 0.0)) if loss_cfg is not None else 0.0
+    loss_cfg = model_cfg.loss
+    l_comp_weight = float(loss_cfg.l_comp)
+    l_tv_weight = float(loss_cfg.l_tv)
 
     for idx, out in enumerate(outputs):
         gates = out["gates"]

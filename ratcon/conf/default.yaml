@@ -16,9 +16,14 @@ model:
     use_null_target: False  # Push complement embeddings toward the encoded null vector
   dual:
     use: False           # Use two rationale models
-    num_models: 2        # Number of rationale models when multi-model mode is enabled
-    kl_weight: 1.0      # Weight for KL divergence loss
-    sparsity_weights: [5.0, 1.0]  # Optional explicit per-model sparsity weights
+    num_models: 5        # Number of rationale models when multi-model mode is enabled
+    kl:
+      use: True
+      weight: 1.0
+    mutual_info:
+      use: False
+      weight: 1.0
+    sparsity_weights: [5.0, 1.0, 0.1, 0.1, 0.1]  # Optional explicit per-model sparsity weights
   optim:
     lr: 5e-5
     weight_decay: 1e-2
@@ -84,11 +89,12 @@ eval:
         per_sentence_stats: False
   partition_dual:
     use: False
+    parts: 2
     distance: "cosine"   # options: cosine, euclidean
     cache:
       enable: True
       path: "data/partition_cache.json"
-      max_length: 12
+      max_length: 100
 
 device: "cuda"
 
@@ -96,7 +102,7 @@ logging:
   metrics_only: False
 
 dora:
-  exclude: ["train.retrain", "eval.*", "data.rebuild_ds"]
+  exclude: ["train.retrain", "eval.report.*", "eval.eval_only", "eval.verbose", "data.rebuild_ds", "slurm.*"]
 
 array: 0
 

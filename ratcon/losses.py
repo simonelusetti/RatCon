@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 from .models import nt_xent
 
+
 def complement_margin_loss(h_anchor, h_comp, margin=0.3):
     # we want cosine(anchor, comp) to be LOW -> (1 - cos) to be HIGH
     cos = (h_anchor * h_comp).sum(dim=-1)            # [B]
@@ -61,3 +62,38 @@ def kl_loss(g1, g2, alpha1, beta1, alpha2, beta2):
     kl_2_1 = (log_p2 - log_q2).sum(dim=1).mean()
 
     return 0.5 * (kl_1_2 + kl_2_1)
+
+
+def mutual_information_penalty(g1, g2, mask, eps=1e-8):
+    """
+    Approximate mutual information between gated token selections from two models.
+    Treat each token as a Bernoulli variable with success probability equal to the soft gate.
+    """
+    valid = (mask > 0).float()
+    valid_counts = valid.sum(dim=1).clamp_min(1.0)
+
+    g1 = torch.clamp(g1, eps, 1.0 - eps)
+    g2 = torch.clamp(g2, eps, 1.0 - eps)
+
+    p11 = ((g1 * g2) * valid).sum(dim=1) / valid_counts
+    p10 = ((g1 * (1.0 - g2)) * valid).sum(dim=1) / valid_counts
+    p01 = (((1.0 - g1) * g2) * valid).sum(dim=1) / valid_counts
+    p00 = (((1.0 - g1) * (1.0 - g2)) * valid).sum(dim=1) / valid_counts
+
+    p1 = (g1 * valid).sum(dim=1) / valid_counts
+    p0 = 1.0 - p1
+    q1 = (g2 * valid).sum(dim=1) / valid_counts
+    q0 = 1.0 - q1
+
+    def _term(joint, marg1, marg2):
+        joint_clamped = joint.clamp_min(eps)
+        denom = (marg1 * marg2).clamp_min(eps)
+        return joint_clamped * (torch.log(joint_clamped) - torch.log(denom))
+
+    mi = (
+        _term(p11, p1, q1)
+        + _term(p10, p1, q0)
+        + _term(p01, p0, q1)
+        + _term(p00, p0, q0)
+    )
+    return mi.mean()

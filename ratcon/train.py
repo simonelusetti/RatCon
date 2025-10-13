@@ -8,7 +8,13 @@ from .utils import (
 
 from .models import RationaleSelectorModel, nt_xent
 from .data import get_dataset, collate
-from .losses import complement_loss, kl_loss, sparsity_loss, total_variation_1d
+from .losses import (
+    complement_loss,
+    kl_loss,
+    mutual_information_penalty,
+    sparsity_loss,
+    total_variation_1d,
+)
 from .evaluate import evaluate
 from .metrics import (
     build_report,
@@ -42,7 +48,26 @@ class Trainer:
         self._all_model_params = [param for model in self.models for param in model.parameters()]
         self.sparsity_weights = self._resolve_sparsity_weights()
         dual_cfg = getattr(self.cfg.model, "dual", None)
-        self.kl_weight = float(getattr(dual_cfg, "kl_weight", 0.0)) if dual_cfg is not None else 0.0
+        self.use_kl = False
+        self.kl_weight = 0.0
+        self.use_mutual_info = False
+        self.mutual_info_weight = 0.0
+        if dual_cfg is not None:
+            kl_cfg = getattr(dual_cfg, "kl", None)
+            if kl_cfg is not None:
+                self.use_kl = bool(getattr(kl_cfg, "use", False))
+                self.kl_weight = float(getattr(kl_cfg, "weight", 0.0))
+            else:
+                legacy_weight = getattr(dual_cfg, "kl_weight", None)
+                if legacy_weight is not None:
+                    self.kl_weight = float(legacy_weight)
+                    self.use_kl = self.kl_weight != 0.0
+
+            mi_cfg = getattr(dual_cfg, "mutual_info", None)
+            if mi_cfg is not None:
+                self.use_mutual_info = bool(getattr(mi_cfg, "use", False))
+                self.mutual_info_weight = float(getattr(mi_cfg, "weight", 0.0))
+        self.overlap_threshold = float(getattr(getattr(self.cfg, "eval", None), "thresh", 0.5))
 
     def _determine_num_models(self):
         dual_cfg = getattr(self.cfg.model, "dual", None)
@@ -188,8 +213,8 @@ class Trainer:
             loss = loss + self.cfg.model.loss.l_tv * l_tv
 
         kl_total = anchors[0].new_zeros(())
-        pair_count = 0
-        if self.num_models > 1 and self.kl_weight != 0.0:
+        kl_pairs = 0
+        if self.num_models > 1 and self.use_kl:
             for i in range(self.num_models):
                 for j in range(i + 1, self.num_models):
                     out_i = outputs[i]
@@ -203,14 +228,47 @@ class Trainer:
                         out_j["beta"],
                     )
                     kl_total = kl_total + kl_val
-                    pair_count += 1
+                    kl_pairs += 1
 
         avg_kl = None
-        if pair_count > 0:
-            avg_kl = kl_total / pair_count
-            loss = loss + self.kl_weight * avg_kl
+        if kl_pairs > 0:
+            avg_kl = kl_total / kl_pairs
+            if self.kl_weight != 0.0:
+                loss = loss + self.kl_weight * avg_kl
 
-        return loss, avg_kl
+        mi_total = anchors[0].new_zeros(())
+        mi_pairs = 0
+        if self.num_models > 1 and self.use_mutual_info:
+            mask_float = attention_mask.to(dtype=anchors[0].dtype)
+            for i in range(self.num_models):
+                for j in range(i + 1, self.num_models):
+                    mi_val = mutual_information_penalty(
+                        outputs[i]["gates"],
+                        outputs[j]["gates"],
+                        mask_float,
+                    )
+                    mi_total = mi_total + mi_val
+                    mi_pairs += 1
+
+        avg_mi = None
+        if mi_pairs > 0:
+            avg_mi = mi_total / mi_pairs
+            if self.mutual_info_weight != 0.0:
+                loss = loss + self.mutual_info_weight * avg_mi
+
+        overlap_fraction = None
+        if self.num_models > 1:
+            with torch.no_grad():
+                valid_mask = (attention_mask > 0).float()
+                valid_counts = valid_mask.sum(dim=1).clamp_min(1.0)
+                gate_stack = torch.stack([out["gates"].detach() for out in outputs], dim=0)
+                selected_counts = (gate_stack >= self.overlap_threshold).float().sum(dim=0)
+                multi_mask = (selected_counts >= 2).float()
+                per_example_overlap = (multi_mask * valid_mask).sum(dim=1) / valid_counts
+                if torch.isfinite(per_example_overlap).any():
+                    overlap_fraction = float(per_example_overlap.mean().item())
+
+        return loss, avg_kl, avg_mi, overlap_fraction
 
     def train_epoch(self, loader, epoch):
         tau = self.cfg.model.loss.tau
@@ -220,6 +278,10 @@ class Trainer:
         total = 0.0
         total_kl_loss = 0.0
         kl_present = False
+        total_mi_loss = 0.0
+        mi_present = False
+        total_overlap = 0.0
+        overlap_present = False
 
         for model in self.models:
             model.train()
@@ -235,7 +297,7 @@ class Trainer:
                 for model in self.models
             ]
 
-            loss, kl_value = self._compute_losses(outputs, attention_mask, tau)
+            loss, kl_value, mi_value, overlap_fraction = self._compute_losses(outputs, attention_mask, tau)
 
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -247,11 +309,19 @@ class Trainer:
             if kl_value is not None:
                 total_kl_loss += kl_value.item() * batch_size
                 kl_present = True
+            if mi_value is not None:
+                total_mi_loss += mi_value.item() * batch_size
+                mi_present = True
+            if overlap_fraction is not None:
+                total_overlap += overlap_fraction * batch_size
+                overlap_present = True
 
         denom = max(1, len(loader.dataset))
         avg_loss = total / denom
         avg_kl = (total_kl_loss / denom) if kl_present else None
-        return avg_loss, avg_kl
+        avg_mi = (total_mi_loss / denom) if mi_present else None
+        avg_overlap = (total_overlap / denom) if overlap_present else None
+        return avg_loss, avg_kl, avg_mi, avg_overlap
 
 
     def _fit_cluster_filter(self, model, train_dl, label):
@@ -330,11 +400,15 @@ class Trainer:
         best_report = None
 
         for epoch in range(self.cfg.train.epochs):
-            avg, avg_kl = self.train_epoch(train_dl, epoch)
+            avg, avg_kl, avg_mi, avg_overlap = self.train_epoch(train_dl, epoch)
+            log_msg = f"epoch {epoch + 1}: train_loss={avg:.4f}"
             if avg_kl is not None:
-                self.logger.info(f"epoch {epoch + 1}: train_loss={avg:.4f}, kl_loss={avg_kl:.4f}")
-            else:
-                self.logger.info(f"epoch {epoch + 1}: train_loss={avg:.4f}")
+                log_msg += f", kl_loss={avg_kl:.4f}"
+            if avg_mi is not None:
+                log_msg += f", mi_loss={avg_mi:.4f}"
+            if avg_overlap is not None:
+                log_msg += f", multi_select={avg_overlap * 100:.2f}%"
+            self.logger.info(log_msg)
 
             reports = {}
             display_reports = {}

@@ -208,29 +208,35 @@ def _compute_reference_token_scores(
     return scores
 
 
-def _generate_partition_templates(length):
-    indices = list(range(length))
+def _generate_partition_templates(length, num_parts):
+    if num_parts < 2 or length < num_parts:
+        return []
+
     templates = []
-    seen = set()
-    for r in range(1, length):
-        for combo in itertools.combinations(indices, r):
-            if len(combo) == 0 or len(combo) == length:
+    assignment = []
+
+    def backtrack(position, used_parts):
+        if position == length:
+            if used_parts == num_parts:
+                masks = []
+                for part_idx in range(num_parts):
+                    mask = [0.0] * length
+                    for token_idx, assigned_part in enumerate(assignment):
+                        if assigned_part == part_idx:
+                            mask[token_idx] = 1.0
+                    masks.append(mask)
+                templates.append(masks)
+            return
+
+        max_part = used_parts if used_parts < num_parts else num_parts - 1
+        for part_idx in range(max_part + 1):
+            if part_idx == used_parts and used_parts == num_parts:
                 continue
-            other = tuple(sorted(idx for idx in indices if idx not in combo))
-            if not other:
-                continue
-            subset1 = tuple(sorted(combo))
-            canonical = tuple(sorted((subset1, other)))
-            if canonical in seen:
-                continue
-            seen.add(canonical)
-            mask1 = [0.0] * length
-            mask2 = [0.0] * length
-            for idx in subset1:
-                mask1[idx] = 1.0
-            for idx in other:
-                mask2[idx] = 1.0
-            templates.append((mask1, mask2))
+            assignment.append(part_idx)
+            backtrack(position + 1, used_parts + (1 if part_idx == used_parts else 0))
+            assignment.pop()
+
+    backtrack(0, 0)
     return templates
 
 
@@ -258,34 +264,44 @@ def _ensure_partition_cache_loaded(cache_cfg):
     except Exception:
         return
     for key, value in data.items():
+        if ":" in key:
+            length_str, parts_str = key.split(":", 1)
+        else:
+            length_str, parts_str = key, "2"
         try:
-            length = int(key)
+            length = int(length_str)
+            num_parts = int(parts_str)
         except ValueError:
             continue
         templates = []
-        for pair in value:
-            if not isinstance(pair, list) or len(pair) != 2:
+        for entry in value:
+            if not isinstance(entry, list) or len(entry) != num_parts:
                 continue
-            first, second = pair
-            if len(first) != length or len(second) != length:
-                continue
-            templates.append((list(map(float, first)), list(map(float, second))))
+            masks = []
+            valid = True
+            for mask in entry:
+                if not isinstance(mask, list) or len(mask) != length:
+                    valid = False
+                    break
+                masks.append(list(map(float, mask)))
+            if valid:
+                templates.append(masks)
         if templates:
-            _PARTITION_TEMPLATE_CACHE[length] = templates
+            _PARTITION_TEMPLATE_CACHE[(length, num_parts)] = templates
 
 
 def _persist_partition_cache():
     if _PARTITION_TEMPLATE_PATH is None:
         return
     data = {}
-    for length, pairs in _PARTITION_TEMPLATE_CACHE.items():
+    for (length, num_parts), templates in _PARTITION_TEMPLATE_CACHE.items():
         formatted = []
-        for first, second in pairs:
-            formatted.append([
-                list(map(float, first)),
-                list(map(float, second)),
-            ])
-        data[str(length)] = formatted
+        for masks in templates:
+            if len(masks) != num_parts:
+                continue
+            formatted.append([list(map(float, mask)) for mask in masks])
+        if formatted:
+            data[f"{length}:{num_parts}"] = formatted
     _PARTITION_TEMPLATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     _PARTITION_TEMPLATE_PATH.write_text(json.dumps(data), encoding="utf-8")
 
@@ -299,16 +315,18 @@ def _get_partition_templates(length, partition_cfg):
         max_length = getattr(cache_cfg, "max_length", None)
         _ensure_partition_cache_loaded(cache_cfg)
 
+    num_parts = max(2, int(getattr(partition_cfg, "parts", 2)))
+
     if cache_enabled:
-        cached = _PARTITION_TEMPLATE_CACHE.get(length)
+        cached = _PARTITION_TEMPLATE_CACHE.get((length, num_parts))
         if cached is not None:
             return cached
     if max_length is not None and length > max_length:
         return []
 
-    templates = _generate_partition_templates(length)
+    templates = _generate_partition_templates(length, num_parts)
     if cache_enabled and templates:
-        _PARTITION_TEMPLATE_CACHE[length] = templates
+        _PARTITION_TEMPLATE_CACHE[(length, num_parts)] = templates
         _persist_partition_cache()
     return templates
 
@@ -463,7 +481,9 @@ def _compute_partition_gates(model, token_embeddings, attention_mask, gates, par
     hard_mask = (gates_device >= thresh) & (att_mask > 0)
 
     selected_idx = torch.nonzero(hard_mask, as_tuple=False).flatten()
-    if selected_idx.numel() < 2:
+
+    num_parts = max(2, int(getattr(partition_cfg, "parts", 2)))
+    if selected_idx.numel() < num_parts:
         return None
 
     base_gate = torch.zeros_like(att_mask)
@@ -477,52 +497,54 @@ def _compute_partition_gates(model, token_embeddings, attention_mask, gates, par
         return None
 
     template_tensor = torch.tensor(
-        [[first, second] for first, second in templates],
+        templates,
         device=device,
         dtype=token_embeddings.dtype,
     )
-    mask_rel_1 = template_tensor[:, 0, :]
-    mask_rel_2 = template_tensor[:, 1, :]
-
-    num_templates = mask_rel_1.size(0)
+    num_templates, num_parts, selected_len = template_tensor.shape
     seq_len = att_mask.size(0)
 
-    gate_matrix_1 = torch.zeros(num_templates, seq_len, device=device, dtype=token_embeddings.dtype)
-    gate_matrix_2 = torch.zeros_like(gate_matrix_1)
-    gate_matrix_1[:, selected_idx] = mask_rel_1
-    gate_matrix_2[:, selected_idx] = mask_rel_2
+    gate_matrix = torch.zeros(
+        num_templates,
+        num_parts,
+        seq_len,
+        device=device,
+        dtype=token_embeddings.dtype,
+    )
+    gate_matrix[:, :, selected_idx] = template_tensor
 
-    att_mask_unsq = att_mask.unsqueeze(0)
-    mask1 = gate_matrix_1 * att_mask_unsq
-    mask2 = gate_matrix_2 * att_mask_unsq
+    att_mask_unsq = att_mask.unsqueeze(0).unsqueeze(0)
+    masks = gate_matrix * att_mask_unsq
 
-    valid_mask = (mask1.sum(dim=1) > 0) & (mask2.sum(dim=1) > 0)
+    valid_mask = (masks.sum(dim=2) > 0).all(dim=1)
     if not valid_mask.any():
         return None
 
     valid_indices = valid_mask.nonzero(as_tuple=False).flatten()
-    mask1_valid = mask1[valid_indices]
-    mask2_valid = mask2[valid_indices]
+    mask_valid = masks[valid_indices]
 
-    token_batch = token_embeddings.unsqueeze(0).expand(mask1_valid.size(0), -1, -1)
-    emb1 = model.pooler({
-        "token_embeddings": token_batch,
-        "attention_mask": mask1_valid,
-    })["sentence_embedding"]
-    emb2 = model.pooler({
-        "token_embeddings": token_batch,
-        "attention_mask": mask2_valid,
-    })["sentence_embedding"]
+    num_valid = mask_valid.size(0)
+    token_batch = token_embeddings.unsqueeze(0).expand(num_valid * num_parts, -1, -1)
+    att_batch = mask_valid.reshape(num_valid * num_parts, seq_len)
 
-    dist = _embedding_distance(original, emb1, partition_cfg) + _embedding_distance(original, emb2, partition_cfg)
+    pooled = model.pooler({
+        "token_embeddings": token_batch,
+        "attention_mask": att_batch,
+    })["sentence_embedding"]
+    pooled = pooled.reshape(num_valid, num_parts, -1)
+
+    dist = None
+    for part_idx in range(num_parts):
+        part_emb = pooled[:, part_idx, :]
+        part_dist = _embedding_distance(original, part_emb, partition_cfg)
+        dist = part_dist if dist is None else dist + part_dist
+
     best_val, best_idx = torch.min(dist, dim=0)
     if not torch.isfinite(best_val):
         return None
 
-    return [
-        mask1_valid[best_idx].detach().cpu().tolist(),
-        mask2_valid[best_idx].detach().cpu().tolist(),
-    ]
+    best_masks = mask_valid[best_idx]
+    return [best_masks[part_idx].detach().cpu().tolist() for part_idx in range(num_parts)]
 
 
 def _get_gates(example, partition_idx=None):

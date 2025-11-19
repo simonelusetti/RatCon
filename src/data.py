@@ -1,12 +1,23 @@
 # data.py
 import os, logging, torch
 import numpy as np
+from pathlib import Path
 from datasets import load_dataset, load_from_disk, DownloadConfig
 from transformers import AutoTokenizer, AutoModel
-from dora import to_absolute_path
 
 logger = logging.getLogger(__name__)
 
+
+# Dataset-specific constants
+_CNN_VERSION = "3.0.0"
+_CNN_DEFAULT_FIELD = "highlights"
+_WIKIANN_LANG = "en"
+_REPO_ROOT = Path(__file__).resolve().parent.parent.resolve()
+
+
+def _cache_path(relative: str) -> str:
+    """Resolve dataset caches relative to the repository root."""
+    return str((_REPO_ROOT / relative.lstrip("./")).resolve())
 
 
 # Cache/load configuration
@@ -60,14 +71,11 @@ def _encode_examples(ds, tok, encoder, text_fn, max_length, keep_labels=None):
         }
         with torch.no_grad():
             out = encoder(**inputs, output_attentions=True, return_dict=True)
-            attns = out.attentions[-1].mean(1)   # last layer, avg heads [B,L,L]
 
             out_dict = {
                 "input_ids": np.asarray(enc["input_ids"], dtype=np.int64),
                 "attention_mask": np.asarray(enc["attention_mask"], dtype=np.int64),
                 "embeddings": out.last_hidden_state.squeeze(0).detach().cpu().to(torch.float32).numpy(),
-                "incoming": attns.sum(-2).squeeze(0).detach().cpu().to(torch.float32).numpy(),   # [L]
-                "outgoing": attns.sum(-1).squeeze(0).detach().cpu().to(torch.float32).numpy(),   # [L]
             }
             # Align ner_tags to subword tokens if present
             if has_ner:
@@ -99,12 +107,12 @@ def _build_dataset(name, split, tokenizer_name, max_length, subset=None, shuffle
     """
     # pick dataset + text extraction strategy
     if name == "cnn":
-        ds = _load_dataset("cnn_dailymail", "3.0.0", split=split)
-        if cnn_field is None: cnn_field = "highlights"
+        ds = _load_dataset("cnn_dailymail", _CNN_VERSION, split=split)
+        if cnn_field is None: cnn_field = _CNN_DEFAULT_FIELD
         text_fn = lambda x: x[cnn_field]
         keep_labels = []
     elif name == "wikiann":
-        ds = _load_dataset("wikiann", "en", split=split)
+        ds = _load_dataset("wikiann", _WIKIANN_LANG, split=split)
         text_fn = lambda x: " ".join(x["tokens"])
         keep_labels = ["ner_tags", "tokens"]
     elif name == "conll2003":
@@ -143,8 +151,6 @@ def collate(batch):
 
     input_ids = [_as_tensor(x["input_ids"], torch.long) for x in batch]
     attention_masks = [_as_tensor(x["attention_mask"], torch.long) for x in batch]
-    incoming = [_as_tensor(x["incoming"], torch.float) for x in batch]
-    outgoing = [_as_tensor(x["outgoing"], torch.float) for x in batch]
 
     has_ner = "ner_tags" in batch[0]
     if has_ner:
@@ -153,16 +159,12 @@ def collate(batch):
     # pad to longest sequence in batch
     input_ids = pad_sequence(input_ids, batch_first=True, padding_value=0)
     attention_masks = pad_sequence(attention_masks, batch_first=True, padding_value=0)
-    incoming = pad_sequence(incoming, batch_first=True, padding_value=0.0)
-    outgoing = pad_sequence(outgoing, batch_first=True, padding_value=0.0)
     if has_ner:
         ner_tags = pad_sequence(ner_tags, batch_first=True, padding_value=-100)  # -100 is common ignore_index
 
     batch_out = {
         "input_ids": input_ids,
         "attention_mask": attention_masks,
-        "incoming": incoming,
-        "outgoing": outgoing
     }
 
     if has_ner:
@@ -182,19 +184,21 @@ def collate(batch):
 def get_dataset(tokenizer_name="sentence-transformers/all-MiniLM-L6-v2",
                 name="cnn", split="train", max_length=256, cnn_field=None,
                 subset=None, rebuild=False, shuffle=False):
-    
-    if cnn_field is not None:
-        if subset is not None and subset != 1.0:
-            path = f"./data/{name}_{cnn_field}_{split}_{subset}.pt"
-        else:
-            path = f"./data/{name}_{cnn_field}_{split}.pt"
-    else:
-        if subset is not None and subset != 1.0:
-            path = f"./data/{name}_{split}_{subset}.pt"
-        else:
-            path = f"./data/{name}_{split}.pt"
 
-    path = to_absolute_path(path)
+    cache_parts = [name]
+    actual_cnn_field = cnn_field
+    if name == "cnn":
+        actual_cnn_field = cnn_field or _CNN_DEFAULT_FIELD
+        cache_parts.extend([_CNN_VERSION, actual_cnn_field])
+    elif name == "wikiann":
+        cache_parts.append(_WIKIANN_LANG)
+
+    cache_base = "_".join(cache_parts)
+
+    if subset is not None and subset != 1.0:
+        path = _cache_path(f"data/{cache_base}_{split}_{subset}.pt")
+    else:
+        path = _cache_path(f"data/{cache_base}_{split}.pt")
     tok = AutoTokenizer.from_pretrained(tokenizer_name, use_fast=True)
 
     if os.path.exists(path) and not rebuild:
@@ -202,7 +206,8 @@ def get_dataset(tokenizer_name="sentence-transformers/all-MiniLM-L6-v2",
         ds = load_from_disk(path)
     else:
         logger.info(f"Building dataset {name} and saving to {path}")
-        ds, tok = _build_dataset(name, split, tokenizer_name, max_length, subset, shuffle, cnn_field)
+        builder_cnn_field = actual_cnn_field if name == "cnn" else cnn_field
+        ds, tok = _build_dataset(name, split, tokenizer_name, max_length, subset, shuffle, builder_cnn_field)
         ds.save_to_disk(path)
 
     if shuffle:

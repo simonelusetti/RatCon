@@ -3,23 +3,12 @@ defaults:
 
 model:
   sbert_name: "sentence-transformers/all-MiniLM-L6-v2"
-  attention_augment: False
   loss:
     l_comp: 0.1       # weight for adversary loss
-    l_s: 0.01         # sparsity regularizer
+    l_s: 0.1         # sparsity regularizer
     l_tv: 10.0        # total variation regularizer
     tau: 0.07         # InfoNCE temperature (was model.nt_xent.temperature)
     use_null_target: False  # Push complement embeddings toward the encoded null vector
-  dual:
-    use: False           # Use two rationale models
-    num: 5        # Number of rationale models when multi-model mode is enabled
-    kl:
-      use: False
-      weight: 1.0
-    mutual_info:
-      use: True
-      weight: 1.0
-    sparsity_weights: [5.0, 1.0, 0.1, 0.1, 0.1]  # Optional explicit per-model sparsity weights
   optim:
     lr: 5e-5
     weight_decay: 1e-2
@@ -51,11 +40,6 @@ eval:
   eval_only: False
   verbose: False
   thresh: 0.5
-  reference_sentence:
-    use: False
-    sentence: "On 14 July 2019, Dr. Amelia Johnson met UN Secretary-General António Guterres in Paris to discuss AI ethics with Google, Microsoft, and IBM ahead of the World Economic Forum summit in Geneva."
-    threshold: 0.5
-  spacy_model: "en_core_web_sm"
   report:
     epoch:
       metrics: False
@@ -71,14 +55,6 @@ eval:
         num: 10
         show: False
         per_sentence_stats: False
-  partition_dual:
-    use: False
-    parts: 2
-    distance: "cosine"   # options: cosine, euclidean
-    cache:
-      enable: True
-      path: "data/partition_cache.json"
-      max_length: 100
 
 device: "cuda"
 

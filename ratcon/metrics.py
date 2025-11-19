@@ -80,7 +80,7 @@ def format_word_summary(summary):
     )
 
 
-def build_report(evaluation, cluster_info=None):
+def build_report(evaluation):
     metrics = evaluation.get("metrics") or {}
     metrics = {k: (float(v) if isinstance(v, (int, float)) else v) for k, v in metrics.items()}
     report = {
@@ -89,8 +89,6 @@ def build_report(evaluation, cluster_info=None):
         "samples": evaluation.get("samples") or [],
         "word_summary": evaluation.get("word_summary") or {},
     }
-    if cluster_info:
-        report["cluster"] = cluster_info
     return report
 
 
@@ -106,18 +104,6 @@ def log_report(logger, report, report_cfg, report_name=None, show_samples=False)
 
     summary = format_word_summary(report.get("word_summary"))
     if report_cfg.summary: parts.append(summary+"\n")
-
-    cluster = report.get("cluster")
-    if cluster and report_cfg.clustering:
-        cluster_parts = []
-        if cluster.get("tokens") is not None:
-            cluster_parts.append(f"tokens={cluster['tokens']}")
-        if cluster.get("cluster_counts"):
-            cluster_parts.append(f"counts={cluster['cluster_counts']}")
-        if cluster.get("entity_cluster") is not None:
-            cluster_parts.append(f"entity_cluster={cluster['entity_cluster']}")
-        if cluster_parts:
-            parts.append("cluster: " + ", ".join(cluster_parts)+"\n")
 
     # Samples (condensed)
     if show_samples:

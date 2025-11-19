@@ -358,17 +358,6 @@ def _run_inference_examples(
 
             out = model(embeddings, attention_mask, incoming, outgoing)
             gates_tensor = out["gates"]
-            use_cluster = False
-            if hasattr(model, "get_cluster_info"):
-                info = model.get_cluster_info()
-                if info:
-                    use_cluster = True
-            if use_cluster:
-                gates_tensor, _ = model.apply_cluster_filter(
-                    out["token_embeddings"],
-                    gates_tensor,
-                    attention_mask,
-                )
 
             for i in range(embeddings.size(0)):
                 ids = input_ids[i].cpu().tolist()
@@ -451,8 +440,6 @@ def _pool_embedding(model, token_embeddings, attention_mask, gate_mask):
         "token_embeddings": emb,
         "attention_mask": mask,
     })["sentence_embedding"]
-    if hasattr(model, "fourier"):
-        pooled = model.fourier(pooled)
     return pooled
 
 

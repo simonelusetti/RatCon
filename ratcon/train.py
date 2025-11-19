@@ -187,15 +187,6 @@ class Trainer:
         return avg_loss, avg_kl, avg_mi, avg_overlap
 
 
-    def _fit_cluster_filter(self, model, train_dl, label):
-        model.fit_cluster_filter_from_loader(
-            train_dl,
-            self.cfg.model.clustering,
-            logger=self.logger,
-            label=label,
-        )
-        
-        
     def make_report(self, model, eval_dl, tok, label, report_cfg):
         logging_cfg = self.cfg.logging
         disable_progress = should_disable_tqdm(metrics_only=logging_cfg.metrics_only)
@@ -235,18 +226,13 @@ class Trainer:
             reference_threshold=reference_threshold,
         )
 
-        cluster_info = None
-        clustering_cfg = self.cfg.model.clustering
-        if clustering_cfg.use:
-            cluster_info = model.get_cluster_info()
-
-        report = build_report(evaluation, cluster_info)
+        report = build_report(evaluation)
 
         partition_reports = []
         for idx, part_eval in enumerate(evaluation.get("partitions") or []):
             base_label = part_eval.get("label") or f"partition_{idx + 1}"
             part_label = f"{label}_{base_label}"
-            part_report = build_report(part_eval, None)
+            part_report = build_report(part_eval)
             partition_reports.append((part_label, part_report))
 
         return report, partition_reports
@@ -277,8 +263,6 @@ class Trainer:
             display_reports = {}
             with torch.no_grad():
                 for label, model in self._iter_models():
-                    if self.cfg.model.clustering.use:
-                        self._fit_cluster_filter(model, train_dl, label)
                     report, partition_reports = self.make_report(model, eval_dl, tok, label, self.cfg.eval.report.epoch)
                     log_report(
                         self.logger,

@@ -66,10 +66,6 @@ def shared_distribution(g1, g2, token_emb1, token_emb2, attention_mask, model1, 
         "token_embeddings": token_emb2,
         "attention_mask": shared_mask,
     })["sentence_embedding"]
-    if hasattr(model1, "fourier"):
-        h_shared1 = model1.fourier(h_shared1)
-    if hasattr(model2, "fourier"):
-        h_shared2 = model2.fourier(h_shared2)
 
     return h_shared1, h_shared2, shared_mask
 
@@ -89,10 +85,6 @@ def shared_complement_distribution(g1, g2, token_emb1, token_emb2, attention_mas
         "token_embeddings": token_emb2,
         "attention_mask": shared_comp_mask,
     })["sentence_embedding"]
-    if hasattr(model1, "fourier"):
-        h_shared_comp1 = model1.fourier(h_shared_comp1)
-    if hasattr(model2, "fourier"):
-        h_shared_comp2 = model2.fourier(h_shared_comp2)
 
     return h_shared_comp1, h_shared_comp2, shared_comp_mask
 

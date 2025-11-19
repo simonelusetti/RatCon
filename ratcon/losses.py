@@ -124,9 +124,6 @@ def _compute_shared_embeddings(models, outputs, attention_mask):
             "token_embeddings": out["token_embeddings"],
             "attention_mask": shared_comp_mask,
         })["sentence_embedding"]
-        if hasattr(model, "fourier"):
-            pooled_rat = model.fourier(pooled_rat)
-            pooled_comp = model.fourier(pooled_comp)
         shared_rationales.append(pooled_rat)
         shared_complements.append(pooled_comp)
 

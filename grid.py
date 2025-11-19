@@ -5,13 +5,13 @@ The YAML file must expose two top-level keys:
 ```
 baseline:
   - data.train.subset=0.1
-  - model.fourier.use=True
+  - train.epochs=5
 
 sweep:
-  - - model.fourier.mode=lowpass
-    - model.fourier.keep_ratio=0.3
-  - - model.fourier.mode=highpass
-    - model.fourier.keep_ratio=0.5
+  - - model.loss.l_s=0.01
+    - model.loss.l_tv=5.0
+  - - model.loss.l_s=0.05
+    - model.loss.l_tv=2.0
 ```
 
 Each list under `sweep` is appended to the baseline overrides and executed

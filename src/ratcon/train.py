@@ -117,9 +117,8 @@ class Trainer:
 
         if best_report is not None:
             self.logger.info(f"Best Epoch {best_epoch} with F1 {best_f1:.4f}")
-            log_report(
+            best_report.log(
                 self.logger,
-                best_report,
                 report_cfg=self.cfg.eval.report.final,
                 report_name="Training Best",
                 show_samples=bool(self.cfg.eval.report.final.samples.show),

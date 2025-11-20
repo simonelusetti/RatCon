@@ -57,9 +57,6 @@ eval:
 
 device: "cuda"
 
-logging:
-  metrics_only: False
-
 dora:
   exclude: ["train.retrain", "eval.report.*", "eval.eval_only", "eval.verbose", "data.rebuild_ds", "slurm.*"]
 

@@ -1,9 +1,10 @@
 "RatCon components packaged for reuse."
 
-from . import data, models, train, utils
+from . import data, metrics, models, train, utils
 
 __all__ = [
     "data",
+    "metrics",
     "models",
     "train",
     "utils",

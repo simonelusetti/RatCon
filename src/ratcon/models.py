@@ -70,16 +70,3 @@ class RationaleSelectorModel(nn.Module):
             "gates": g, "alpha": alpha, "beta": beta,
             "token_embeddings": embeddings,
         }
-
-
-
-
-def nt_xent(anchor, positive, temperature=0.07):
-    """
-    InfoNCE with in-batch negatives: anchors vs. positives (one-to-one).
-    """
-    temperature = max(float(temperature), 1e-3)
-    B = anchor.size(0)
-    logits = anchor @ positive.t() / temperature              # [B,B]
-    labels = torch.arange(B, device=anchor.device)
-    return F.cross_entropy(logits, labels)

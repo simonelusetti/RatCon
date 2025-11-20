@@ -4,12 +4,9 @@ from tqdm import tqdm
 from .utils import (
     should_disable_tqdm,
     get_logger,
-    compute_training_objectives,
-    build_report,
-    log_report,
-    render_reports_table,
-    evaluate,
+    compute_training_objectives
 )
+from .metrics import log_report, make_report
 
 from .models import RationaleSelectorModel
 from .data import get_dataset, collate
@@ -31,13 +28,12 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # Trainer
 # -------------------------------------------------------------------
 class Trainer:
-    def __init__(self, cfg, logger):
+    def __init__(self, cfg, logger, tok, xp):
         self.cfg = cfg
         self.logger = logger
-        self.model_label = "model"
-        self.model_path = f"{self.model_label}.pth"
+        self.model_path = "model.pth"
         self.model = RationaleSelectorModel(cfg=self.cfg.model).to(self.cfg.device)
-        self._load_or_initialize_model(self.model, self.model_path, self.model_label)
+        self._load_or_initialize_model(self.model, self.model_path, "model")
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=self.cfg.model.optim.lr,
@@ -45,17 +41,19 @@ class Trainer:
             betas=self.cfg.model.optim.betas,
         )
         self._all_model_params = list(self.model.parameters())
+        self.tok = tok
+        self.xp = xp
 
-    def _load_or_initialize_model(self, model, path, label):
+    def _load_or_initialize_model(self, model, path):
         if model is None:
             return
         if os.path.exists(path) and (not self.cfg.train.retrain or self.cfg.eval.eval_only):
-            self.logger.info(f"Loading {label} from {path}")
+            self.logger.info(f"Loading model from {path}")
             state = torch.load(path, map_location=self.cfg.device)
             model.load_state_dict(state)
         else:
-            self.logger.info(f"Training {label} from scratch")
-
+            self.logger.info(f"Training model from scratch")
+            
     def train_epoch(self, loader, epoch):
         tau = self.cfg.model.loss.tau
         grad_clip = self.cfg.train.grad_clip
@@ -71,7 +69,6 @@ class Trainer:
             output = self.model(embeddings, attention_mask)
 
             loss = compute_training_objectives(
-                self.model,
                 output,
                 attention_mask,
                 self.cfg.model,
@@ -86,38 +83,12 @@ class Trainer:
             batch_size = embeddings.size(0)
             total += loss.item() * batch_size
 
-        denom = max(1, len(loader.dataset))
-        avg_loss = total / denom
-        return avg_loss
+        avg_loss = total / max(1, len(loader.dataset))
+        return avg_loss        
 
-
-    def make_report(self, model, eval_dl, tok, label, report_cfg):
-        logging_cfg = self.cfg.logging
-        disable_progress = should_disable_tqdm(metrics_only=logging_cfg.metrics_only)
-
-        samples_cfg = report_cfg.samples
-        samples_num = samples_cfg.num
-
-        evaluation = evaluate(
-            model,
-            eval_dl,
-            tok,
-            self.cfg.eval.thresh,
-            disable_progress=disable_progress,
-            thresh=self.cfg.eval.thresh,
-            samples_num=samples_num,
-            logger=self.logger,
-        )
-
-        report = build_report(evaluation)
-
-        return report, []
-
-
-    def train(self, train_dl, eval_dl, tok, xp):
+    def train(self, train_dl, eval_dl):
         best_f1 = float('-inf')
         best_epoch = None
-        best_model_label = self.model_label
         best_report = None
         epoch_show_samples = bool(self.cfg.eval.report.epoch.samples.show)
         final_samples_cfg = self.cfg.eval.report.final.samples
@@ -127,80 +98,87 @@ class Trainer:
             avg = self.train_epoch(train_dl, epoch)
             self.logger.info(f"epoch {epoch + 1}: train_loss={avg:.4f}")
 
-            display_reports = {}
-            with torch.no_grad():
-                label = self.model_label
-                report, _ = self.make_report(self.model, eval_dl, tok, label, self.cfg.eval.report.epoch)
-                log_report(
-                    self.logger,
-                    report,
-                    report_cfg=self.cfg.eval.report.epoch,
-                    report_name=f"Epoch {epoch + 1} {label}",
-                    show_samples=epoch_show_samples,
-                )
-                xp.link.push_metrics({f"eval/{epoch}/{label}/{self.cfg.data.eval.dataset}": report})
-                display_reports[label] = report
-
-            table = render_reports_table(
-                display_reports,
-                precision=4
+            report = self.evaluate(
+                eval_dl,
+                self.tok,
+                num_samples=final_samples_cfg.num if final_show_samples else 0,
+                show_samples=epoch_show_samples,
             )
-            self.logger.info(table)
+            self.xp.link.push_metrics({f"eval/{epoch}/{self.cfg.data.eval.dataset}": report})
 
-            metrics = display_reports[self.model_label].get("metrics") or {}
-            f1 = metrics.get('f1')
+            metrics = report["metrics"]
+            f1 = metrics["f1"]
             if f1 is not None and f1 > best_f1:
                 best_f1 = f1
                 best_epoch = epoch + 1
-                best_model_label = self.model_label
-                best_report = display_reports[self.model_label]
+                best_report = report
                 self.logger.info(
                     f"New best F1: {best_f1:.4f}, saving model to {self.model_path}"
                 )
                 torch.save(self.model.state_dict(), self.model_path)
 
         if best_report is not None:
-            self.logger.info(f"Best model: {best_model_label} at epoch {best_epoch} with F1 {best_f1:.4f}")
-            self.logger.info(f"Best report: {best_report}")
+            self.logger.info(f"Best Epoch {best_epoch} with F1 {best_f1:.4f}")
             log_report(
                 self.logger,
                 best_report,
                 report_cfg=self.cfg.eval.report.final,
-                report_name="Final best " + best_model_label,
+                report_name="Training Best",
                 show_samples=final_show_samples,
             )
-            xp.link.push_metrics({f"best_eval/{best_epoch}/{best_model_label}/{self.cfg.data.eval.dataset}": best_report})
+            self.xp.link.push_metrics({f"best_eval/{best_epoch}/{self.cfg.data.eval.dataset}": best_report})
         else:
             self.logger.info("No best report recorded; skipping checkpoint summary.")
 
-        return best_report, best_model_label
+        return best_report
+    
+    def _inference(self, data, tok, disable_progress):
+        inf = []
+        with torch.no_grad():
+            for batch in tqdm(data, desc="Evaluating", disable=disable_progress):
+                embeddings, attention_mask, input_ids = batch["embeddings"], batch["attention_mask"], batch["input_ids"]
+                ner_tags = None if not "ner_tags" in batch else batch["ner_tags"]
 
+                output = self.model(embeddings, attention_mask)
+                gates_tensor = output["gates"]
 
-    def evaluate(self, eval_dl, tok):
-        final_samples_cfg = self.cfg.eval.report.final.samples
-        final_show_samples = bool(final_samples_cfg.show)
+                for i in range(embeddings.size(0)):
+                    ids = input_ids[i].cpu().tolist()
+                    tokens = tok.convert_ids_to_tokens(ids)
+                    mask = attention_mask[i].cpu().tolist()
+                    gates = gates_tensor[i].detach().cpu().tolist()
 
-        label = self.model_label
-        report, _ = self.make_report(self.model, eval_dl, tok, label, self.cfg.eval.report.final)
-        display_reports = {label: report}
+                    inf.append(
+                        {
+                            "ids": ids,
+                            "tokens": tokens,
+                            "mask": mask,
+                            "gates": gates,
+                            "gold": None if ner_tags is None else ner_tags[i].cpu().tolist(),
+                        }
+                    )
+        return inf
 
-        log_report(
+    def evaluate(self, eval_dl, report_name="Evaluation", report_cfg=None):
+        disable_progress = should_disable_tqdm()
+
+        report = make_report(
+            self.model,
+            eval_dl,
+            self.tok,
+            self.cfg.eval.thresh,
+            disable_progress=disable_progress,
+            thresh=self.cfg.eval.thresh,
+            num_samples=report_cfg.samples.num if report_cfg and report_cfg.samples.show else 0,
+            logger=self.logger,
+        )
+    
+        report.log_report(
             self.logger,
-            report,
-            report_cfg=self.cfg.eval.report.final,
-            report_name="Eval " + label,
-            show_samples=final_show_samples,
+            report_cfg=report_cfg,
+            report_name=report_name,
+            show_samples=report_cfg.samples.show if report_cfg and report_cfg.samples else False,
         )
-
-        table = render_reports_table(
-            display_reports,
-            precision=4
-        )
-        
-
-        self.logger.info(table)
-
-
 
 # -------------------------------------------------------------------
 # Main
@@ -260,8 +238,8 @@ def main(cfg):
     )
 
     # Train or eval
-    trainer = Trainer(cfg, logger)
+    trainer = Trainer(cfg, logger, tok, xp)
     if cfg.eval.eval_only:
-        trainer.evaluate(eval_dl, tok)
+        trainer.evaluate(eval_dl)
     else:
-        trainer.train(train_dl, eval_dl, tok, xp)   
+        trainer.train(train_dl, eval_dl)   

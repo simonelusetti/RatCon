@@ -75,6 +75,30 @@ def merge_counts_map(base: dict, updates: dict) -> dict:
     return base
 
 
+def _normalize_label_name(name: str | None) -> str | None:
+    """Normalize BIO label names to a canonical key (strips BIO prefix, drops 'O')."""
+    if not name:
+        return None
+    if name.upper() == "O":
+        return None
+    if "-" in name:
+        name = name.split("-", 1)[-1]
+    return name.upper()
+
+
+def build_label_groups(label_names: list[str] | None) -> dict[str, list[int]]:
+    """Map normalized label names to the indices they correspond to."""
+    groups: dict[str, list[int]] = {}
+    if not label_names:
+        return groups
+    for idx, raw in enumerate(label_names):
+        normalized = _normalize_label_name(raw)
+        if normalized is None:
+            continue
+        groups.setdefault(normalized, []).append(idx)
+    return groups
+
+
 def complement_margin_loss(h_anchor, h_comp, margin=0.3):
     # we want cosine(anchor, comp) to be LOW -> (1 - cos) to be HIGH
     cos = (h_anchor * h_comp).sum(dim=-1)            # [B]
@@ -97,10 +121,8 @@ def total_variation_1d(gates, mask):
     return (diff * both).sum() / (both.sum() + 1e-8)
 
 
-def complement_loss(h_comp, h_anchor, null_vec=None, use_null_target=False, temperature=0.07):
-    """Push complements toward the null embedding or repel them from anchors."""
-    if use_null_target and null_vec is not None:
-        return (h_comp - null_vec).pow(2).mean()
+def complement_loss(h_comp, h_anchor, temperature=0.07):
+    """Repel complements from anchors (no null embedding target)."""
     return -nt_xent(h_comp, h_anchor, temperature=temperature)
 
 
@@ -111,15 +133,13 @@ def compute_training_objectives(
     model_cfg,
     *,
     temperature,
-    use_null_target,
 ):
     """Compute total loss for single-model training."""
     anchors = output["h_anchor"]
-    null_vec = output["null"] if use_null_target else None
     gates = output["gates"]
 
     l_rat = nt_xent(output["h_rat"], anchors, temperature=temperature)
-    l_comp = complement_loss(output["h_comp"], anchors, null_vec, use_null_target, temperature)
+    l_comp = complement_loss(output["h_comp"], anchors, temperature=temperature)
     l_s = sparsity_loss(gates, attention_mask)
     l_tv = total_variation_1d(gates, attention_mask)
 

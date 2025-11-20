@@ -34,7 +34,6 @@ class Trainer:
     def __init__(self, cfg, logger):
         self.cfg = cfg
         self.logger = logger
-        self.use_null_target = cfg.model.loss.use_null_target
         self.model_label = "model"
         self.model_path = f"{self.model_label}.pth"
         self.model = RationaleSelectorModel(cfg=self.cfg.model).to(self.cfg.device)
@@ -77,7 +76,6 @@ class Trainer:
                 attention_mask,
                 self.cfg.model,
                 temperature=tau,
-                use_null_target=self.use_null_target,
             )
 
             self.optimizer.zero_grad(set_to_none=True)

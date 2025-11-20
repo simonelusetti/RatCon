@@ -35,23 +35,19 @@ class RationaleSelectorModel(nn.Module):
     Inputs are already SBERT token embeddings.
     We only do selection + SBERT pooling (mean/cls/max).
     """
-    def __init__(self, cfg, *, pooler=None, embedding_dim=None, null_embedding=None):
+    def __init__(self, cfg, *, pooler=None, embedding_dim=None):
         super().__init__()
         self.cfg = cfg
-        if pooler is None or embedding_dim is None or null_embedding is None:
+        if pooler is None or embedding_dim is None:
             sbert = SentenceTransformer(cfg.sbert_name)
             self.pooler = sbert[1]  # SentenceTransformer pooling module
             d = sbert[0].auto_model.config.hidden_size
-            with torch.no_grad():
-                null_emb = sbert.encode([""], convert_to_tensor=True).squeeze(0)
         else:
             self.pooler = pooler
             d = int(embedding_dim)
-            null_emb = null_embedding
 
         self.selector = Selector(d)
         self.kuma = HardKumaSampler()
-        self.register_buffer("null_embedding", null_emb.clone().detach())
 
     def forward(self, embeddings, attention_mask):
         alpha, beta = self.selector(embeddings)
@@ -69,12 +65,9 @@ class RationaleSelectorModel(nn.Module):
         h_comp = self.pooler({"token_embeddings": embeddings,
                               "attention_mask": attention_mask * (1.0 - g)})["sentence_embedding"]
 
-        null_vec = self.null_embedding.to(embeddings.device).unsqueeze(0).expand(h_comp.size(0), -1)
-
         return {
             "h_anchor": h_anchor, "h_rat": h_rat, "h_comp": h_comp,
             "gates": g, "alpha": alpha, "beta": beta,
-            "null": null_vec,
             "token_embeddings": embeddings,
         }
 

@@ -8,7 +8,6 @@ model:
     l_s: 0.1         # sparsity regularizer
     l_tv: 10.0        # total variation regularizer
     tau: 0.07         # InfoNCE temperature (was model.nt_xent.temperature)
-    use_null_target: False  # Push complement embeddings toward the encoded null vector
   optim:
     lr: 5e-5
     weight_decay: 1e-2

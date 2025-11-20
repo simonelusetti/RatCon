@@ -327,14 +327,11 @@ def _format_samples(outputs, tok, num_samples, threshold):
 
 
 def make_report(
-    model,
-    data,
+    outputs,
     tok,
     threshold=0.5,
-    disable_progress=False,
     num_samples=0
 ):
-    outputs = _inference(model, data, tok, disable_progress)
     metrics = _compute_metrics(outputs, threshold)
     samples = _format_samples(outputs, tok, num_samples, threshold)
     return Report(metrics=metrics, samples=samples)

@@ -6,7 +6,7 @@ from .utils import (
     get_logger,
     compute_training_objectives
 )
-from .metrics import log_report, make_report
+from .metrics import make_report
 
 from .models import RationaleSelectorModel
 from .data import get_dataset, collate
@@ -63,10 +63,12 @@ class Trainer:
 
         self.model.train()
 
+        outputs = []
         for batch in tqdm(loader, desc=f"Epoch {epoch+1}", disable=should_disable_tqdm()):
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
             embeddings, attention_mask = batch["embeddings"], batch["attention_mask"]
             output = self.model(embeddings, attention_mask)
+            outputs.append(output)
 
             loss = compute_training_objectives(
                 output,
@@ -84,25 +86,21 @@ class Trainer:
             total += loss.item() * batch_size
 
         avg_loss = total / max(1, len(loader.dataset))
-        return avg_loss        
+        return outputs, avg_loss        
 
     def train(self, train_dl, eval_dl):
         best_f1 = float('-inf')
         best_epoch = None
         best_report = None
-        epoch_show_samples = bool(self.cfg.eval.report.epoch.samples.show)
-        final_samples_cfg = self.cfg.eval.report.final.samples
-        final_show_samples = bool(final_samples_cfg.show)
 
         for epoch in range(self.cfg.train.epochs):
-            avg = self.train_epoch(train_dl, epoch)
+            outputs, avg = self.train_epoch(train_dl, epoch)
             self.logger.info(f"epoch {epoch + 1}: train_loss={avg:.4f}")
 
             report = self.evaluate(
-                eval_dl,
-                self.tok,
-                num_samples=final_samples_cfg.num if final_show_samples else 0,
-                show_samples=epoch_show_samples,
+                outputs,
+                report_name=f"Evaluation Epoch {epoch + 1}",
+                report_cfg=self.cfg.eval.report.epoch,
             )
             self.xp.link.push_metrics({f"eval/{epoch}/{self.cfg.data.eval.dataset}": report})
 
@@ -124,7 +122,7 @@ class Trainer:
                 best_report,
                 report_cfg=self.cfg.eval.report.final,
                 report_name="Training Best",
-                show_samples=final_show_samples,
+                show_samples=bool(self.cfg.eval.report.final.samples.show),
             )
             self.xp.link.push_metrics({f"best_eval/{best_epoch}/{self.cfg.data.eval.dataset}": best_report})
         else:
@@ -133,7 +131,7 @@ class Trainer:
         return best_report
     
     def _inference(self, data, tok, disable_progress):
-        inf = []
+        outputs = []
         with torch.no_grad():
             for batch in tqdm(data, desc="Evaluating", disable=disable_progress):
                 embeddings, attention_mask, input_ids = batch["embeddings"], batch["attention_mask"], batch["input_ids"]
@@ -148,7 +146,7 @@ class Trainer:
                     mask = attention_mask[i].cpu().tolist()
                     gates = gates_tensor[i].detach().cpu().tolist()
 
-                    inf.append(
+                    outputs.append(
                         {
                             "ids": ids,
                             "tokens": tokens,
@@ -157,23 +155,17 @@ class Trainer:
                             "gold": None if ner_tags is None else ner_tags[i].cpu().tolist(),
                         }
                     )
-        return inf
+        return outputs
 
-    def evaluate(self, eval_dl, report_name="Evaluation", report_cfg=None):
-        disable_progress = should_disable_tqdm()
-
+    def evaluate(self, outputs, report_name="Evaluation", report_cfg=None):
         report = make_report(
-            self.model,
-            eval_dl,
+            outputs,
             self.tok,
-            self.cfg.eval.thresh,
-            disable_progress=disable_progress,
-            thresh=self.cfg.eval.thresh,
+            threshold=self.cfg.eval.thresh,
             num_samples=report_cfg.samples.num if report_cfg and report_cfg.samples.show else 0,
-            logger=self.logger,
         )
     
-        report.log_report(
+        report.log(
             self.logger,
             report_cfg=report_cfg,
             report_name=report_name,

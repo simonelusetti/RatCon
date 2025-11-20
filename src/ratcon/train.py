@@ -1,17 +1,18 @@
 import os, torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from .utils import should_disable_tqdm, get_logger
-
-from .models import RationaleSelectorModel
-from .data import get_dataset, collate
-from .losses import compute_training_objectives
-from .evaluate import evaluate
-from .metrics import (
+from .utils import (
+    should_disable_tqdm,
+    get_logger,
+    compute_training_objectives,
     build_report,
     log_report,
     render_reports_table,
+    evaluate,
 )
+
+from .models import RationaleSelectorModel
+from .data import get_dataset, collate
 from dora import get_xp, hydra_main
 
 # -------------------------------------------------------------------

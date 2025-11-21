@@ -1,21 +1,19 @@
 """
 Metrics and reporting utilities shared across RatCon and downstream projects.
 
-Entry points:
-- make_report: run evaluation and return a structured Report.
-- simple_report: build a Report from an already-computed metrics dict.
+Primary entry points:
+ - evaluate: run inference and return a Report.
+ - simple_report: wrap an existing metrics dict into a Report.
 """
 
-from dataclasses import dataclass, field
 import datetime as _dt
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
 from prettytable import PrettyTable
 from sklearn.metrics import precision_recall_fscore_support
 from tqdm import tqdm
-
-from .utils import format_gold_spans, merge_spans, merge_subwords
 
 _METRIC_DISPLAY_ORDER = ("f1", "precision", "recall")
 
@@ -40,9 +38,9 @@ class Report:
         return {
             "timestamp": self.timestamp,
             "metrics": self.metrics,
-            "samples": self.samples
+            "samples": self.samples,
         }
-        
+
     def log(self, logger, report_cfg, report_name=None, show_samples=False):
         header = f"Report: {report_name}" if report_name else "Report:"
         parts = [header]
@@ -67,6 +65,7 @@ class Report:
                 parts.append("samples:\n" + "\n".join(samples_full))
 
         logger.info("\n".join(parts))
+
 
 @dataclass
 class RankingEntry:
@@ -196,6 +195,27 @@ def merge_counts_map(base: dict, updates: dict) -> dict:
     return base
 
 
+def average_metrics(metrics_list):
+    """
+    Average a collection of metric dictionaries (e.g., precision/recall/f1).
+
+    Non-numeric entries are skipped. Returns an empty dict if no metrics are provided.
+    """
+    if not metrics_list:
+        return {}
+    sums: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    for metrics in metrics_list:
+        if not metrics:
+            continue
+        for key, value in metrics.items():
+            if not isinstance(value, (int, float)):
+                continue
+            sums[key] = sums.get(key, 0.0) + float(value)
+            counts[key] = counts.get(key, 0) + 1
+    return {k: sums[k] / counts[k] for k in sums if counts.get(k, 0) > 0}
+
+
 def compute_binary_metrics_from_counts(tp, fp, fn):
     tp = float(tp)
     fp = float(fp)
@@ -222,11 +242,7 @@ def build_metrics_from_counts(counts, per_class_counts=None, label_groups=None):
 
     if per_class_counts:
         per_class_metrics = {}
-        if label_groups:
-            labels = list(label_groups.keys())
-        else:
-            labels = list(per_class_counts.keys())
-
+        labels = list(label_groups.keys()) if label_groups else list(per_class_counts.keys())
         for label in labels:
             cls_counts = per_class_counts.get(label)
             if not cls_counts:
@@ -257,24 +273,39 @@ def finalize_metrics_from_counts(counts_map, label_groups=None):
 # Reporting and formatting
 # -------------------------------------------------------------------
 def format_metric_values(metrics, precision=4):
-    if not metrics:
+    if metrics is None:
+        return "metrics=n/a"
+
+    if isinstance(metrics, Metrics):
+        data = {
+            "precision": metrics.precision,
+            "recall": metrics.recall,
+            "f1": metrics.f1,
+        }
+    elif isinstance(metrics, dict):
+        data = metrics
+    else:
         return "metrics=n/a"
 
     seen = set()
     ordered_items = []
     for key in _METRIC_DISPLAY_ORDER:
-        if key in metrics:
-            ordered_items.append((key, metrics[key]))
+        if data.get(key) is not None:
+            ordered_items.append((key, data[key]))
             seen.add(key)
-    for key in sorted(metrics.keys()):
+    for key in sorted(data.keys()):
         if key not in seen:
-            ordered_items.append((key, metrics[key]))
+            ordered_items.append((key, data[key]))
 
-    parts = [f"{name}={value:.{precision}f}" for name, value in ordered_items]
-    return ", ".join(parts)
+    parts = [
+        f"{name}={value:.{precision}f}"
+        for name, value in ordered_items
+        if isinstance(value, (int, float))
+    ]
+    return ", ".join(parts) if parts else "metrics=n/a"
 
 
-def render_metrics_table(reports, precision=4):
+def render_reports_table(reports, precision=4):
     if not reports:
         return "Metrics: none"
 
@@ -286,30 +317,199 @@ def render_metrics_table(reports, precision=4):
 
     for label in sorted(reports.keys()):
         report = reports[label]
-        metrics_str = format_metric_values(report.metrics, precision=precision)
+        metrics_obj = report.metrics if isinstance(report, Report) else report.get("metrics")
+        metrics_str = format_metric_values(metrics_obj, precision=precision)
         table.add_row([label, metrics_str, "-"])
 
     return f"Metrics:\n{table.get_string()}"
 
 
+def log_report(logger, report: Report | dict, report_cfg, report_name=None, show_samples=False):
+    rep = report if isinstance(report, Report) else simple_report(report.get("metrics") if isinstance(report, dict) else {})
+    rep.log(logger, report_cfg, report_name=report_name, show_samples=show_samples)
+
+
+def build_ranking_report(
+    title: str,
+    metrics_dict: dict[str, dict[str, float]],
+    *,
+    top_k: int | None = None,
+    dev_metrics: dict[str, dict[str, float]] | None = None,
+    sorted_items: list[tuple[str, dict[str, float]]] | None = None,
+) -> RankingReport:
+    if not metrics_dict:
+        return RankingReport(title=title, entries=[])
+
+    items = sorted_items or sorted(
+        metrics_dict.items(), key=lambda item: item[1].get("f1", 0.0), reverse=True
+    )
+    if top_k is not None:
+        items = items[:top_k]
+
+    entries: list[RankingEntry] = []
+    for name, stats in items:
+        dev_stats = dev_metrics.get(name) if dev_metrics else None
+        entries.append(RankingEntry(name=name, metrics=stats, dev_metrics=dev_stats))
+
+    return RankingReport(title=title, entries=entries)
+
+
+# -------------------------------------------------------------------
+# Token formatting helpers
+# -------------------------------------------------------------------
+def merge_subwords(ids, tokens, tokenizer):
+    buf = ""
+    words = []
+
+    def flush(acc):
+        if acc:
+            words.append(acc)
+        return ""
+
+    for tok_id, tok_str in zip(ids, tokens):
+        if tok_id in [tokenizer.cls_token_id, tokenizer.sep_token_id, tokenizer.pad_token_id]:
+            continue
+        if tok_str.startswith("##"):
+            buf += tok_str[2:]
+        else:
+            buf = flush(buf)
+            buf = tok_str
+
+    buf = flush(buf)
+    return words
+
+
+def format_gold_spans(ids, tokens, gold_labels, tokenizer):
+    buf = ""
+    buf_labels = []
+    words, word_labels = [], []
+    for tok_id, tok_str, lab in zip(ids, tokens, gold_labels):
+        if tok_id in [tokenizer.cls_token_id, tokenizer.sep_token_id, tokenizer.pad_token_id]:
+            continue
+        if tok_str.startswith("##"):
+            buf += tok_str[2:]
+            buf_labels.append(lab)
+        else:
+            if buf:
+                words.append(buf)
+                word_labels.append(1 if any(l != 0 for l in buf_labels) else 0)
+            buf = tok_str
+            buf_labels = [lab]
+    if buf:
+        words.append(buf)
+        word_labels.append(1 if any(l != 0 for l in buf_labels) else 0)
+    out, span = [], []
+    for w, l in zip(words, word_labels):
+        if l:
+            span.append(w)
+        else:
+            if span:
+                out.append(f"[[{' '.join(span)}]]")
+                span = []
+            out.append(w)
+    if span:
+        out.append(f"[[{' '.join(span)}]]")
+    return " ".join(out)
+
+
+def merge_spans(ids, tokens, gates, tokenizer, threshold=0.5):
+    buf, buf_gs = "", []
+    words, word_gates = [], []
+
+    def flush(acc, gs):
+        if acc:
+            words.append(acc)
+            word_gates.append(sum(gs) / len(gs))
+        return "", []
+
+    for tok_id, tok_str, g in zip(ids, tokens, gates):
+        if tok_id in [tokenizer.cls_token_id, tokenizer.sep_token_id, tokenizer.pad_token_id]:
+            continue
+        if tok_str.startswith("##"):
+            buf += tok_str[2:]
+            buf_gs.append(g)
+        else:
+            buf, buf_gs = flush(buf, buf_gs)
+            buf, buf_gs = tok_str, [g]
+
+    buf, buf_gs = flush(buf, buf_gs)
+
+    out_tokens, span_buf = [], []
+
+    def flush_span(span_buf):
+        if span_buf:
+            out_tokens.append(f"[[{' '.join(span_buf)}]]")
+        return []
+
+    for word, g in zip(words, word_gates):
+        if g >= threshold:
+            span_buf.append(word)
+        else:
+            span_buf = flush_span(span_buf)
+            out_tokens.append(word)
+
+    span_buf = flush_span(span_buf)
+    return " ".join(out_tokens)
+
+
+# -------------------------------------------------------------------
+# Evaluation helpers
+# -------------------------------------------------------------------
+def _run_inference_examples(model, data, tok, disable_progress, threshold):
+    model.eval()
+    device = next(model.parameters()).device
+    examples = []
+    with torch.no_grad():
+        for batch in tqdm(data, desc="Evaluating", disable=disable_progress):
+            embeddings = batch["embeddings"].to(device, non_blocking=True)
+            attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+            input_ids = batch["input_ids"]
+            ner_tags = batch.get("ner_tags")
+
+            out = model(embeddings, attention_mask)
+            gates_tensor = out["gates"]
+
+            for i in range(embeddings.size(0)):
+                ids = input_ids[i].cpu().tolist()
+                tokens = tok.convert_ids_to_tokens(ids)
+                mask = attention_mask[i].cpu().tolist()
+                gold = ner_tags[i].cpu().tolist() if ner_tags is not None else None
+
+                gates = gates_tensor[i].detach().cpu().tolist()
+
+                examples.append(
+                    {
+                        "ids": ids,
+                        "tokens": tokens,
+                        "mask": mask,
+                        "gates": gates,
+                        "gold": gold,
+                    }
+                )
+    return examples
+
+
 def _compute_metrics(outputs, threshold) -> Metrics:
     y_true, y_pred = [], []
-    
-    if outputs[0].get("gold") is None:
-        raise KeyError("Gold labels not found in outputs for metric computation.")
-    
+
     for output in outputs:
-        for gate, gold, mask in zip(output["gates"], output["gold"], output["mask"]):
+        gold_seq = output.get("gold")
+        if gold_seq is None:
+            continue
+        for gate, gold, mask in zip(output["gates"], gold_seq, output["mask"]):
             if mask == 0:
                 continue
             y_pred.append(int(gate >= threshold))
             y_true.append(int(gold != 0))
-            
+
+    if not y_true:
+        return Metrics()
+
     precision, recall, f1, _ = precision_recall_fscore_support(
         y_true, y_pred, average="binary", zero_division=0
     )
-    
-    return Metrics(precision=precision, recall=recall, f1=f1)
+
+    return Metrics(precision=float(precision), recall=float(recall), f1=float(f1))
 
 
 def _format_samples(outputs, tok, num_samples, threshold):
@@ -330,8 +530,33 @@ def make_report(
     outputs,
     tok,
     threshold=0.5,
-    num_samples=0
-):
+    num_samples=0,
+) -> Report:
     metrics = _compute_metrics(outputs, threshold)
     samples = _format_samples(outputs, tok, num_samples, threshold)
     return Report(metrics=metrics, samples=samples)
+
+
+def simple_report(metrics: dict) -> Report:
+    metrics = metrics or {}
+    return Report(
+        metrics=Metrics(
+            precision=metrics.get("precision"),
+            recall=metrics.get("recall"),
+            f1=metrics.get("f1"),
+        )
+    )
+
+
+def evaluate(
+    model,
+    data,
+    tok,
+    threshold=0.5,
+    disable_progress=False,
+    samples_num=0,
+    logger=None,
+) -> Report:
+    outputs = _run_inference_examples(model, data, tok, disable_progress, threshold)
+    report = make_report(outputs, tok, threshold=threshold, num_samples=samples_num)
+    return report

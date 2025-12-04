@@ -17,45 +17,48 @@ model:
 
 data:
   rebuild_ds: False
+  max_length: 512
   train:
     dataset: "wikiann"
-    batch_size: 32
-    num_workers: 4
+    config: {
+      "language": "en",
+    }
+    split: "train"
+    batch_size: 16
+    num_workers: 0
     subset: 1.0
     shuffle: True
   eval:
     dataset: "wikiann"
-    batch_size: 32
-    num_workers: 1
+    config: {
+      "language": "en",
+    }
+    split: "validation"
+    batch_size: 16
+    num_workers: 0
+    subset: 1.0
+    shuffle: False
+  dev:
+    dataset: null
+    config: null
+    split: "test"
+    batch_size: 16
+    num_workers: 0
     subset: 1.0
     shuffle: False
 
 train:
-  retrain: True
-  epochs: 10
-  grad_clip: 1.0
-
-eval:
   eval_only: False
-  verbose: False
-  thresh: 0.5
-  report:
-    epoch:
-      metrics: False
-      summary: False
-      samples:
-        num: 10
-        show: False
-        per_sentence_stats: False
-    final:
-      metrics: False
-      summary: False
-      samples:
-        num: 10
-        show: False
-        per_sentence_stats: False
+  eval_epoch: True
+  epochs: 30
+  lr: 1e-3
+  weight_decay: 0.0
+  grad_clip: 1.0
+  checkpoint: "factor_model.pth"
 
-device: "cuda"
+runtime:
+  num_threads: 8
+  device: "cuda"
 
 dora:
   exclude: ["train.retrain", "eval.report.*", "eval.eval_only", "eval.verbose", "data.rebuild_ds", "slurm.*"]

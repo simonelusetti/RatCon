@@ -1,236 +1,198 @@
-import os, torch
+import copy
+import logging
+import os
+from typing import Dict
+from sentence_transformers import SentenceTransformer
+from sklearn import base
+import torch
+from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from .utils import (
-    should_disable_tqdm,
-    get_logger,
-    compute_training_objectives
-)
-from .metrics import make_report
-
-from .models import RationaleSelectorModel
-from .data import get_dataset, collate
 from dora import get_xp, hydra_main
 
-# -------------------------------------------------------------------
-# Torch setup
-# -------------------------------------------------------------------
-_slurm_threads = os.getenv("SLURM_CPUS_PER_TASK") or os.getenv("SLURM_CPUS_PER_GPU")
-try:
-    _slurm_threads = int(_slurm_threads) if _slurm_threads else 0
-except ValueError:
-    _slurm_threads = 0
-_threads = _slurm_threads or (os.cpu_count() or 1)
-torch.set_num_threads(max(1, _threads))
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+from luse.log import (
+    get_logger,
+    should_disable_tqdm,
+    make_loss_table,
+    make_slot_table,
+)
+from luse.utils import (
+    configure_runtime,
+    prepare_batch,
+    sbert_encode,
+    metrics_from_counts,
+    counts as count_masks,
+)
+from luse.data import initialize_dataloaders
+from luse.selector import RationaleSelectorModel
 
-# -------------------------------------------------------------------
-# Trainer
-# -------------------------------------------------------------------
-class Trainer:
-    def __init__(self, cfg, logger, tok, xp):
+
+class SelectorTrainer:
+    def __init__(self, cfg, train_dl: DataLoader, eval_dl: DataLoader, logger, xp, device):
         self.cfg = cfg
         self.logger = logger
-        self.model_path = "model.pth"
-        self.model = RationaleSelectorModel(cfg=self.cfg.model).to(self.cfg.device)
-        self._load_or_initialize_model(self.model, self.model_path, "model")
-        self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=self.cfg.model.optim.lr,
-            weight_decay=self.cfg.model.optim.weight_decay,
-            betas=self.cfg.model.optim.betas,
-        )
-        self._all_model_params = list(self.model.parameters())
-        self.tok = tok
+        self.train_dl = train_dl
+        self.eval_dl = eval_dl
+        self.device = device
         self.xp = xp
 
-    def _load_or_initialize_model(self, model, path):
-        if model is None:
-            return
-        if os.path.exists(path) and (not self.cfg.train.retrain or self.cfg.eval.eval_only):
-            self.logger.info(f"Loading model from {path}")
-            state = torch.load(path, map_location=self.cfg.device)
-            model.load_state_dict(state)
-        else:
-            self.logger.info(f"Training model from scratch")
-            
-    def train_epoch(self, loader, epoch):
-        tau = self.cfg.model.loss.tau
-        grad_clip = self.cfg.train.grad_clip
-        device = self.cfg.device
+        self.disable_progress = should_disable_tqdm()
+        self.checkpoint_path = cfg.train.checkpoint
+        self.grad_clip = cfg.train.grad_clip
+        
+        base = SentenceTransformer(cfg.model.sbert_name)
+        self.sbert_pooler = copy.deepcopy(base[1]).to(device).eval()
+        for p in self.sbert_pooler.parameters():
+            p.requires_grad = False
 
-        total = 0.0
 
-        self.model.train()
+        d_model = torch.tensor(self.train_dl.dataset[0]["embeddings"]).shape[-1]
 
-        outputs = []
-        for batch in tqdm(loader, desc=f"Epoch {epoch+1}", disable=should_disable_tqdm()):
-            batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
-            embeddings, attention_mask = batch["embeddings"], batch["attention_mask"]
-            output = self.model(embeddings, attention_mask)
-            outputs.append(output)
+        self.model = RationaleSelectorModel(d_model).to(device)
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=float(cfg.train.lr),
+            weight_decay=float(cfg.train.weight_decay)
+        )
 
-            loss = compute_training_objectives(
-                output,
-                attention_mask,
-                self.cfg.model,
-                temperature=tau,
-            )
+    def _save_checkpoint(self):
+        state = {
+            "model": self.model.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "meta": {"sig": self.xp.sig},
+        }
+        torch.save(state, self.checkpoint_path, _use_new_zipfile_serialization=False)
+        self.logger.info("Saved checkpoint to %s", os.path.abspath(self.checkpoint_path))
 
-            self.optimizer.zero_grad(set_to_none=True)
+    def _load_checkpoint(self):
+        state = torch.load(self.checkpoint_path, map_location=self.device)
+        self.model.load_state_dict(state["model"], strict=False)
+        try:
+            self.optimizer.load_state_dict(state["optimizer"])
+        except Exception:
+            pass
+        self.logger.info("Loaded checkpoint from %s", self.checkpoint_path)
+        
+    def _run_batch(self, embeddings: torch.Tensor, attention_mask: torch.Tensor, sent_repr: torch.Tensor, train: bool) -> Dict[str, float]:
+        self.optimizer.zero_grad(set_to_none=True)
+        gates = self.model(sent_repr, embeddings, attention_mask)
+        loss = recon_loss_simple(gates, sent_repr)
+        if train:
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self._all_model_params, grad_clip)
+            if self.grad_clip > 0.0:
+                clip_grad_norm_(self.model.parameters(), self.grad_clip)
             self.optimizer.step()
 
+        return {k: float(v.detach()) for k, v in losses.items()}
+
+    def _train_epoch(self, epoch_idx):
+        total_loss = 0.0
+        example_count = 0
+
+        iterator = tqdm(self.train_dl, desc=f"Training {epoch_idx+1}: ", disable=self.disable_progress)
+        for batch in iterator:
+            embeddings, attention_mask, _, _ = prepare_batch(batch, self.device)
+            sent_repr = sbert_encode(self.sbert_pooler, embeddings, attention_mask)
+
+            loss, _ = self._run_batch(embeddings, attention_mask, sent_repr, train=True)
             batch_size = embeddings.size(0)
-            total += loss.item() * batch_size
+            example_count += batch_size
+            total_loss += loss * batch_size
 
-        avg_loss = total / max(1, len(loader.dataset))
-        return outputs, avg_loss        
+        return {"loss": total_loss / example_count}
 
-    def train(self, train_dl, eval_dl):
-        best_f1 = float('-inf')
-        best_epoch = None
-        best_report = None
+    @torch.no_grad()
+    def _evaluate(self):
+        counts = {}
+        example_count = 0
 
-        for epoch in range(self.cfg.train.epochs):
-            outputs, avg = self.train_epoch(train_dl, epoch)
-            self.logger.info(f"epoch {epoch + 1}: train_loss={avg:.4f}")
+        iterator = tqdm(self.eval_dl, desc="Eval: ", disable=self.disable_progress)
+        for batch in iterator:
+            embeddings, attention_mask, _, labels = prepare_batch(batch, self.device)
+            out = self.model(embeddings, attention_mask)
+            gates = out["gates"]
 
-            report = self.evaluate(
-                outputs,
-                report_name=f"Evaluation Epoch {epoch + 1}",
-                report_cfg=self.cfg.eval.report.epoch,
-            )
-            self.xp.link.push_metrics({f"eval/{epoch}/{self.cfg.data.eval.dataset}": report})
+            if gates.dim() == 2:
+                gates = gates.unsqueeze(1)
 
-            metrics = report["metrics"]
-            f1 = metrics["f1"]
-            if f1 is not None and f1 > best_f1:
-                best_f1 = f1
-                best_epoch = epoch + 1
-                best_report = report
-                self.logger.info(
-                    f"New best F1: {best_f1:.4f}, saving model to {self.model_path}"
+            hard = torch.argmax(gates, dim=1)  # [B,T]
+            gold = (labels > 0) & attention_mask.bool()
+
+            B, K, T = gates.size()
+            for k in range(K):
+                pred = (hard == k) & attention_mask.bool()
+                key = f"slot:{k}"
+                tp, fp, fn, total = counts.get(key, (0, 0, 0, 0))
+                d_tp, d_fp, d_fn = count_masks(pred, gold)
+                counts[key] = (
+                    tp + d_tp,
+                    fp + d_fp,
+                    fn + d_fn,
+                    total + pred.sum().item(),
                 )
-                torch.save(self.model.state_dict(), self.model_path)
 
-        if best_report is not None:
-            self.logger.info(f"Best Epoch {best_epoch} with F1 {best_f1:.4f}")
-            best_report.log(
-                self.logger,
-                report_cfg=self.cfg.eval.report.final,
-                report_name="Training Best",
-                show_samples=bool(self.cfg.eval.report.final.samples.show),
-            )
-            self.xp.link.push_metrics({f"best_eval/{best_epoch}/{self.cfg.data.eval.dataset}": best_report})
-        else:
-            self.logger.info("No best report recorded; skipping checkpoint summary.")
+        metrics = []
+        for key, (tp, fp, fn, total) in counts.items():
+            f1, p, r = metrics_from_counts(tp, fp, fn)
+            metrics.append((key, f1, p, r, tp, fp, fn, total))
 
-        return best_report
-    
-    def _inference(self, data, tok, disable_progress):
-        outputs = []
-        with torch.no_grad():
-            for batch in tqdm(data, desc="Evaluating", disable=disable_progress):
-                embeddings, attention_mask, input_ids = batch["embeddings"], batch["attention_mask"], batch["input_ids"]
-                ner_tags = None if not "ner_tags" in batch else batch["ner_tags"]
+        metrics_sorted = sorted(metrics, key=lambda x: x[1], reverse=True)
+        best_key, best_f1, best_p, best_r, _, _, _, _ = metrics_sorted[0]
+        table_str = make_slot_table(metrics_sorted)
 
-                output = self.model(embeddings, attention_mask)
-                gates_tensor = output["gates"]
+        return best_key, best_f1, best_p, best_r, table_str
 
-                for i in range(embeddings.size(0)):
-                    ids = input_ids[i].cpu().tolist()
-                    tokens = tok.convert_ids_to_tokens(ids)
-                    mask = attention_mask[i].cpu().tolist()
-                    gates = gates_tensor[i].detach().cpu().tolist()
+    def train(self):
+        epochs = self.cfg.train.epochs
+        for epoch in range(epochs):
+            metrics = self._train_epoch(epoch)
+            table = make_loss_table(metrics, ["loss"])
+            self.logger.info("Epoch %d/%d train:\n%s", epoch+1, epochs, table)
 
-                    outputs.append(
-                        {
-                            "ids": ids,
-                            "tokens": tokens,
-                            "mask": mask,
-                            "gates": gates,
-                            "gold": None if ner_tags is None else ner_tags[i].cpu().tolist(),
-                        }
+            if self.eval_dl is not None:
+                best_key, best_f1, best_p, best_r, table_str = self._evaluate()
+                if table_str:
+                    self.logger.info("Eval:\n%s", table_str)
+                    self.logger.info(
+                        "Best slot=%s f1=%.4f precision=%.4f recall=%.4f",
+                        best_key, best_f1, best_p, best_r
                     )
-        return outputs
 
-    def evaluate(self, outputs, report_name="Evaluation", report_cfg=None):
-        report = make_report(
-            outputs,
-            self.tok,
-            threshold=self.cfg.eval.thresh,
-            num_samples=report_cfg.samples.num if report_cfg and report_cfg.samples.show else 0,
-        )
-    
-        report.log(
-            self.logger,
-            report_cfg=report_cfg,
-            report_name=report_name,
-            show_samples=report_cfg.samples.show if report_cfg and report_cfg.samples else False,
-        )
+            self._save_checkpoint()
 
-# -------------------------------------------------------------------
-# Main
-# -------------------------------------------------------------------
 @hydra_main(config_path="conf", config_name="default", version_base="1.1")
 def main(cfg):
-    logger = get_logger("train.log")
+    logger = get_logger()
     xp = get_xp()
     logger.info(f"Exp signature: {xp.sig}")
     logger.info(repr(cfg))
     logger.info(f"Work dir: {os.getcwd()}")
-    logger.info(f"Exec file: {__file__}")
 
-    # Device setup
-    if cfg.device == "cuda" and not torch.cuda.is_available():
-        logger.warning("No GPU available, switching to CPU")
-    cfg.device = cfg.device if torch.cuda.is_available() else "cpu"
+    configure_runtime(cfg)
+    if cfg.runtime.device == "cuda" and not torch.cuda.is_available():
+        logger.warning("CUDA requested but unavailable, using CPU.")
+    device = torch.device(cfg.runtime.device if torch.cuda.is_available() else "cpu")
+    cfg.runtime.device = device.type
 
-    # Data
-    train_ds, tok = get_dataset(
-        name=cfg.data.train.dataset,
-        subset=cfg.data.train.subset,
-        rebuild=cfg.data.rebuild_ds,
-        shuffle=cfg.data.train.shuffle,
-    )
-    eval_shuffle = bool(cfg.data.eval.shuffle)
-    if eval_shuffle:
-        logger.warning("Disabling shuffle for evaluation loader to preserve ordering across models.")
-        eval_shuffle = False
+    train_dl, eval_dl, _ = initialize_dataloaders(
+        cfg.data, logger, cfg.model.sbert_name, device=device)
+    trainer = SelectorTrainer(cfg, train_dl, eval_dl, logger, xp, device)
 
-    eval_ds, _ = get_dataset(
-        split="validation",
-        name=cfg.data.eval.dataset,
-        subset=cfg.data.eval.subset,
-        rebuild=cfg.data.rebuild_ds,
-        shuffle=eval_shuffle,
-    )
-
-    train_dl = DataLoader(
-        train_ds,
-        batch_size=cfg.data.train.batch_size,
-        collate_fn=collate,
-        num_workers=cfg.data.train.num_workers,
-        pin_memory=(cfg.device == "cuda"),
-        persistent_workers=(cfg.data.train.num_workers > 0),
-        shuffle=cfg.data.train.shuffle,
-    )
-
-    eval_dl = DataLoader(
-        eval_ds,
-        batch_size=cfg.data.eval.batch_size,
-        collate_fn=collate,
-        num_workers=cfg.data.eval.num_workers,
-        pin_memory=(cfg.device == "cuda"),
-        persistent_workers=(cfg.data.eval.num_workers > 0),
-        shuffle=eval_shuffle,
-    )
-
-    # Train or eval
-    trainer = Trainer(cfg, logger, tok, xp)
-    if cfg.eval.eval_only:
-        trainer.evaluate(eval_dl)
+    if cfg.train.eval_only:
+        trainer._load_checkpoint()
+        best_key, best_f1, best_p, best_r, table_str = trainer._evaluate()
+        if table_str:
+            logger.info("Eval-only slots:\n%s", table_str)
+            logger.info(
+                "Eval-only best slot=%s f1=%.4f precision=%.4f recall=%.4f",
+                best_key,
+                best_f1,
+                best_p,
+                best_r,
+            )
     else:
-        trainer.train(train_dl, eval_dl)   
+        trainer.train()
+
+
+if __name__ == "__main__":
+    main()

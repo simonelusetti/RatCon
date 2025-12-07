@@ -5,9 +5,9 @@ model:
   sbert_name: "sentence-transformers/all-MiniLM-L6-v2"
   loss:
     l_rec: 1.0       # weight for reconstruction loss
-    l_comp: 1.0       # weight for adversary loss
+    l_comp: 0.0       # weight for adversary loss
     l_s: 1.0        # sparsity regularizer
-    l_tv: 1.0        # total variation regularizer
+    l_tv: 0.0        # total variation regularizer
     tau: 0.07         # InfoNCE temperature (was model.nt_xent.temperature)
   optim:
     lr: 5e-5

@@ -1,4 +1,3 @@
-import copy
 import os
 from typing import Dict
 
@@ -8,6 +7,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from dora import get_xp, hydra_main
+import torch.nn.functional as F
 
 from luse.log import (
     get_logger,
@@ -17,10 +17,10 @@ from luse.log import (
 from luse.utils import (
     configure_runtime,
     prepare_batch,
-    sbert_encode_texts,
-    wp_to_text,
+    sbert_encode,
+    format_dict,
 )
-from luse.data import initialize_dataloaders
+from luse.data import initialize_dataloaders, CATH_TO_ID, PART_TO_ID
 from luse.selector import RationaleSelectorModel
 
 
@@ -29,16 +29,8 @@ from luse.selector import RationaleSelectorModel
 # ---------------------------------------------------------------------------
 def recon_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """Reconstruction loss: maximize cosine similarity between prediction and target."""
-    eps = 1e-8
-    pred_norm = pred.norm(dim=-1).clamp_min(eps)
-    target_norm = target.norm(dim=-1).clamp_min(eps)
-    cos_sim = (pred * target).sum(dim=-1) / (pred_norm * target_norm)
+    cos_sim = F.cosine_similarity(pred, target, dim=-1)  # returns [B]
     return 1.0 - cos_sim.mean()
-
-
-def complement_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Repulsion term: penalise reconstruction from complement selections."""
-    return -recon_loss(pred, target)
 
 
 def sparsity_loss(gates: torch.Tensor, attention_mask: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -47,7 +39,7 @@ def sparsity_loss(gates: torch.Tensor, attention_mask: torch.Tensor, eps: float 
     gates: [B, L], attention_mask: [B, L]
     """
     valid = attention_mask.sum(dim=1).clamp_min(1.0)          # [B]
-    mean_sel = (gates * attention_mask).sum(dim=1) / valid    # [B]
+    mean_sel = gates.sum(dim=1) / valid    # [B]
     return mean_sel.mean() + eps
 
 
@@ -68,36 +60,25 @@ def compute_losses(
     gates: torch.Tensor,
     embeddings: torch.Tensor,
     attention_mask: torch.Tensor,
-    tokens: list[list[str]],
     sbert: SentenceTransformer,
     cfg,
-    device: torch.device,
 ):
-    full_texts = [wp_to_text(tok_list) for tok_list in tokens]  # list[str]
-    full_rep = sbert_encode_texts(sbert, full_texts, device).clone().detach()    # [B, D], no grad
-    weighted = embeddings * gates.unsqueeze(-1)  # [B, L, D]
-
-    denom = (gates * attention_mask).sum(dim=1, keepdim=True).clamp_min(1e-6)  # [B, 1]
-    pred_rep = weighted.sum(dim=1) / denom                              # [B, D], requires_grad=True
-    comp_weights = (1.0 - gates) * attention_mask               # [B, L]
-    comp_weighted = embeddings * comp_weights.unsqueeze(-1)
-    comp_denom = comp_weights.sum(dim=1, keepdim=True).clamp_min(1e-6)
-    comp_rep = comp_weighted.sum(dim=1) / comp_denom    # [B, D]
-
+    full_rep = sbert_encode(sbert, embeddings, attention_mask).detach()
+    pred_rep = sbert_encode(
+        sbert, embeddings * gates.unsqueeze(-1), attention_mask
+    )
+    comp_rep = sbert_encode(
+        sbert, embeddings * ((1 - gates) * attention_mask).unsqueeze(-1), attention_mask
+    )
     recon_l = recon_loss(pred_rep, full_rep) * cfg.l_rec
-    comp_l = complement_loss(comp_rep, full_rep) * cfg.l_comp
+    empty_rep = torch.zeros_like(full_rep)
+    comp_l = recon_loss(comp_rep, empty_rep) * cfg.l_comp
     sparse_l = sparsity_loss(gates, attention_mask) * cfg.l_s
     tv_l = total_variation_loss(gates, attention_mask) * cfg.l_tv
 
     total = recon_l + comp_l + sparse_l + tv_l
-
-    return {
-        "total": total,
-        "recon": recon_l,
-        "comp": comp_l,
-        "sparse": sparse_l,
-        "tv": tv_l,
-    }
+    return {"total": total, "recon": recon_l, "comp": comp_l,
+            "sparse": sparse_l, "tv": tv_l}
 
 
 class SelectorTrainer:
@@ -154,10 +135,8 @@ class SelectorTrainer:
             gates,
             embeddings,
             attention_mask,
-            tokens,
             self.sbert,
             self.cfg.model.loss,
-            self.device,
         )
         loss_total = losses["total"]
         if train:
@@ -183,57 +162,200 @@ class SelectorTrainer:
 
         return {k: v / example_count for k, v in totals.items()}
 
+    def _update_counts(
+        self,
+        gates: torch.Tensor,
+        attention_mask: torch.Tensor,
+        extra: Dict,
+        counts_cath_pred: Dict,
+        counts_cath_gold: Dict,
+        counts_part_pred: Dict,
+        counts_part_gold: Dict,
+        total_selected: int,
+    ):
+
+        # flatten
+        attn = attention_mask.bool().view(-1)
+        preds = (gates > 0.5).bool().view(-1)
+
+        # integer tensors, shape (B, L)
+        cath_tags = extra["cath_tags"].to(self.device)
+        part_tags = extra["part_tags"].to(self.device)
+
+        flat_cath = cath_tags.view(-1)
+        flat_part = part_tags.view(-1)
+
+        PAD_CATH = CATH_TO_ID["pad"]
+        PAD_PART = PART_TO_ID["pad"]
+
+        # initialize dicts for all classes
+        for cid in CATH_TO_ID.values():
+            counts_cath_gold.setdefault(cid, 0)
+            counts_cath_pred.setdefault(cid, 0)
+
+        for pid in PART_TO_ID.values():
+            counts_part_gold.setdefault(pid, 0)
+            counts_part_pred.setdefault(pid, 0)
+
+        # --------------------------
+        # UPDATE CATH COUNTS
+        # --------------------------
+        for cid in CATH_TO_ID.values():
+            if cid == PAD_CATH:
+                continue  # don't evaluate PAD class
+
+            gold_mask = (flat_cath == cid) & attn
+            pred_mask = gold_mask & preds
+
+            counts_cath_gold[cid] += gold_mask.sum().item()
+            counts_cath_pred[cid] += pred_mask.sum().item()
+
+        # --------------------------
+        # UPDATE PART COUNTS
+        # --------------------------
+        for pid in PART_TO_ID.values():
+            if pid == PAD_PART:
+                continue  # skip PAD
+
+            gold_mask = (flat_part == pid) & attn
+            pred_mask = gold_mask & preds
+
+            counts_part_gold[pid] += gold_mask.sum().item()
+            counts_part_pred[pid] += pred_mask.sum().item()
+
+        total_selected += (preds & attn).sum().item()
+
+        return (
+            total_selected,
+            counts_cath_pred,
+            counts_cath_gold,
+            counts_part_pred,
+            counts_part_gold,
+        )
+        
+    def _rates(
+        self,
+        counts_cath_pred: Dict,
+        counts_cath_gold: Dict,
+        counts_part_pred: Dict,
+        counts_part_gold: Dict,
+    ):
+        rev_cath = {v: k for k, v in CATH_TO_ID.items()}
+
+        caths_rates = {}
+        for cid, name in rev_cath.items():
+            if cid == CATH_TO_ID["pad"]:
+                continue
+            gold = counts_cath_gold.get(cid, 0)
+            pred = counts_cath_pred.get(cid, 0)
+            if gold == 0: gold = 1
+            caths_rates[name] = pred / gold
+
+        rev_part = {v: k for k, v in PART_TO_ID.items()}
+
+        part_rates = {}
+        for pid, name in rev_part.items():
+            if pid == PART_TO_ID["pad"]:
+                continue
+            gold = counts_part_gold.get(pid, 0)
+            pred = counts_part_pred.get(pid, 0)
+            if gold == 0: gold = 1
+            part_rates[name] = pred / gold
+            
+        return caths_rates, part_rates
+    
+    def _preferences(
+        self,
+        counts_cath_pred: Dict,
+        counts_part_pred: Dict,
+        total_selected: int,
+        ):
+        if total_selected == 0:
+            return {}, {}
+        rev_cath = {v: k for k, v in CATH_TO_ID.items()}
+        cath_prefs = {}
+        for cid, name in rev_cath.items():
+            if cid == CATH_TO_ID["pad"]:
+                continue
+            pred = counts_cath_pred.get(cid, 0)
+            cath_prefs[name] = pred / total_selected
+        rev_part = {v: k for k, v in PART_TO_ID.items()}
+        part_prefs = {}
+        for pid, name in rev_part.items():
+            if pid == PART_TO_ID["pad"]:
+                continue
+            pred = counts_part_pred.get(pid, 0)
+            part_prefs[name] = pred / total_selected
+        return cath_prefs, part_prefs
+
     @torch.no_grad()
     def _evaluate(self):
-        
-        true_total = 0
-        gold_total = 0
-        pred_total = 0
-        counts_pred = (0,0,0)
-        counts_gold = (0,0,0)
-        
+
+        total_tokens = 0
+        total_selected = 0
+        counts_cath_pred = {}
+        counts_cath_gold = {}
+        counts_part_pred = {}
+        counts_part_gold = {}
+
         for batch in tqdm(self.eval_dl, desc="Eval: ", disable=self.disable_progress):
             embeddings, attention_mask, _, extra = prepare_batch(batch, self.device)
             gates = self.model(embeddings, attention_mask)
-            
-            tot_gold_thing, tot_gold_action, tot_gold_other = counts_gold
-            gold_thing = (extra["factor_tags"] == 0) 
-            gold_action = (extra["factor_tags"] == 1) 
-            gold_other = (extra["factor_tags"] == 2)
-            counts_gold = (
-                tot_gold_thing + gold_thing.sum().item(),
-                tot_gold_action + gold_action.sum().item(),
-                tot_gold_other + gold_other.sum().item(),
+
+            total_tokens += attention_mask.sum().item()
+
+            (
+                total_selected,
+                counts_cath_pred,
+                counts_cath_gold,
+                counts_part_pred,
+                counts_part_gold,
+            ) = self._update_counts(
+                gates,
+                attention_mask,
+                extra,
+                counts_cath_pred,
+                counts_cath_gold,
+                counts_part_pred,
+                counts_part_gold,
+                total_selected,
             )
-            true_total += attention_mask.sum().item()
-            gold_total += gold_thing.sum().item() + gold_action.sum().item() + gold_other.sum().item()
-            
-            tot_pred_thing, tot_pred_action, tot_pred_other = counts_pred
-            preditions = (gates > 0.5).long()
-            pred_total += preditions.sum().item()
-            pred_thing = gold_thing & preditions.bool()
-            pred_action = gold_action & preditions.bool()
-            pred_other = gold_other & preditions.bool()
-            counts_pred = (
-                tot_pred_thing + pred_thing.sum().item(),
-                tot_pred_action + pred_action.sum().item(),
-                tot_pred_other + pred_other.sum().item(),
-            )
+
+        selection_rate = total_selected / max(total_tokens, 1)
         
-        tot_gold_thing, tot_gold_action, tot_gold_other = counts_gold
-        tot_pred_thing, tot_pred_action, tot_pred_other = counts_pred
-        thing_percentage = tot_pred_thing / max(tot_gold_thing, 1)
-        action_percentage = tot_pred_action / max(tot_gold_action, 1)
-        other_percentage = tot_pred_other / max(tot_gold_other, 1)
+        caths_rates, part_rates = self._rates(
+            counts_cath_pred,
+            counts_cath_gold,
+            counts_part_pred,
+            counts_part_gold,
+        )
+        cath_prefs, part_prefs = self._preferences(
+            counts_cath_pred,
+            counts_part_pred,
+            total_selected,
+        )
         
-        metrics = {
-            "thing_%": thing_percentage,
-            "action_%": action_percentage,
-            "other_%": other_percentage,
+        cath_rates = {
+            **{f"{k}_%": v for k, v in caths_rates.items()},
         }
-        table_str = dict_to_table(metrics).get_string()
-                
-        return table_str
+        part_rates = {
+            **{f"{k}_%": v for k, v in part_rates.items()},
+        }
+        cath_prefs = {
+            **{f"{k}_f": v for k, v in cath_prefs.items()},
+        }
+        part_prefs = {  
+            **{f"{k}_f": v for k, v in part_prefs.items()},
+        }
+
+        cath_rates =  dict(sorted(cath_rates.items(), key=lambda x: x[1], reverse=True))
+        cath_prefs = dict(sorted(cath_prefs.items(), key=lambda x: x[1], reverse=True))
+        
+        part_rates = dict(sorted(part_rates.items(), key=lambda x: x[1], reverse=True))
+        part_prefs = dict(sorted(part_prefs.items(), key=lambda x: x[1], reverse=True))
+        
+        return selection_rate, cath_rates, part_rates, cath_prefs, part_prefs
+
 
     def train(self):
         epochs = self.cfg.train.epochs
@@ -241,8 +363,12 @@ class SelectorTrainer:
             metrics = self._train_epoch(epoch)
             table = dict_to_table(metrics)
             self.logger.info("Epoch %d/%d train:\n%s", epoch+1, epochs, table)
-            eval_table = self._evaluate()
-            self.logger.info("Epoch %d/%d eval:\n%s", epoch+1, epochs, eval_table)
+            selection_rate, cath_rates, part_rates, cath_prefs, part_prefs = self._evaluate()
+            self.logger.info("Epoch %d/%d selection rate: %.5f", epoch+1, epochs, selection_rate)
+            self.logger.info("Epoch %d/%d eval:\n%s", epoch+1, epochs, format_dict(cath_rates))
+            self.logger.info("Epoch %d/%d eval prefs:\n%s", epoch+1, epochs, format_dict(cath_prefs))
+            self.logger.info("Epoch %d/%d eval:\n%s", epoch+1, epochs, format_dict(part_rates))
+            self.logger.info("Epoch %d/%d eval prefs:\n%s", epoch+1, epochs, format_dict(part_prefs))
             self._save_checkpoint()
 
 
@@ -266,16 +392,11 @@ def main(cfg):
 
     if cfg.train.eval_only:
         trainer._load_checkpoint()
-        best_key, best_f1, best_p, best_r, table_str = trainer._evaluate()
-        if table_str:
-            logger.info("Eval-only slots:\n%s", table_str)
-            logger.info(
-                "Eval-only best slot=%s f1=%.4f precision=%.4f recall=%.4f",
-                best_key,
-                best_f1,
-                best_p,
-                best_r,
-            )
+        cath_table_str, part_table_str, cath_prefs_table_str, part_prefs_table_str = trainer._evaluate()
+        logger.info("Eval-only cath:\n%s", cath_table_str)
+        logger.info("Eval-only part:\n%s", part_table_str)
+        logger.info("Eval-only cath prefs:\n%s", cath_prefs_table_str)
+        logger.info("Eval-only part prefs:\n%s", part_prefs_table_str)
     else:
         trainer.train()
 

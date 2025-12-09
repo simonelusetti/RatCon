@@ -23,16 +23,16 @@ data:
     dataset: "ud"
     split: "train"
     config: null
-    batch_size: 16
-    num_workers: 0
+    batch_size: 256
+    num_workers: 8
     subset: 1.0
     shuffle: True
   eval:
     dataset: "ud"
     config: null
     split: "validation"
-    batch_size: 16
-    num_workers: 0
+    batch_size: 256
+    num_workers: 8
     subset: 1.0
     shuffle: False
   dev:
@@ -51,11 +51,12 @@ train:
   lr: 1e-3
   weight_decay: 0.0
   grad_clip: 1.0
-  checkpoint: "factor_model.pth"
+  checkpoint: "model.pth"
 
 runtime:
   num_threads: 8
   device: "cuda"
+  token_parallelism: False
 
 dora:
   exclude: ["train.retrain", "eval.report.*", "eval.eval_only", "eval.verbose", "data.rebuild_ds", "slurm.*"]

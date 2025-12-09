@@ -1,13 +1,14 @@
-import os
-from typing import Dict
+import os, torch, torch.nn.functional as F, shutil
 
-import torch
+from typing import Dict
 from sentence_transformers import SentenceTransformer
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from dora import get_xp, hydra_main
-import torch.nn.functional as F
+from dora import get_xp, hydra_main, to_absolute_path
+import matplotlib.pyplot as plt
+from pathlib import Path
+
 
 from luse.log import (
     get_logger,
@@ -18,9 +19,17 @@ from luse.utils import (
     configure_runtime,
     prepare_batch,
     sbert_encode,
-    format_dict,
+    Counts,
+    new_counts,
 )
-from luse.data import initialize_dataloaders, CATH_TO_ID, PART_TO_ID
+from luse.data import (
+    initialize_dataloaders,
+    CATH_TO_ID,
+    PART_TO_ID_BY_SYSTEM,
+    canonical_name,
+    ID_TO_CATH,
+    ID_TO_PART_BY_SYSTEM,
+)
 from luse.selector import RationaleSelectorModel
 
 
@@ -107,6 +116,49 @@ class SelectorTrainer:
             lr=float(cfg.train.lr),
             weight_decay=float(cfg.train.weight_decay)
         )
+        
+        self.plot_dir = to_absolute_path("outputs/plots")
+        self.plot_dir = Path(os.path.join(self.plot_dir, xp.sig))
+
+        self.selection_history = []
+        self.cath_history = []
+        self.plot_step = 0
+
+    def save_final_plots(self):
+        # --------- 1. Selection rate curve ---------
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.plot(self.selection_history, marker="o")
+        ax.set_title("Selection Rate Across Epochs")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Selection Rate")
+        ax.set_ylim(0, 1)
+        fig.tight_layout()
+
+        out_sr = self.plot_dir / "selection_rate.png"
+        fig.savefig(out_sr)
+        plt.close(fig)
+
+        pref_series = {}
+        for d in self.cath_history:
+            for k, v in d.items():
+                pref_series.setdefault(k, []).append(v)
+
+        fig, ax = plt.subplots(figsize=(7, 5))
+        for k, series in pref_series.items():
+            ax.plot(series, marker="o", label=f"{ID_TO_CATH[k]}")
+
+        ax.set_title("Category Preferences Across Epochs")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Preference Value")
+        ax.set_ylim(0, 1)
+        ax.legend()
+        fig.tight_layout()
+
+        out_pref = self.plot_dir / "preferences.png"
+        fig.savefig(out_pref)
+        plt.close(fig)
+
+        self.logger.info(f"Saved plots:\n - {out_sr}\n - {out_pref}")
 
     def _save_checkpoint(self):
         state = {
@@ -126,7 +178,6 @@ class SelectorTrainer:
     def _run_batch(self,
         embeddings: torch.Tensor,
         attention_mask: torch.Tensor,
-        tokens: list[list[str]],
         train: bool
     ) -> Dict[str, float]:
         self.optimizer.zero_grad(set_to_none=True)
@@ -154,7 +205,7 @@ class SelectorTrainer:
         iterator = tqdm(self.train_dl, desc=f"Training {epoch_idx+1}: ", disable=self.disable_progress)
         for batch in iterator:
             embeddings, attention_mask, tokens, _ = prepare_batch(batch, self.device)
-            losses = self._run_batch(embeddings, attention_mask, tokens, train=True)
+            losses = self._run_batch(embeddings, attention_mask, train=True)
             batch_size = embeddings.size(0)
             example_count += batch_size
             for k in totals:
@@ -162,200 +213,60 @@ class SelectorTrainer:
 
         return {k: v / example_count for k, v in totals.items()}
 
-    def _update_counts(
-        self,
-        gates: torch.Tensor,
-        attention_mask: torch.Tensor,
-        extra: Dict,
-        counts_cath_pred: Dict,
-        counts_cath_gold: Dict,
-        counts_part_pred: Dict,
-        counts_part_gold: Dict,
-        total_selected: int,
-    ):
-
-        # flatten
-        attn = attention_mask.bool().view(-1)
-        preds = (gates > 0.5).bool().view(-1)
-
-        # integer tensors, shape (B, L)
-        cath_tags = extra["cath_tags"].to(self.device)
-        part_tags = extra["part_tags"].to(self.device)
-
-        flat_cath = cath_tags.view(-1)
-        flat_part = part_tags.view(-1)
-
-        PAD_CATH = CATH_TO_ID["pad"]
-        PAD_PART = PART_TO_ID["pad"]
-
-        # initialize dicts for all classes
-        for cid in CATH_TO_ID.values():
-            counts_cath_gold.setdefault(cid, 0)
-            counts_cath_pred.setdefault(cid, 0)
-
-        for pid in PART_TO_ID.values():
-            counts_part_gold.setdefault(pid, 0)
-            counts_part_pred.setdefault(pid, 0)
-
-        # --------------------------
-        # UPDATE CATH COUNTS
-        # --------------------------
-        for cid in CATH_TO_ID.values():
-            if cid == PAD_CATH:
-                continue  # don't evaluate PAD class
-
-            gold_mask = (flat_cath == cid) & attn
-            pred_mask = gold_mask & preds
-
-            counts_cath_gold[cid] += gold_mask.sum().item()
-            counts_cath_pred[cid] += pred_mask.sum().item()
-
-        # --------------------------
-        # UPDATE PART COUNTS
-        # --------------------------
-        for pid in PART_TO_ID.values():
-            if pid == PAD_PART:
-                continue  # skip PAD
-
-            gold_mask = (flat_part == pid) & attn
-            pred_mask = gold_mask & preds
-
-            counts_part_gold[pid] += gold_mask.sum().item()
-            counts_part_pred[pid] += pred_mask.sum().item()
-
-        total_selected += (preds & attn).sum().item()
-
-        return (
-            total_selected,
-            counts_cath_pred,
-            counts_cath_gold,
-            counts_part_pred,
-            counts_part_gold,
-        )
-        
-    def _rates(
-        self,
-        counts_cath_pred: Dict,
-        counts_cath_gold: Dict,
-        counts_part_pred: Dict,
-        counts_part_gold: Dict,
-    ):
-        rev_cath = {v: k for k, v in CATH_TO_ID.items()}
-
-        caths_rates = {}
-        for cid, name in rev_cath.items():
-            if cid == CATH_TO_ID["pad"]:
-                continue
-            gold = counts_cath_gold.get(cid, 0)
-            pred = counts_cath_pred.get(cid, 0)
-            if gold == 0: gold = 1
-            caths_rates[name] = pred / gold
-
-        rev_part = {v: k for k, v in PART_TO_ID.items()}
-
-        part_rates = {}
-        for pid, name in rev_part.items():
-            if pid == PART_TO_ID["pad"]:
-                continue
-            gold = counts_part_gold.get(pid, 0)
-            pred = counts_part_pred.get(pid, 0)
-            if gold == 0: gold = 1
-            part_rates[name] = pred / gold
-            
-        return caths_rates, part_rates
-    
-    def _preferences(
-        self,
-        counts_cath_pred: Dict,
-        counts_part_pred: Dict,
-        total_selected: int,
-        ):
-        if total_selected == 0:
-            return {}, {}
-        rev_cath = {v: k for k, v in CATH_TO_ID.items()}
-        cath_prefs = {}
-        for cid, name in rev_cath.items():
-            if cid == CATH_TO_ID["pad"]:
-                continue
-            pred = counts_cath_pred.get(cid, 0)
-            cath_prefs[name] = pred / total_selected
-        rev_part = {v: k for k, v in PART_TO_ID.items()}
-        part_prefs = {}
-        for pid, name in rev_part.items():
-            if pid == PART_TO_ID["pad"]:
-                continue
-            pred = counts_part_pred.get(pid, 0)
-            part_prefs[name] = pred / total_selected
-        return cath_prefs, part_prefs
-
     @torch.no_grad()
     def _evaluate(self):
+        pos_system = canonical_name(self.cfg.data.eval.dataset)
+        local_part_to_id = PART_TO_ID_BY_SYSTEM.get(pos_system, None)
 
         total_tokens = 0
         total_selected = 0
-        counts_cath_pred = {}
-        counts_cath_gold = {}
-        counts_part_pred = {}
-        counts_part_gold = {}
+        counts_cath_pred = Counts(CATH_TO_ID.values(), CATH_TO_ID["pad"], classes_str=ID_TO_CATH)
+        counts_cath_gold = Counts(CATH_TO_ID.values(), CATH_TO_ID["pad"], classes_str=ID_TO_CATH)
+        counts_part_pred = Counts(local_part_to_id.values(), local_part_to_id["pad"], classes_str=ID_TO_PART_BY_SYSTEM[pos_system])
+        counts_part_gold = Counts(local_part_to_id.values(), local_part_to_id["pad"], classes_str=ID_TO_PART_BY_SYSTEM[pos_system])
 
         for batch in tqdm(self.eval_dl, desc="Eval: ", disable=self.disable_progress):
             embeddings, attention_mask, _, extra = prepare_batch(batch, self.device)
             gates = self.model(embeddings, attention_mask)
 
             total_tokens += attention_mask.sum().item()
-
-            (
-                total_selected,
-                counts_cath_pred,
-                counts_cath_gold,
-                counts_part_pred,
-                counts_part_gold,
-            ) = self._update_counts(
+            new_pred_cath, new_gold_cath, new_pred_part, new_gold_part, new_sel \
+            = new_counts(
+                self.cfg.data.eval.dataset,
                 gates,
                 attention_mask,
                 extra,
-                counts_cath_pred,
-                counts_cath_gold,
-                counts_part_pred,
-                counts_part_gold,
-                total_selected,
+                local_part_to_id,
+                self.device,
+                cath_str=ID_TO_CATH,
+                part_str=ID_TO_PART_BY_SYSTEM.get(pos_system, None),
             )
+            counts_cath_pred += new_pred_cath
+            counts_cath_gold += new_gold_cath
+            counts_part_pred += new_pred_part
+            counts_part_gold += new_gold_part
+            total_selected += new_sel
+        
+        return total_selected, total_tokens, counts_cath_gold, counts_cath_pred, counts_part_gold, counts_part_pred
 
+    def log_eval(self):
+        total_selected, total_tokens, \
+        counts_cath_gold, counts_cath_pred, \
+        counts_part_gold, counts_part_pred = self._evaluate()
+        
         selection_rate = total_selected / max(total_tokens, 1)
-        
-        caths_rates, part_rates = self._rates(
-            counts_cath_pred,
-            counts_cath_gold,
-            counts_part_pred,
-            counts_part_gold,
-        )
-        cath_prefs, part_prefs = self._preferences(
-            counts_cath_pred,
-            counts_part_pred,
-            total_selected,
-        )
-        
-        cath_rates = {
-            **{f"{k}_%": v for k, v in caths_rates.items()},
-        }
-        part_rates = {
-            **{f"{k}_%": v for k, v in part_rates.items()},
-        }
-        cath_prefs = {
-            **{f"{k}_f": v for k, v in cath_prefs.items()},
-        }
-        part_prefs = {  
-            **{f"{k}_f": v for k, v in part_prefs.items()},
-        }
 
-        cath_rates =  dict(sorted(cath_rates.items(), key=lambda x: x[1], reverse=True))
-        cath_prefs = dict(sorted(cath_prefs.items(), key=lambda x: x[1], reverse=True))
+        cath_rates = counts_cath_pred / counts_cath_gold
+        part_rates = counts_part_pred / counts_part_gold
+                     
+        self.logger.info("Eval selection rate: %.5f", selection_rate)
+        self.logger.info("Eval cath:\n%s", str(cath_rates))
+        self.logger.info("Eval cath prefs:\n%s", counts_cath_pred.preferences())
+        self.logger.info("Eval part:\n%s", str(part_rates))
+        self.logger.info("Eval part prefs:\n%s", counts_part_pred.preferences())
         
-        part_rates = dict(sorted(part_rates.items(), key=lambda x: x[1], reverse=True))
-        part_prefs = dict(sorted(part_prefs.items(), key=lambda x: x[1], reverse=True))
-        
-        return selection_rate, cath_rates, part_rates, cath_prefs, part_prefs
-
+        self.selection_history.append(selection_rate)
+        self.cath_history.append(counts_cath_pred.preferences().data.copy())
 
     def train(self):
         epochs = self.cfg.train.epochs
@@ -363,13 +274,9 @@ class SelectorTrainer:
             metrics = self._train_epoch(epoch)
             table = dict_to_table(metrics)
             self.logger.info("Epoch %d/%d train:\n%s", epoch+1, epochs, table)
-            selection_rate, cath_rates, part_rates, cath_prefs, part_prefs = self._evaluate()
-            self.logger.info("Epoch %d/%d selection rate: %.5f", epoch+1, epochs, selection_rate)
-            self.logger.info("Epoch %d/%d eval:\n%s", epoch+1, epochs, format_dict(cath_rates))
-            self.logger.info("Epoch %d/%d eval prefs:\n%s", epoch+1, epochs, format_dict(cath_prefs))
-            self.logger.info("Epoch %d/%d eval:\n%s", epoch+1, epochs, format_dict(part_rates))
-            self.logger.info("Epoch %d/%d eval prefs:\n%s", epoch+1, epochs, format_dict(part_prefs))
+            self.log_eval()
             self._save_checkpoint()
+        self.save_final_plots()
 
 
 @hydra_main(config_path="conf", config_name="default", version_base="1.1")
@@ -379,6 +286,12 @@ def main(cfg):
     logger.info(f"Exp signature: {xp.sig}")
     logger.info(repr(cfg))
     logger.info(f"Work dir: {os.getcwd()}")
+    
+    src = xp.folder / ".argv.json"
+    plot_dir = to_absolute_path("outputs/plots")
+    plot_dir = Path(os.path.join(plot_dir, xp.sig))
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy(src, f"{plot_dir}/.argv.json")
 
     configure_runtime(cfg)
     if cfg.runtime.device == "cuda" and not torch.cuda.is_available():
@@ -392,11 +305,7 @@ def main(cfg):
 
     if cfg.train.eval_only:
         trainer._load_checkpoint()
-        cath_table_str, part_table_str, cath_prefs_table_str, part_prefs_table_str = trainer._evaluate()
-        logger.info("Eval-only cath:\n%s", cath_table_str)
-        logger.info("Eval-only part:\n%s", part_table_str)
-        logger.info("Eval-only cath prefs:\n%s", cath_prefs_table_str)
-        logger.info("Eval-only part prefs:\n%s", part_prefs_table_str)
+        trainer.log_eval()
     else:
         trainer.train()
 

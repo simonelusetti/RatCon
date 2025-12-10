@@ -1,4 +1,4 @@
-"""Run configurable sweeps defined in `grid.yaml` and summarise metrics.
+"""Run simple override sweeps defined in `grid.yaml`.
 
 The YAML file must expose two top-level keys:
 
@@ -15,151 +15,40 @@ sweep:
 ```
 
 Each list under `sweep` is appended to the baseline overrides and executed
-`NUM_RUNS` times via `dora run`. After every run the script identifies the newly
-created experiment directory inside `outputs/xps`, extracts metrics from its
-`history.json`, and accumulates them. Once all runs finish, per-setting averages
-are rendered as a Markdown table printed to stdout and saved to
-`outputs/grid_runs/grid_results_<timestamp>.md`.
+once via `dora run`. The script prints a compact summary of
+successes/failures and the run signatures for each sweep setting. You can
+also call `--combine-plots` to build a single grid PNG from existing
+`outputs/plots/<sig>/rates_cath.png` files using `.argv.json` as titles.
 """
 
 import json
-import re
+import math
 import subprocess
-import time
+import textwrap
 from datetime import datetime
 from pathlib import Path
 
-import pandas as pd
+import matplotlib.image as mpimg
+import matplotlib.pyplot as plt
 import yaml
 from tabulate import tabulate
 from tqdm import tqdm
-from ratcon.utils import should_disable_tqdm
 
-
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 
 CONFIG_PATH = Path("grid.yaml")
-NUM_RUNS = 3
-XP_ROOT = Path("outputs/xps")
 RUNS_DIR = Path("outputs/grid_runs")
 
-# Seconds to wait between attempts when polling for a freshly written history.
-HISTORY_POLL_DELAY = 2.0
-HISTORY_POLL_RETRIES = 5
 
-
-# ---------------------------------------------------------------------------
-# YAML loading
-# ---------------------------------------------------------------------------
-def _ensure_str_list(values):
-    tokens = []
-    for item in values:
-        if item is None:
-            continue
-        if isinstance(item, str):
-            token = item.strip()
-            if token:
-                tokens.append(token)
-        else:
-            token = str(item).strip()
-            if token:
-                tokens.append(token)
-    return tokens
-def load_config(path):
+def load_config(path: Path):
     if not path.exists():
         raise FileNotFoundError(f"Config file not found: {path}")
-
     with path.open("r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
-
-    baseline_raw = data.get("baseline", [])
-    sweep_raw = data.get("sweep", [])
-
-    baseline = _ensure_str_list(baseline_raw if isinstance(baseline_raw, (list, tuple)) else [baseline_raw])
-
-    sweep = []
-    for entry in sweep_raw:
-        if isinstance(entry, (list, tuple)):
-            tokens = _ensure_str_list(entry)
-        elif isinstance(entry, str):
-            tokens = _ensure_str_list(entry.split())
-        else:
-            tokens = _ensure_str_list([entry])
-        if tokens:
-            sweep.append(tokens)
-
+    baseline = data.get("baseline", []) or []
+    sweep = data.get("sweep", []) or []
     if not sweep:
         raise ValueError("No sweep entries defined in config")
-
     return baseline, sweep
-
-
-# ---------------------------------------------------------------------------
-# Metrics helpers
-# ---------------------------------------------------------------------------
-def load_metrics_from_history(signature):
-    history_path = XP_ROOT / signature / "history.json"
-    for _ in range(HISTORY_POLL_RETRIES):
-        if history_path.exists():
-            with history_path.open("r", encoding="utf-8") as fh:
-                try:
-                    history = json.load(fh)
-                except json.JSONDecodeError:
-                    history = None
-            if isinstance(history, list) and history:
-                summary_metrics = {}
-                last_metrics = {}
-
-                for entry in reversed(history):
-                    if not isinstance(entry, dict):
-                        continue
-                    if not last_metrics and "metrics" in entry:
-                        metrics = entry.get("metrics", {})
-                        if isinstance(metrics, dict) and metrics:
-                            last_metrics = metrics
-                    if not summary_metrics and "summary" in entry:
-                        summary = entry.get("summary", {})
-                        if isinstance(summary, dict):
-                            best_metrics = summary.get("best_metrics", {})
-                            if isinstance(best_metrics, dict):
-                                for key, value in best_metrics.items():
-                                    summary_metrics[f"best_{key}"] = value
-                            if "best_epoch" in summary:
-                                summary_metrics["best_epoch"] = summary.get("best_epoch")
-                            if "best_f1" in summary and "best_f1" not in summary_metrics:
-                                summary_metrics["best_f1"] = summary.get("best_f1")
-                            if "best_model" in summary:
-                                summary_metrics["best_model"] = summary.get("best_model")
-
-                    if summary_metrics and last_metrics:
-                        break
-
-                combined = {}
-                if last_metrics:
-                    combined.update({f"final_{k}": v for k, v in last_metrics.items()})
-                combined.update(summary_metrics)
-
-                if combined:
-                    return combined
-        time.sleep(HISTORY_POLL_DELAY)
-    print(f"⚠️ Unable to read metrics for experiment {signature}")
-    return None
-def average_metrics(metric_dicts):
-    metric_dicts = list(metric_dicts)
-    if not metric_dicts:
-        return {}
-    keys = sorted({k for d in metric_dicts for k in d})
-    averages = {}
-    for key in keys:
-        values = [d[key] for d in metric_dicts if key in d and d[key] is not None]
-        averages[key] = sum(values) / len(values) if values else None
-    return averages
-
-
-def format_setting(overrides):
-    return " ".join(overrides) if overrides else "<no overrides>"
 
 
 def run_and_capture_signature(cmd, pbar):
@@ -170,33 +59,69 @@ def run_and_capture_signature(cmd, pbar):
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
-        universal_newlines=True,
     )
-
     assert process.stdout is not None
-    signature_pattern = re.compile(r"Exp signature:\s*([a-fA-F0-9]+)")
-
     for line in process.stdout:
         line = line.rstrip()
         if line:
             pbar.write(line)
-        match = signature_pattern.search(line)
-        if match:
-            signature = match.group(1)
-
+        if "Exp signature:" in line:
+            signature = line.split("Exp signature:")[-1].strip()
+    if not signature:
+        raise RuntimeError("Experiment signature not found in output")
     returncode = process.wait()
     if returncode != 0:
         raise subprocess.CalledProcessError(returncode, cmd)
-
-    if not signature:
-        raise RuntimeError("Experiment signature not found in output")
-
     return signature
 
 
 # ---------------------------------------------------------------------------
-# Sweep logic
+# Plot aggregation
 # ---------------------------------------------------------------------------
+def combine_cath_plots(
+    plots_root: Path = Path("outputs/plots"),
+    output_path: Path = Path("outputs/plots/combined_rates_cath.png"),
+    max_cols: int = 3,
+):
+    """Combine all rates_cath.png plots into a single grid PNG with titles from .argv.json."""
+    entries = []
+    for exp_dir in sorted(plots_root.iterdir()):
+        if not exp_dir.is_dir():
+            continue
+        img_path = exp_dir / "rates_cath.png"
+        argv_path = exp_dir / ".argv.json"
+        if img_path.exists() and argv_path.exists():
+            try:
+                with argv_path.open("r", encoding="utf-8") as fh:
+                    args = json.load(fh)
+                title = " ".join(str(a) for a in args) if isinstance(args, (list, tuple)) else str(args)
+            except Exception:
+                title = exp_dir.name
+            entries.append((img_path, title))
+
+    if not entries:
+        print(f"No plots found under {plots_root}")
+        return
+
+    cols = min(max_cols, len(entries))
+    rows = math.ceil(len(entries) / cols)
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 5, rows * 4))
+    axes = axes.reshape(-1) if hasattr(axes, "reshape") else [axes]
+
+    for ax in axes:
+        ax.axis("off")
+
+    for ax, (img_path, title) in zip(axes, entries):
+        img = mpimg.imread(img_path)
+        ax.imshow(img)
+        ax.set_title(textwrap.fill(title, 60), fontsize=8)
+        ax.axis("off")
+
+    plt.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+    print(f"Saved combined plot to {output_path}")
 
 
 def main():
@@ -206,69 +131,50 @@ def main():
         print(f"⚠️ {exc}")
         return
 
-    XP_ROOT.mkdir(parents=True, exist_ok=True)
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
     summary_rows = []
 
-    total_runs = len(sweep) * NUM_RUNS
-    disable_progress = should_disable_tqdm()
-    with tqdm(total=total_runs, desc="Grid sweep", unit="run", disable=disable_progress) as pbar:
+    total_runs = len(sweep)
+    with tqdm(total=total_runs, desc="Grid sweep", unit="run") as pbar:
         for overrides in sweep:
             setting_overrides = list(baseline) + list(overrides)
-            if not any(str(ov).startswith("logging.metrics_only") for ov in setting_overrides):
-                setting_overrides.append("logging.metrics_only=true")
-            setting_label = format_setting(overrides)
+            setting_label = " ".join(overrides) if overrides else "<no overrides>"
 
             pbar.write(f"\n=== Setting: {setting_label} ===")
             pbar.write(f"Baseline overrides: {baseline}")
             pbar.write(f"Sweep overrides   : {overrides}")
 
-            per_run_metrics = []
+            cmd = ["dora", "run"] + setting_overrides
+            signatures = []
             failures = 0
-
-            for _ in range(NUM_RUNS):
-                cmd = ["dora", "run"] + setting_overrides
-                signature = None
-                try:
-                    signature = run_and_capture_signature(cmd, pbar)
-                except subprocess.CalledProcessError as exc:
-                    failures += 1
-                    pbar.write(f"    ⚠️ Run failed: {exc}")
-                    pbar.update(1)
-                    continue
-                except RuntimeError as exc:
-                    failures += 1
-                    pbar.write(f"    ⚠️ {exc}")
-                    pbar.update(1)
-                    continue
-
-                metrics = load_metrics_from_history(signature)
-                if metrics:
-                    per_run_metrics.append(metrics)
-                    pbar.write("    ✓ Collected metrics " + str({k: round(v, 4) for k, v in metrics.items()}))
-                else:
-                    pbar.write(f"    ⚠️ Metrics unavailable for signature {signature}")
-
+            try:
+                sig = run_and_capture_signature(cmd, pbar)
+                signatures.append(sig)
+                pbar.write(f"    ✓ Run signature: {sig}")
+            except subprocess.CalledProcessError as exc:
+                failures += 1
+                pbar.write(f"    ⚠️ Run failed: {exc}")
+            except RuntimeError as exc:
+                failures += 1
+                pbar.write(f"    ⚠️ {exc}")
+            finally:
                 pbar.update(1)
 
-            avg_metrics = average_metrics(per_run_metrics)
-            row = {
-                "setting": setting_label,
-                "runs": len(per_run_metrics),
-                "failures": failures,
-            }
-            for metric_name, value in avg_metrics.items():
-                row[f"avg_{metric_name}"] = value
-            summary_rows.append(row)
+            summary_rows.append(
+                {
+                    "setting": setting_label,
+                    "runs": len(signatures),
+                    "failures": failures,
+                    "signatures": ", ".join(signatures) if signatures else "",
+                }
+            )
 
     if not summary_rows:
-        print("No successful runs to summarise.")
+        print("No runs executed.")
         return
 
-    df = pd.DataFrame(summary_rows)
-    display_df = df.fillna("")
-    table = tabulate(display_df, headers="keys", tablefmt="github", floatfmt=".4f")
+    table = tabulate(summary_rows, headers="keys", tablefmt="github", floatfmt=".4f")
     print("\nSummary table:\n")
     print(table)
 
@@ -280,4 +186,16 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Grid sweep runner and plot combiner.")
+    parser.add_argument("--combine-plots", action="store_true", help="Combine rates_cath.png plots into one image.")
+    parser.add_argument("--plots-root", type=Path, default=Path("outputs/plots"), help="Root directory containing plot subfolders.")
+    parser.add_argument("--output", type=Path, default=Path("outputs/plots/combined_rates_cath.png"), help="Output path for combined plot.")
+    parser.add_argument("--max-cols", type=int, default=3, help="Maximum columns in the combined plot grid.")
+    args = parser.parse_args()
+
+    if args.combine_plots:
+        combine_cath_plots(args.plots_root, args.output, max_cols=args.max_cols)
+    else:
+        main()

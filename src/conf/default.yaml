@@ -57,9 +57,10 @@ runtime:
   num_threads: 8
   device: "cuda"
   token_parallelism: False
+  grid_mode: False
 
 dora:
-  exclude: ["train.retrain", "eval.report.*", "eval.eval_only", "eval.verbose", "data.rebuild_ds", "slurm.*"]
+  exclude: ["train.retrain", "eval.report.*", "eval.eval_only", "eval.verbose", "data.rebuild_ds", "slurm.*", "runtime.grid_mode"]
 
 array: 0
 

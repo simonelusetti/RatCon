@@ -9,7 +9,6 @@ from dora import get_xp, hydra_main, to_absolute_path
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-
 from luse.log import (
     get_logger,
     should_disable_tqdm,
@@ -17,18 +16,12 @@ from luse.log import (
 )
 from luse.utils import (
     configure_runtime,
-    prepare_batch,
     sbert_encode,
-    Counts,
-    new_counts,
+    Counts
 )
 from luse.data import (
     initialize_dataloaders,
-    CATH_TO_ID,
-    PART_TO_ID_BY_SYSTEM,
-    canonical_name,
-    ID_TO_CATH,
-    ID_TO_PART_BY_SYSTEM,
+    PAD_TAG,
 )
 from luse.selector import RationaleSelectorModel
 
@@ -69,10 +62,10 @@ def compute_losses(
     gates: torch.Tensor,
     embeddings: torch.Tensor,
     attention_mask: torch.Tensor,
+    full_rep: torch.Tensor,
     sbert: SentenceTransformer,
     cfg,
 ):
-    full_rep = sbert_encode(sbert, embeddings, attention_mask).detach()
     pred_rep = sbert_encode(
         sbert, embeddings * gates.unsqueeze(-1), attention_mask
     )
@@ -91,14 +84,24 @@ def compute_losses(
 
 
 class SelectorTrainer:
-    def __init__(self, cfg, train_dl: DataLoader, eval_dl: DataLoader, logger, xp, device):
+    def __init__(
+        self,
+        cfg: Dict,
+        train_dl: DataLoader,
+        eval_dl: DataLoader,
+        logger,
+        xp,
+        device,
+        pos_map = None,
+    ):
         self.cfg = cfg
         self.logger = logger
         self.train_dl = train_dl
         self.eval_dl = eval_dl
         self.device = device
         self.xp = xp
-
+        self.pos_map = pos_map
+        
         self.disable_progress = should_disable_tqdm(cfg.runtime)
         self.checkpoint_path = cfg.train.checkpoint
         self.grad_clip = cfg.train.grad_clip
@@ -121,13 +124,9 @@ class SelectorTrainer:
         self.plot_dir = Path(os.path.join(self.plot_dir, xp.sig))
 
         self.selection_history = []
-        self.cath_history = []
-        self.cath_rates_history = []
-        self.cath_share_history = []
         self.part_history = []
         self.part_rates_history = []
         self.part_share_history = []
-        self.plot_step = 0
 
     def save_final_plots(self):
         def collect_series(history):
@@ -138,18 +137,17 @@ class SelectorTrainer:
                     out.setdefault(k, []).append(v)
             return out
 
-        def plot_series(ax, series_dict, title, ylabel, label_map=None):
+        def plot_series(ax, series_dict, title, ylabel):
             """Plot multiple timeseries on a single axis."""
             for k, series in series_dict.items():
-                label = label_map[k] if label_map else str(k)
-                ax.plot(series, marker="o", label=label)
+                ax.plot(series, marker="o", label=self.pos_map[k] if self.pos_map is not None else str(k))
             ax.set_title(title)
             ax.set_xlabel("Epoch")
             ax.set_ylabel(ylabel)
             ax.set_ylim(0, 1.2)
             ax.legend()
 
-        fig, axs = plt.subplots(3, 2, figsize=(12, 12))
+        fig, axs = plt.subplots(2, 2, figsize=(12, 12))
         axs = axs.flatten()
         plots = [
             {
@@ -157,20 +155,6 @@ class SelectorTrainer:
                 "data": self.selection_history,
                 "title": "Selection Rate Across Epochs",
                 "ylabel": "Selection Rate",
-            },
-            {
-                "type": "dict_history",
-                "history": self.cath_history,
-                "title": "Category Preferences Across Epochs",
-                "ylabel": "Preference Value",
-                "label_map": ID_TO_CATH,
-            },
-            {
-                "type": "dict_history",
-                "history": self.cath_rates_history,
-                "title": "Cath Rates Across Epochs",
-                "ylabel": "Rate",
-                "label_map": ID_TO_CATH,
             },
             {
                 "type": "dict_history",
@@ -184,13 +168,6 @@ class SelectorTrainer:
                 "title": "Part Rates Across Epochs",
                 "ylabel": "Rate",
             },
-            {
-                "type": "dict_history",
-                "history": self.cath_share_history,
-                "title": "Cath Share Across Epochs",
-                "ylabel": "Share",
-                "label_map": ID_TO_CATH,
-            },
         ]
         for ax, cfg in zip(axs, plots):
             if cfg["type"] == "simple":
@@ -201,7 +178,7 @@ class SelectorTrainer:
                 ax.set_ylim(0, 1)
             elif cfg["type"] == "dict_history":
                 series = collect_series(cfg["history"])
-                plot_series(ax, series, cfg["title"], cfg["ylabel"], cfg.get("label_map"))
+                plot_series(ax, series, cfg["title"], cfg["ylabel"])
 
         fig.tight_layout()
         out_all = self.plot_dir / "summary_plots.png"
@@ -227,18 +204,17 @@ class SelectorTrainer:
     def _run_batch(self,
         embeddings: torch.Tensor,
         attention_mask: torch.Tensor,
+        sentence_reps: torch.Tensor,
         train: bool
     ) -> Dict[str, float]:
         self.optimizer.zero_grad(set_to_none=True)
+        
         gates = self.model(embeddings, attention_mask, hard=not train)
-        losses = compute_losses(
-            gates,
-            embeddings,
-            attention_mask,
-            self.sbert,
-            self.cfg.model.loss,
-        )
+        
+        losses = compute_losses(gates,embeddings,attention_mask,sentence_reps,\
+            self.sbert,self.cfg.model.loss)
         loss_total = losses["total"]
+        
         if train:
             loss_total.backward()
             if self.grad_clip > 0.0:
@@ -247,109 +223,85 @@ class SelectorTrainer:
 
         return {k: float(v.detach()) for k, v in losses.items()}
 
-    def _train_epoch(self, epoch_idx):
-        totals = {"total": 0.0, "recon": 0.0, "comp": 0.0, "sparse": 0.0, "tv": 0.0}
-        example_count = 0
-
-        iterator = tqdm(self.train_dl, desc=f"Training {epoch_idx+1}: ", disable=self.disable_progress)
-        for batch in iterator:
-            embeddings, attention_mask, _, _ = prepare_batch(batch, self.device)
-            losses = self._run_batch(embeddings, attention_mask, train=True)
-            batch_size = embeddings.size(0)
-            example_count += batch_size
-            for k in totals:
-                totals[k] += losses[k] * batch_size
-
-        return {k: v / example_count for k, v in totals.items()}
-
     @torch.no_grad()
     def _evaluate(self):
-        pos_system = canonical_name(self.cfg.data.eval.dataset)
-        local_part_to_id = PART_TO_ID_BY_SYSTEM.get(pos_system, None)
-
         total_tokens = 0
         total_selected = 0
-        extras_present = self.eval_dl[0]["part_tags"] is not None
-        if extras_present:
-            counts_cath_pred = Counts(CATH_TO_ID.values(), CATH_TO_ID["pad"], classes_str=ID_TO_CATH)
-            counts_cath_gold = Counts(CATH_TO_ID.values(), CATH_TO_ID["pad"], classes_str=ID_TO_CATH)
-            counts_part_pred = Counts(local_part_to_id.values(), local_part_to_id["pad"], classes_str=ID_TO_PART_BY_SYSTEM[pos_system])
-            counts_part_gold = Counts(local_part_to_id.values(), local_part_to_id["pad"], classes_str=ID_TO_PART_BY_SYSTEM[pos_system])
+        labels_present = "labels" in next(iter(self.eval_dl))
+        if labels_present:
+            counts_part_pred = Counts(self.pos_map, PAD_TAG)
+            counts_part_gold = Counts(self.pos_map, PAD_TAG)
 
         for batch in tqdm(self.eval_dl, desc="Eval: ", disable=self.disable_progress):
-            embeddings, attention_mask, _, extra = prepare_batch(batch, self.device)
+            embeddings, attention_mask, _, _, _, labels = batch.values()
             gates = self.model(embeddings, attention_mask)
 
             total_tokens += attention_mask.sum().item()
-            if extras_present:
-                new_pred_cath, new_gold_cath, new_pred_part, new_gold_part, new_sel \
-                = new_counts(
-                    self.cfg.data.eval.dataset,
-                    gates,
-                    attention_mask,
-                    extra,
-                    local_part_to_id,
-                    self.device,
-                    cath_str=ID_TO_CATH,
-                    part_str=ID_TO_PART_BY_SYSTEM.get(pos_system, None),
-                )
-                counts_cath_pred += new_pred_cath
-                counts_cath_gold += new_gold_cath
-                counts_part_pred += new_pred_part
-                counts_part_gold += new_gold_part
-            total_selected += new_sel
+            preds = (gates > 0.5).bool().view(-1)
+            if labels_present:
+                flat_attn = attention_mask.bool().view(-1)
+                flat_labels = labels.view(-1)
+                counts_part_pred = counts_part_pred + \
+                    Counts(self.pos_map, PAD_TAG, classes_mask=flat_labels, mask=flat_attn & preds)
+                counts_part_gold = counts_part_gold + \
+                    Counts(self.pos_map, PAD_TAG, classes_mask=flat_labels, mask=flat_attn)
+                
+            total_selected += preds.sum().item()
         
-        if not extras_present:
-            return total_selected, total_tokens, None, None, None, None
+        if not labels_present:
+            return total_selected, total_tokens, None, None
         
-        return total_selected, total_tokens, counts_cath_gold, counts_cath_pred, counts_part_gold, counts_part_pred
+        return total_selected, total_tokens, counts_part_gold, counts_part_pred
 
     def log_eval(self):
         total_selected, total_tokens, \
-        counts_cath_gold, counts_cath_pred, \
         counts_part_gold, counts_part_pred = self._evaluate()
         
         selection_rate = total_selected / max(total_tokens, 1)
         self.selection_history.append(selection_rate)
-        if counts_cath_pred is None:
-            return
-        
-        cath_rates = counts_cath_pred / counts_cath_gold
+
         part_rates = counts_part_pred / counts_part_gold
         
-        cath_pref = counts_cath_pred.preferences()
         part_pref = counts_part_pred.preferences()
         
-        cath_share = counts_cath_pred.preferences_over_total(total_selected) / counts_cath_gold.preferences_over_total(total_tokens)
         part_share = counts_part_pred.preferences_over_total(total_selected) / counts_part_gold.preferences_over_total(total_tokens)
                      
-        self.cath_history.append(cath_pref.data.copy())
-        self.cath_rates_history.append(cath_rates.data.copy())
-        self.cath_share_history.append(cath_share.data.copy())
-        self.part_history.append(part_pref.top_k(5).copy())
-        self.part_rates_history.append(part_rates.top_k(5).copy())
-        self.part_share_history.append(part_share.top_k(5).copy())
+        self.part_history.append(part_pref.data.copy())
+        self.part_rates_history.append(part_rates.data.copy())
+        self.part_share_history.append(part_share.data.copy())
                      
         if self.disable_progress:
             return
         
         self.logger.info("Eval selection rate: %.5f", selection_rate)
-        self.logger.info("Eval cath:\n%s", str(cath_rates))
-        self.logger.info("Eval cath prefs:\n%s", str(cath_pref))
         self.logger.info("Eval part:\n%s", str(part_rates))
         self.logger.info("Eval part prefs:\n%s", str(part_pref))
-        self.logger.info("Eval cath share:\n%s", str(cath_share))
         self.logger.info("Eval part share:\n%s", str(part_share))
 
     def train(self):
         epochs = self.cfg.train.epochs
         for epoch in range(epochs):
-            metrics = self._train_epoch(epoch)
-            table = dict_to_table(metrics)
+            totals = {"total": 0.0, "recon": 0.0, "comp": 0.0, "sparse": 0.0, "tv": 0.0}
+            example_count = 0
+
+            iterator = tqdm(self.train_dl, desc=f"Training {epoch+1}: ", disable=self.disable_progress)
+            for batch in iterator:
+                embeddings, attention_mask, sentence_reps, _, _, _ = batch.values()
+
+                losses = self._run_batch(embeddings, attention_mask, sentence_reps, train=True)
+
+                batch_size = embeddings.size(0)
+                example_count += batch_size
+                for k in totals:
+                    totals[k] += float(losses[k]) * batch_size
+
+            metrics = {k: v / example_count for k, v in totals.items() if v != 0.0}
             if not self.disable_progress:
-                self.logger.info("Epoch %d/%d train:\n%s", epoch+1, epochs, table)
+                self.logger.info("Epoch %d/%d train:\n%s", epoch+1, epochs, dict_to_table(metrics))
+
             self.log_eval()
             self._save_checkpoint()
+
         self.save_final_plots()
 
 
@@ -373,9 +325,8 @@ def main(cfg):
     device = torch.device(cfg.runtime.device if torch.cuda.is_available() else "cpu")
     cfg.runtime.device = device.type
 
-    train_dl, eval_dl, _ = initialize_dataloaders(
-        cfg.data, logger, cfg.model.sbert_name, device=device)
-    trainer = SelectorTrainer(cfg, train_dl, eval_dl, logger, xp, device)
+    train_dl, eval_dl, pos_map = initialize_dataloaders(cfg.data, logger, device=device)
+    trainer = SelectorTrainer(cfg, train_dl, eval_dl, logger, xp, device, pos_map)
 
     if cfg.train.eval_only:
         trainer._load_checkpoint()

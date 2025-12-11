@@ -17,32 +17,24 @@ model:
     betas: [0.9, 0.999]
 
 data:
-  rebuild_ds: False
-  max_length: 512
+  shared:
+    rebuild: False
+    max_length: 512
+    batch_size: 256
+    num_workers: 8
+    shuffle: True
+    tokenizer_name: "sentence-transformers/all-MiniLM-L6-v2"
+    sentence_model_name: "sentence-transformers/all-MiniLM-L6-v2"
   train:
     dataset: "ud"
     split: "train"
     config: null
-    batch_size: 256
-    num_workers: 8
     subset: 1.0
-    shuffle: True
   eval:
     dataset: "ud"
     config: null
     split: "validation"
-    batch_size: 256
-    num_workers: 8
     subset: 1.0
-    shuffle: False
-  dev:
-    dataset: null
-    config: null
-    split: "test"
-    batch_size: 16
-    num_workers: 0
-    subset: 1.0
-    shuffle: False
 
 train:
   eval_only: False

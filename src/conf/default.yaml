@@ -6,9 +6,12 @@ model:
   loss:
     l_rec: 1.0       # weight for reconstruction loss
     l_comp: 0.0       # weight for adversary loss
-    l_s: 1.0        # sparsity regularizer
+    l_s: 0.05        # sparsity regularizer
     l_tv: 0.0        # total variation regularizer
     tau: 0.07         # InfoNCE temperature (was model.nt_xent.temperature)
+    fourier:
+      filter_mode: "none"
+      cutoff: 0.5
   optim:
     lr: 5e-5
     weight_decay: 1e-2
@@ -27,13 +30,13 @@ data:
     sentence_model_name: "sentence-transformers/all-MiniLM-L6-v2"
   train:
     dataset: "ud"
-    split: "train"
-    config: null
+    config: 
+      split: "train"
     subset: 1.0
   eval:
     dataset: "ud"
-    config: null
-    split: "validation"
+    config: 
+      split: "validation"
     subset: 1.0
 
 train:
@@ -52,7 +55,7 @@ runtime:
   grid_mode: False
 
 dora:
-  exclude: ["train.retrain", "eval.report.*", "eval.eval_only", "eval.verbose", "data.rebuild_ds", "slurm.*", "runtime.grid_mode"]
+  exclude: ["data.shared.rebuild", "slurm.*", "runtime.grid_mode", "train.eval_only"]
 
 array: 0
 

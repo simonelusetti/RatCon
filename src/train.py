@@ -1,11 +1,12 @@
 import os, torch, torch.nn.functional as F, shutil
 
 from typing import Dict
+from logging import Logger
 from sentence_transformers import SentenceTransformer
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from dora import get_xp, hydra_main, to_absolute_path
+from dora import get_xp, hydra_main, to_absolute_path, XP
 import matplotlib.pyplot as plt
 from pathlib import Path
 
@@ -17,10 +18,11 @@ from luse.log import (
 from luse.utils import (
     configure_runtime,
     sbert_encode,
+    spectral_filter,
     Counts
 )
 from luse.data import (
-    initialize_dataloaders,
+    initialize_data,
     PAD_TAG,
 )
 from luse.selector import RationaleSelectorModel
@@ -45,26 +47,13 @@ def sparsity_loss(gates: torch.Tensor, attention_mask: torch.Tensor, eps: float 
     return mean_sel.mean() + eps
 
 
-def total_variation_loss(gates: torch.Tensor, attention_mask: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """Encourage contiguous selections by penalising rapid changes."""
-    g_cur = gates[:, 1:]
-    g_prev = gates[:, :-1]
-    m_cur = attention_mask[:, 1:]
-    m_prev = attention_mask[:, :-1]
-    overlap = m_cur * m_prev
-    valid_pairs = overlap.sum(dim=1).clamp_min(1.0)
-    smoothness = (torch.abs(g_cur - g_prev) * overlap).sum(dim=1) / valid_pairs
-    contiguity = ((g_cur * g_prev) * overlap).sum(dim=1) / valid_pairs
-    return contiguity.mean() + eps * smoothness.mean()
-
-
 def compute_losses(
     gates: torch.Tensor,
     embeddings: torch.Tensor,
     attention_mask: torch.Tensor,
     full_rep: torch.Tensor,
     sbert: SentenceTransformer,
-    cfg,
+    loss_cfg: Dict,
 ):
     pred_rep = sbert_encode(
         sbert, embeddings * gates.unsqueeze(-1), attention_mask
@@ -72,48 +61,48 @@ def compute_losses(
     comp_rep = sbert_encode(
         sbert, embeddings * ((1 - gates) * attention_mask).unsqueeze(-1), attention_mask
     )
-    recon_l = recon_loss(pred_rep, full_rep) * cfg.l_rec
+    
+    if loss_cfg.get("spec_mode", "none") != "none":
+        mode = loss_cfg.filter_mode
+        cutoff = loss_cfg.cutoff
+        pred_rep = spectral_filter(pred_rep, mode=mode, cutoff=cutoff)
+        comp_rep = spectral_filter(comp_rep, mode=mode, cutoff=cutoff)
+        full_rep = spectral_filter(full_rep, mode=mode, cutoff=cutoff)
+    
+    recon_l = recon_loss(pred_rep, full_rep) * loss_cfg.l_rec
     empty_rep = torch.zeros_like(full_rep)
-    comp_l = recon_loss(comp_rep, empty_rep) * cfg.l_comp
-    sparse_l = sparsity_loss(gates, attention_mask) * cfg.l_s
-    tv_l = total_variation_loss(gates, attention_mask) * cfg.l_tv
+    comp_l = recon_loss(comp_rep, empty_rep) * loss_cfg.l_comp
+    sparse_l = sparsity_loss(gates, attention_mask) * loss_cfg.l_s
 
-    total = recon_l + comp_l + sparse_l + tv_l
-    return {"total": total, "recon": recon_l, "comp": comp_l,
-            "sparse": sparse_l, "tv": tv_l}
+    total = recon_l + comp_l + sparse_l
+    return {"total": total, "recon": recon_l, "comp": comp_l, "sparse": sparse_l}
 
 
 class SelectorTrainer:
-    def __init__(
-        self,
-        cfg: Dict,
-        train_dl: DataLoader,
-        eval_dl: DataLoader,
-        logger,
-        xp,
-        device,
-        pos_map = None,
+    def __init__(self, cfg: Dict, train_dl: DataLoader,
+        eval_dl: DataLoader, logger: Logger, xp: XP, tag_map = None,
     ):
         self.cfg = cfg
         self.logger = logger
         self.train_dl = train_dl
         self.eval_dl = eval_dl
-        self.device = device
+        self.device = cfg.runtime.device
         self.xp = xp
-        self.pos_map = pos_map
+        self.tag_map = tag_map
         
         self.disable_progress = should_disable_tqdm(cfg.runtime)
         self.checkpoint_path = cfg.train.checkpoint
         self.grad_clip = cfg.train.grad_clip
-        self.tau = float(cfg.model.loss.tau)
+        self.loss_cfg = cfg.model.loss
 
-        self.sbert = SentenceTransformer(cfg.model.sbert_name)
+        self.sbert = SentenceTransformer(cfg.model.sbert_name).to(self.device)
+        self.sbert.eval()
         for p in self.sbert.parameters():
             p.requires_grad = False
 
-        d_model = torch.tensor(self.train_dl.dataset[0]["embeddings"]).shape[-1]
-
-        self.model = RationaleSelectorModel(d_model).to(device)
+        first_emb = self.train_dl.dataset[0]["embeddings"]
+        model_dim = torch.as_tensor(first_emb).shape[-1]  # model dim dynamically set without extra copy
+        self.model = RationaleSelectorModel(model_dim).to(self.device)
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=float(cfg.train.lr),
@@ -127,6 +116,16 @@ class SelectorTrainer:
         self.part_history = []
         self.part_rates_history = []
         self.part_share_history = []
+        self.labels_present = "labels" in self.eval_dl.dataset[0] and self.eval_dl.dataset[0]["labels"] is not None
+
+    def _to_device(self, batch: Dict):
+        out = {}
+        for k, v in batch.items():
+            if k in {"embeddings", "attention_mask", "sentence_reps", "labels", "input_ids"} and v is not None:
+                out[k] = v.to(self.device)
+            else:
+                out[k] = v
+        return out
 
     def save_final_plots(self):
         def collect_series(history):
@@ -137,54 +136,103 @@ class SelectorTrainer:
                     out.setdefault(k, []).append(v)
             return out
 
-        def plot_series(ax, series_dict, title, ylabel):
-            """Plot multiple timeseries on a single axis."""
-            for k, series in series_dict.items():
-                ax.plot(series, marker="o", label=self.pos_map[k] if self.pos_map is not None else str(k))
+        def plot_series(ax, series_dict, title, ylabel, top_k=5):
+            """Plot top-K time series on a single axis."""
+            # Select top-K by mean value
+            means = {
+                k: sum(v) / len(v)
+                for k, v in series_dict.items()
+                if len(v) > 0
+            }
+            top_keys = sorted(means, key=means.get, reverse=True)[:top_k]
+
+            all_vals = []
+
+            for k in top_keys:
+                series = series_dict[k]
+                ax.plot(series, label=str(k))  # no markers
+                all_vals.extend(series)
+
             ax.set_title(title)
             ax.set_xlabel("Epoch")
             ax.set_ylabel(ylabel)
-            ax.set_ylim(0, 1.2)
-            ax.legend()
 
-        fig, axs = plt.subplots(2, 2, figsize=(12, 12))
-        axs = axs.flatten()
-        plots = [
-            {
-                "type": "simple",
-                "data": self.selection_history,
-                "title": "Selection Rate Across Epochs",
-                "ylabel": "Selection Rate",
-            },
-            {
-                "type": "dict_history",
-                "history": self.part_history,
-                "title": "Part Preferences Across Epochs",
-                "ylabel": "Preference Value",
-            },
-            {
-                "type": "dict_history",
-                "history": self.part_rates_history,
-                "title": "Part Rates Across Epochs",
-                "ylabel": "Rate",
-            },
-        ]
-        for ax, cfg in zip(axs, plots):
-            if cfg["type"] == "simple":
-                ax.plot(cfg["data"], marker="o")
-                ax.set_title(cfg["title"])
-                ax.set_xlabel("Epoch")
-                ax.set_ylabel(cfg["ylabel"])
-                ax.set_ylim(0, 1)
-            elif cfg["type"] == "dict_history":
-                series = collect_series(cfg["history"])
-                plot_series(ax, series, cfg["title"], cfg["ylabel"])
+            # Dynamic y-limits for visibility
+            if all_vals:
+                ymin = min(all_vals)
+                ymax = max(all_vals)
+                pad = (ymax - ymin) * 0.05 if ymax > ymin else 0.01
+                ax.set_ylim(ymin - pad, ymax + pad)
+                #ax.set_ylim(0,2)
+
+            ax.legend(
+                bbox_to_anchor=(1.05, 1),
+                loc="upper left",
+                fontsize="small",
+            )
+
+        if self.labels_present:
+            fig, axs = plt.subplots(2, 2, figsize=(16, 12))
+            axs = axs.flatten()
+
+            plots = [
+                {
+                    "type": "simple",
+                    "data": self.selection_history,
+                    "title": "Selection Rate Across Epochs",
+                    "ylabel": "Selection Rate",
+                },
+                {
+                    "type": "dict_history",
+                    "history": self.part_history,
+                    "title": "Part Preferences Across Epochs",
+                    "ylabel": "Preference Value",
+                },
+                {
+                    "type": "dict_history",
+                    "history": self.part_rates_history,
+                    "title": "Part Rates Across Epochs",
+                    "ylabel": "Rate",
+                },
+                {
+                    "type": "dict_history",
+                    "history": self.part_share_history,
+                    "title": "Part Share Across Epochs",
+                    "ylabel": "Share",
+                },
+            ]
+
+            for ax, cfg in zip(axs, plots):
+                if cfg["type"] == "simple":
+                    ax.plot(cfg["data"])
+                    ax.set_title(cfg["title"])
+                    ax.set_xlabel("Epoch")
+                    ax.set_ylabel(cfg["ylabel"])
+
+                    if cfg["data"]:
+                        ymin = min(cfg["data"])
+                        ymax = max(cfg["data"])
+                        pad = (ymax - ymin) * 0.05 if ymax > ymin else 0.01
+                        ax.set_ylim(ymin - pad, ymax + pad)
+                        #ax.set_ylim(0,1)
+
+                elif cfg["type"] == "dict_history":
+                    series = collect_series(cfg["history"])
+                    plot_series(ax, series, cfg["title"], cfg["ylabel"])
+
+        else:
+            fig, ax = plt.subplots(figsize=(6, 6))
+            ax.plot(self.selection_history)
+            ax.set_title("Selection Rate Across Epochs")
+            ax.set_xlabel("Epoch")
+            ax.set_ylabel("Selection Rate")
 
         fig.tight_layout()
-        out_all = self.plot_dir / "summary_plots.png"
-        fig.savefig(out_all)
+        out = self.plot_dir / "summary_plots.png"
+        fig.savefig(out, bbox_inches="tight")
         plt.close(fig)
-        self.logger.info(f"Saved combined plot file: {out_all}")
+
+        self.logger.info(f"Saved combined plot file: {out}")
 
     def _save_checkpoint(self):
         state = {
@@ -200,70 +248,54 @@ class SelectorTrainer:
         self.model.load_state_dict(state["model"], strict=False)
         self.optimizer.load_state_dict(state["optimizer"])
         self.logger.info("Loaded checkpoint from %s", self.checkpoint_path)
-        
-    def _run_batch(self,
-        embeddings: torch.Tensor,
-        attention_mask: torch.Tensor,
-        sentence_reps: torch.Tensor,
-        train: bool
-    ) -> Dict[str, float]:
-        self.optimizer.zero_grad(set_to_none=True)
-        
-        gates = self.model(embeddings, attention_mask, hard=not train)
-        
-        losses = compute_losses(gates,embeddings,attention_mask,sentence_reps,\
-            self.sbert,self.cfg.model.loss)
-        loss_total = losses["total"]
-        
-        if train:
-            loss_total.backward()
-            if self.grad_clip > 0.0:
-                clip_grad_norm_(self.model.parameters(), self.grad_clip)
-            self.optimizer.step()
-
-        return {k: float(v.detach()) for k, v in losses.items()}
 
     @torch.no_grad()
-    def _evaluate(self):
+    def evaluate(self):
         total_tokens = 0
         total_selected = 0
-        labels_present = "labels" in next(iter(self.eval_dl))
-        if labels_present:
-            counts_part_pred = Counts(self.pos_map, PAD_TAG)
-            counts_part_gold = Counts(self.pos_map, PAD_TAG)
+        if self.labels_present:
+            counts_part_pred = Counts(self.tag_map, PAD_TAG)
+            counts_part_gold = Counts(self.tag_map, PAD_TAG)
 
         for batch in tqdm(self.eval_dl, desc="Eval: ", disable=self.disable_progress):
-            embeddings, attention_mask, _, _, _, labels = batch.values()
+            batch = self._to_device(batch)
+            embeddings = batch["embeddings"]
+            attention_mask = batch["attention_mask"]
+            labels = batch["labels"] if self.labels_present else None
             gates = self.model(embeddings, attention_mask)
 
             total_tokens += attention_mask.sum().item()
             preds = (gates > 0.5).bool().view(-1)
-            if labels_present:
+            if self.labels_present:
                 flat_attn = attention_mask.bool().view(-1)
                 flat_labels = labels.view(-1)
                 counts_part_pred = counts_part_pred + \
-                    Counts(self.pos_map, PAD_TAG, classes_mask=flat_labels, mask=flat_attn & preds)
+                    Counts(self.tag_map, PAD_TAG, classes_mask=flat_labels, mask=flat_attn & preds)
                 counts_part_gold = counts_part_gold + \
-                    Counts(self.pos_map, PAD_TAG, classes_mask=flat_labels, mask=flat_attn)
+                    Counts(self.tag_map, PAD_TAG, classes_mask=flat_labels, mask=flat_attn)
                 
             total_selected += preds.sum().item()
         
-        if not labels_present:
+        if not self.labels_present:
             return total_selected, total_tokens, None, None
         
         return total_selected, total_tokens, counts_part_gold, counts_part_pred
 
     def log_eval(self):
         total_selected, total_tokens, \
-        counts_part_gold, counts_part_pred = self._evaluate()
+        counts_part_gold, counts_part_pred = self.evaluate()
         
         selection_rate = total_selected / max(total_tokens, 1)
         self.selection_history.append(selection_rate)
+        
+        if not self.labels_present:
+            if self.disable_progress:
+                return
+            self.logger.info("Eval selection rate: %.5f", selection_rate)
+            return
 
         part_rates = counts_part_pred / counts_part_gold
-        
         part_pref = counts_part_pred.preferences()
-        
         part_share = counts_part_pred.preferences_over_total(total_selected) / counts_part_gold.preferences_over_total(total_tokens)
                      
         self.part_history.append(part_pref.data.copy())
@@ -281,19 +313,33 @@ class SelectorTrainer:
     def train(self):
         epochs = self.cfg.train.epochs
         for epoch in range(epochs):
-            totals = {"total": 0.0, "recon": 0.0, "comp": 0.0, "sparse": 0.0, "tv": 0.0}
+            totals = {k: 0.0 for k in ("total", "recon", "comp", "sparse")}
             example_count = 0
 
             iterator = tqdm(self.train_dl, desc=f"Training {epoch+1}: ", disable=self.disable_progress)
             for batch in iterator:
-                embeddings, attention_mask, sentence_reps, _, _, _ = batch.values()
+                batch = self._to_device(batch)
+                embeddings = batch["embeddings"]
+                attention_mask = batch["attention_mask"]
+                sentence_reps = batch["sentence_reps"]
+                self.optimizer.zero_grad(set_to_none=True)
+                
+                gates = self.model(embeddings, attention_mask, hard=True)
 
-                losses = self._run_batch(embeddings, attention_mask, sentence_reps, train=True)
+                losses = compute_losses(gates,embeddings,attention_mask, \
+                    sentence_reps,self.sbert,self.loss_cfg)
+
+                loss_total = losses["total"]
+                loss_total.backward()
+                
+                if self.grad_clip > 0.0:
+                    clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                self.optimizer.step()
 
                 batch_size = embeddings.size(0)
                 example_count += batch_size
-                for k in totals:
-                    totals[k] += float(losses[k]) * batch_size
+                for k, v in losses.items():
+                    totals[k] = totals.get(k, 0.0) + float(v.detach()) * batch_size
 
             metrics = {k: v / example_count for k, v in totals.items() if v != 0.0}
             if not self.disable_progress:
@@ -325,8 +371,8 @@ def main(cfg):
     device = torch.device(cfg.runtime.device if torch.cuda.is_available() else "cpu")
     cfg.runtime.device = device.type
 
-    train_dl, eval_dl, pos_map = initialize_dataloaders(cfg.data, logger, device=device)
-    trainer = SelectorTrainer(cfg, train_dl, eval_dl, logger, xp, device, pos_map)
+    train_dl, eval_dl, tag_map = initialize_data(cfg.data, logger, device=device)
+    trainer = SelectorTrainer(cfg, train_dl, eval_dl, logger, xp, tag_map)
 
     if cfg.train.eval_only:
         trainer._load_checkpoint()

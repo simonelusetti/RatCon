@@ -1,7 +1,7 @@
-baseline: ["model.loss.l_s=0.05", "train.epochs=30", "runtime.grid_mode=True", "data.rebuild=True"]
+baseline: ["model.loss.l_s=0.05", "runtime.grid_mode=True"]
 sweep:
-  - ["data.train.dataset=conll00", "data.eval.dataset=conll00", "data.dev.dataset=conll00"]
-  - ["data.train.dataset=chat", "data.eval.dataset=chat", "data.dev.dataset=chat"]
-  - ["data.train.dataset=brown", "data.eval.dataset=brown", "data.dev.dataset=brown"]
-  - ["data.train.dataset=tb", "data.eval.dataset=tb", "data.dev.dataset=tb"]
+  - ["data.train.dataset=conll00", "data.eval.dataset=conll00"]
+  - ["data.train.dataset=chat", "data.eval.dataset=chat"]
+  - ["data.train.dataset=brown", "data.eval.dataset=brown"]
+  - ["data.train.dataset=tb", "data.eval.dataset=tb"]
   - []

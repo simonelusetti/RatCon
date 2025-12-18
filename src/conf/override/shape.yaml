@@ -1,0 +1,15 @@
+# @package _global_
+
+data:
+  train:
+    dataset: "shape"
+    config:
+      split: "train"
+      original: "cnn_dailymail"
+      field: "highlights"
+  eval:
+    dataset: "shape"
+    config:
+      split: "validation"
+      original: "cnn_dailymail"
+      field: "highlights"

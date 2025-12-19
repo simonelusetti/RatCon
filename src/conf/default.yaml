@@ -3,12 +3,13 @@ defaults:
   - override: default
 
 model:
-  encoder_family: "sbert" # vanilla | sbert | retrieval | late
+  encoder: 
+    family: "sbert" # vanilla | sbert | retrieval | late
+    name: "sentence-transformers/all-MiniLM-L6-v2"
   loss:
     l_rec: 1.0
-    l_comp: 0.0
-    l_s: 0.05
-    l_tv: 0.0
+    l_s: 0.01
+    sparsity_target: 0.5
     tau: 0.07
     fourier:
       filter_mode: "none"
@@ -28,7 +29,9 @@ data:
     num_workers: 8
     shuffle: true
     tokenizer_name: "sentence-transformers/all-MiniLM-L6-v2"
-    sentence_model_name: "sentence-transformers/all-MiniLM-L6-v2"
+    encoder: 
+      family: "sbert" # vanilla | sbert | retrieval | late
+      name: "sentence-transformers/all-MiniLM-L6-v2"
   train:
     dataset: "ud"
     config:

@@ -17,10 +17,12 @@ from luse.log import (
     dict_to_table,
 )
 from luse.utils import (
-    recon_loss,
-    sparsity_loss,
     configure_runtime,
     spectral_filter,
+)
+from luse.losses import (
+    recon_loss,
+    sparsity_loss,
 )
 from luse.data import (
     initialize_data,
@@ -31,29 +33,26 @@ from luse.selector import RationaleSelectorModel
 
 def compute_losses(
     gates: torch.Tensor,
-    embeddings: torch.Tensor,
+    input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
+    full_rep: torch.Tensor,
     sent_encoder: Any,
     loss_cfg: Dict,
 ):
-    full_rep = sent_encoder.encode(embeddings, attention_mask)
-    pred_rep = sent_encoder.encode(embeddings * gates.unsqueeze(-1), attention_mask)
-    comp_rep = sent_encoder.encode(embeddings * ((1 - gates) * attention_mask).unsqueeze(-1), attention_mask)
+    masked_mask = attention_mask * (gates > 0.5).long()
+    pred_rep = sent_encoder.encode(input_ids, masked_mask)
     
     if loss_cfg.get("spec_mode", "none") != "none":
         mode = loss_cfg.filter_mode
         cutoff = loss_cfg.cutoff
         pred_rep = spectral_filter(pred_rep, mode=mode, cutoff=cutoff)
-        comp_rep = spectral_filter(comp_rep, mode=mode, cutoff=cutoff)
         full_rep = spectral_filter(full_rep, mode=mode, cutoff=cutoff)
     
     recon_l = recon_loss(pred_rep, full_rep) * loss_cfg.l_rec
-    empty_rep = torch.zeros_like(full_rep)
-    comp_l = recon_loss(comp_rep, empty_rep) * loss_cfg.l_comp
-    sparse_l = sparsity_loss(gates, attention_mask) * loss_cfg.l_s
+    sparse_l = sparsity_loss(gates, attention_mask, loss_cfg.sparsity_target) * loss_cfg.l_s
 
-    total = recon_l + comp_l + sparse_l
-    return {"total": total, "recon": recon_l, "comp": comp_l, "sparse": sparse_l}
+    total = recon_l + sparse_l
+    return {"total": total, "recon": recon_l, "sparse": sparse_l}
 
 
 class SelectorTrainer:
@@ -72,11 +71,11 @@ class SelectorTrainer:
         self.grad_clip = cfg.train.grad_clip
         self.loss_cfg = cfg.model.loss
 
-        model_dim = torch.as_tensor(self.train_dl.dataset[0]["embeddings"]).shape[-1]  # model dim dynamically set without extra copy
+        model_dim = torch.as_tensor(self.train_dl.dataset[0]["tkns_embd"]).shape[-1]  # model dim dynamically set without extra copy
         
         self.sent_encoder = build_sentence_encoder(
-            cfg.model.encoder_family,
-            hidden_dim=model_dim,
+            cfg.model.encoder.family,
+            encoder_name=cfg.model.encoder.name,
         ).to(self.device)
 
         self.sent_encoder.eval()
@@ -92,12 +91,14 @@ class SelectorTrainer:
         
         self.selection_history = []
         self.label_history = []
-        self.labels_present = "labels" in self.eval_dl.dataset[0] and self.eval_dl.dataset[0]["labels"] is not None
+        self.labels_present = "labels" in self.eval_dl.dataset[0] \
+            and self.eval_dl.dataset[0]["labels"] is not None \
+            and self.eval_dl.dataset[0]["labels"]
 
     def _to_device(self, batch: Dict):
         out = {}
         for k, v in batch.items():
-            if k in {"embeddings", "attention_mask", "labels", "input_ids"} and v is not None:
+            if k in {"tkns_embd", "attn_mask", "labels", "ids"} and v is not None:
                 out[k] = v.to(self.device)
             else:
                 out[k] = v
@@ -124,11 +125,12 @@ class SelectorTrainer:
             ax.set_title(plot_cfg["title"])
             ax.set_xlabel("Epoch")
             ax.set_ylabel(plot_cfg["ylabel"])
-            ax.set_ylim(0,1)
+            ax.set_yscale('log')
             
             if plot_cfg["type"] == "simple":
                 ax.plot(plot_cfg["data"])
-            elif plot_cfg["type"] == "dict":
+                values = plot_cfg["data"]
+            elif plot_cfg["type"] == "dict" and self.labels_present:
                 epochs = range(1, len(plot_cfg["data"]) + 1)
                 labels = plot_cfg["data"][0].keys()
                 for label in labels:
@@ -140,6 +142,7 @@ class SelectorTrainer:
                     loc="upper left",
                     fontsize="small",
                 )
+            ax.set_ylim(min(values), max(values))
 
         fig.tight_layout()
         out = "summary_plots.png"
@@ -148,7 +151,7 @@ class SelectorTrainer:
 
         self.logger.info(f"Saved combined plot file: {out} for experiment {self.xp.sig}")
 
-    def _save_checkpoint(self):
+    def save_checkpoint(self):
         state = {
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
@@ -158,7 +161,7 @@ class SelectorTrainer:
         if not (self.cfg.runtime.global_log or self.cfg.runtime.epoch_log):
             self.logger.info("Saved checkpoint to %s", os.path.abspath(self.checkpoint_path))
 
-    def _load_checkpoint(self):
+    def load_checkpoint(self):
         state = torch.load(self.checkpoint_path, map_location=self.device)
         self.model.load_state_dict(state["model"], strict=False)
         self.optimizer.load_state_dict(state["optimizer"])
@@ -174,10 +177,10 @@ class SelectorTrainer:
 
         for batch in tqdm(self.eval_dl, desc="Eval: ", disable=not self.cfg.runtime.epoch_log):
             batch = self._to_device(batch)
-            embeddings = batch["embeddings"]
-            attention_mask = batch["attention_mask"]
+            embeddings = batch["tkns_embd"]
+            attention_mask = batch["attn_mask"]
             labels = batch["labels"] if self.labels_present else None
-            gates = self.model(embeddings, attention_mask)
+            gates = self.model(embeddings, attention_mask, deterministic=True)
 
             total_tokens += attention_mask.sum().item()
             preds = (gates > 0.5).bool().view(-1)
@@ -224,19 +227,21 @@ class SelectorTrainer:
             iterator = range(self.cfg.train.epochs)
             
         for epoch in iterator:
-            totals = {k: 0.0 for k in ("total", "recon", "comp", "sparse")}
+            totals = {k: 0.0 for k in ("total", "recon", "sparse")}
             example_count = 0
 
             iterator = tqdm(self.train_dl, desc=f"Training {epoch+1}: ", disable=not self.cfg.runtime.epoch_log)
             for batch in iterator:
                 batch = self._to_device(batch)
-                embeddings = batch["embeddings"]
-                attention_mask = batch["attention_mask"]
+                tkns_embd = batch["tkns_embd"]
+                attn_mask = batch["attn_mask"]
+                ids = batch["ids"]
+                sent_embd = batch["sent_embd"]
                 self.optimizer.zero_grad(set_to_none=True)
                 
-                gates = self.model(embeddings, attention_mask, hard=True)
+                gates = self.model(tkns_embd, attn_mask)
 
-                losses = compute_losses(gates,embeddings,attention_mask,self.sent_encoder,self.loss_cfg)
+                losses = compute_losses(gates, ids, attn_mask, sent_embd, self.sent_encoder, self.loss_cfg)
 
                 loss_total = losses["total"]
                 loss_total.backward()
@@ -245,7 +250,7 @@ class SelectorTrainer:
                     clip_grad_norm_(self.model.parameters(), self.grad_clip)
                 self.optimizer.step()
 
-                batch_size = embeddings.size(0)
+                batch_size = tkns_embd.size(0)
                 example_count += batch_size
                 for k, v in losses.items():
                     totals[k] = totals.get(k, 0.0) + float(v.detach()) * batch_size
@@ -255,7 +260,7 @@ class SelectorTrainer:
                 self.logger.info("Epoch %d/%d train:\n%s", epoch+1, self.cfg.train.epochs, dict_to_table(metrics))
 
             self.log_eval()
-            self._save_checkpoint()
+            self.save_checkpoint()
 
         self.save_final_plots()
 
@@ -284,7 +289,7 @@ def main(cfg):
     trainer = SelectorTrainer(cfg, train_dl, eval_dl, logger, xp, tag_map)
 
     if cfg.train.eval_only:
-        trainer._load_checkpoint()
+        trainer.load_checkpoint()
         trainer.log_eval()
     else:
         trainer.train()

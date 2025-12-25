@@ -8,7 +8,8 @@ model:
     name: "sentence-transformers/all-MiniLM-L6-v2"
   loss:
     l_rec: 1.0
-    l_s: 0.01
+    l_s: 100.0
+    l_c: 1.0
     sparsity_target: 0.5
     tau: 0.07
     fourier:
@@ -22,30 +23,25 @@ model:
     betas: [0.9, 0.999]
 
 data:
-  shared:
+  runtime:
     rebuild: false
-    max_length: 512
     batch_size: 256
     num_workers: 8
-    shuffle: true
-    tokenizer_name: "sentence-transformers/all-MiniLM-L6-v2"
-    encoder: 
-      family: "sbert" # vanilla | sbert | retrieval | late
-      name: "sentence-transformers/all-MiniLM-L6-v2"
-  train:
-    dataset: "ud"
-    config:
-      split: "train"
-    subset: 1.0
-  eval:
-    dataset: "ud"
-    config:
-      split: "validation"
-    subset: 1.0
+  max_length: 512
+  dataset: "mr"
+  config: null
+  subset: 1.0
+  tokenizer_name: "sentence-transformers/all-MiniLM-L6-v2"
+  encoder: 
+    family: "sbert" # vanilla | sbert | retrieval | late
+    name: "sentence-transformers/all-MiniLM-L6-v2"
+
 
 train:
-  eval_only: false
-  eval_epoch: true
+  eval:
+    eval_only: false
+    eval_epoch: true
+    examples: 10
   epochs: 30
   lr: 1e-3
   weight_decay: 0.0
@@ -61,10 +57,10 @@ runtime:
 
 dora:
   exclude:
-    - "data.shared.rebuild"
+    - "data.runtime.*"
     - "slurm.*"
     - "runtime.*"
-    - "train.eval_only"
+    - "train.eval.*"
 
 array: 0
 

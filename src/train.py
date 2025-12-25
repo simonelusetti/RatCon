@@ -10,7 +10,10 @@ from pathlib import Path
 
 from luse.metrics import Counts
 from luse.sentence import (
-    build_sentence_encoder
+    build_sentence_encoder,
+    SentenceEncoderBase,
+    EmbdEncoder,
+    IdsEncoder,
 )
 from luse.log import (
     get_logger,
@@ -23,24 +26,23 @@ from luse.utils import (
 from luse.losses import (
     recon_loss,
     sparsity_loss,
+    certainty_loss,
 )
 from luse.data import (
     initialize_data,
-    PAD_TAG,
 )
 from luse.selector import RationaleSelectorModel
 
 
 def compute_losses(
     gates: torch.Tensor,
-    input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
+    input: torch.Tensor,
+    attn_mask: torch.Tensor,
     full_rep: torch.Tensor,
-    sent_encoder: Any,
+    sent_encoder: SentenceEncoderBase,
     loss_cfg: Dict,
 ):
-    masked_mask = attention_mask * (gates > 0.5).long()
-    pred_rep = sent_encoder.encode(input_ids, masked_mask)
+    pred_rep = sent_encoder.encode(input, attn_mask, gates)
     
     if loss_cfg.get("spec_mode", "none") != "none":
         mode = loss_cfg.filter_mode
@@ -49,23 +51,24 @@ def compute_losses(
         full_rep = spectral_filter(full_rep, mode=mode, cutoff=cutoff)
     
     recon_l = recon_loss(pred_rep, full_rep) * loss_cfg.l_rec
-    sparse_l = sparsity_loss(gates, attention_mask, loss_cfg.sparsity_target) * loss_cfg.l_s
-
-    total = recon_l + sparse_l
-    return {"total": total, "recon": recon_l, "sparse": sparse_l}
+    sparse_l = sparsity_loss(gates, attn_mask, loss_cfg.sparsity_target) * loss_cfg.l_s
+    certainty_l = certainty_loss(gates, attn_mask) * loss_cfg.l_c
+    
+    total = recon_l + sparse_l + certainty_l
+    return {"total": total, "recon": recon_l, "sparse": sparse_l, "certainty": certainty_l}
 
 
 class SelectorTrainer:
     def __init__(self, cfg: Dict, train_dl: DataLoader,
-        eval_dl: DataLoader, logger: Logger, xp: XP, tag_map = None,
+        test_dl: DataLoader, logger: Logger, xp: XP,
     ):
         self.cfg = cfg
         self.logger = logger
         self.train_dl = train_dl
-        self.eval_dl = eval_dl
+        self.test_dl = test_dl
         self.device = cfg.runtime.device
         self.xp = xp
-        self.tag_map = tag_map
+        self.examples_to_log = cfg.train.eval.examples
         
         self.checkpoint_path = cfg.train.checkpoint
         self.grad_clip = cfg.train.grad_clip
@@ -91,14 +94,14 @@ class SelectorTrainer:
         
         self.selection_history = []
         self.label_history = []
-        self.labels_present = "labels" in self.eval_dl.dataset[0] \
-            and self.eval_dl.dataset[0]["labels"] is not None \
-            and self.eval_dl.dataset[0]["labels"]
+        self.labels_present = "labels" in self.test_dl.dataset[0] \
+            and self.test_dl.dataset[0]["labels"] is not None \
+            and self.test_dl.dataset[0]["labels"]
 
     def _to_device(self, batch: Dict):
         out = {}
         for k, v in batch.items():
-            if k in {"tkns_embd", "attn_mask", "labels", "ids"} and v is not None:
+            if k in {"tkns_embd", "attn_mask", "ids"} and v is not None:
                 out[k] = v.to(self.device)
             else:
                 out[k] = v
@@ -125,16 +128,15 @@ class SelectorTrainer:
             ax.set_title(plot_cfg["title"])
             ax.set_xlabel("Epoch")
             ax.set_ylabel(plot_cfg["ylabel"])
-            ax.set_yscale('log')
             
             if plot_cfg["type"] == "simple":
                 ax.plot(plot_cfg["data"])
                 values = plot_cfg["data"]
             elif plot_cfg["type"] == "dict" and self.labels_present:
                 epochs = range(1, len(plot_cfg["data"]) + 1)
-                labels = plot_cfg["data"][0].keys()
+                labels = {k for d in plot_cfg["data"] for k in d}
                 for label in labels:
-                    values = [epoch[label] for epoch in plot_cfg["data"]]
+                    values = [epoch.get(label, 0) for epoch in plot_cfg["data"]]                   
                     ax.plot(epochs, values, label=label)
                 ax.legend()
                 ax.legend(
@@ -168,44 +170,59 @@ class SelectorTrainer:
         self.logger.info("Loaded checkpoint from %s", self.checkpoint_path)
 
     @torch.no_grad()
-    def evaluate(self):
-        total_tokens = 0
-        total_selected = 0
-        if self.labels_present:
-            counts_part_pred = Counts(self.tag_map, PAD_TAG)
-            counts_part_gold = Counts(self.tag_map, PAD_TAG)
+    def evaluate(self, examples: int = 0):
+        total_tokens, total_selected, examples_used = 0, 0, 0
+        
+        examples_str = []
+        counts_part_pred = None
+        counts_part_gold = None
+        counts_init = False
 
-        for batch in tqdm(self.eval_dl, desc="Eval: ", disable=not self.cfg.runtime.epoch_log):
+        for batch in tqdm(self.test_dl, desc="Eval: ", disable=not self.cfg.runtime.epoch_log):
             batch = self._to_device(batch)
             embeddings = batch["tkns_embd"]
             attention_mask = batch["attn_mask"]
             labels = batch["labels"] if self.labels_present else None
             gates = self.model(embeddings, attention_mask, deterministic=True)
+            
+            if examples_used < examples:
+                tokens = batch["tokens"]
+                for i in range(embeddings.size(0)):
+                    if examples_used >= examples:
+                        break
+                    example_gates = gates[i, : attention_mask[i].sum().item()]
+                    example_tokens = tokens[i][: attention_mask[i].sum().item()]
+                    selected_tokens = [
+                        token for token, gate in zip(example_tokens, example_gates)
+                        if gate.item() > 0.5
+                    ]
+                    examples_str.append((example_tokens, selected_tokens))
+                    examples_used += 1
 
             total_tokens += attention_mask.sum().item()
             preds = (gates > 0.5).bool().view(-1)
+            flat_attn = attention_mask.bool().view(-1)
             if self.labels_present:
-                flat_attn = attention_mask.bool().view(-1)
-                flat_labels = labels.view(-1)
-                counts_part_pred = counts_part_pred + \
-                    Counts(self.tag_map, PAD_TAG, classes_mask=flat_labels, mask=flat_attn & preds)
-                counts_part_gold = counts_part_gold + \
-                    Counts(self.tag_map, PAD_TAG, classes_mask=flat_labels, mask=flat_attn)
+                flat_labels = [x for sub in labels for x in sub]
+                if not counts_init:
+                    counts_part_pred = Counts(flat_labels, flat_attn & preds)
+                    counts_part_gold = Counts(flat_labels, selections=flat_attn)
+                    counts_init = True
+                else:
+                    counts_part_pred = counts_part_pred + Counts(flat_labels, flat_attn & preds)
+                    counts_part_gold = counts_part_gold + Counts(flat_labels, selections=flat_attn)
                 
-            total_selected += preds.sum().item()
+            total_selected += (preds * flat_attn).sum().item()
         
-        if not self.labels_present:
-            return total_selected, total_tokens, None, None
-        
-        return total_selected, total_tokens, counts_part_gold, counts_part_pred
+        return total_selected, total_tokens, counts_part_gold, counts_part_pred, examples_str
 
-    def log_eval(self):
+    def log_eval(self, examples: int = 0):
         total_selected, total_tokens, \
-        counts_part_gold, counts_part_pred = self.evaluate()
+        counts_part_gold, counts_part_pred, examples_str = self.evaluate(examples=examples)
         
         selection_rate = total_selected / max(total_tokens, 1)
         self.selection_history.append(selection_rate)
-        
+                
         if not self.labels_present:
             if not self.cfg.runtime.epoch_log:
                 return
@@ -217,6 +234,12 @@ class SelectorTrainer:
         if not self.cfg.runtime.epoch_log:
             return
         
+        if examples > 0 and examples_str:
+            for i, (tokens, selected_tokens) in enumerate(examples_str):
+                self.logger.info("Eval Example %d:", i+1)
+                self.logger.info("Tokens: %s", " ".join(tokens))
+                self.logger.info("Selected Tokens: %s\n", " ".join(selected_tokens))
+    
         self.logger.info("Eval selection rate: %.5f", selection_rate)
         self.logger.info("Eval labels:\n%s", str(label_share))
 
@@ -227,7 +250,7 @@ class SelectorTrainer:
             iterator = range(self.cfg.train.epochs)
             
         for epoch in iterator:
-            totals = {k: 0.0 for k in ("total", "recon", "sparse")}
+            totals = {k: 0.0 for k in ("total", "recon", "sparse", "certainty")}
             example_count = 0
 
             iterator = tqdm(self.train_dl, desc=f"Training {epoch+1}: ", disable=not self.cfg.runtime.epoch_log)
@@ -241,7 +264,13 @@ class SelectorTrainer:
                 
                 gates = self.model(tkns_embd, attn_mask)
 
-                losses = compute_losses(gates, ids, attn_mask, sent_embd, self.sent_encoder, self.loss_cfg)
+                if isinstance(self.sent_encoder, EmbdEncoder):
+                    input = tkns_embd
+                elif isinstance(self.sent_encoder, IdsEncoder):
+                    input = ids
+                else:
+                    raise ValueError(f"Unknown sentence encoder type: {type(self.sent_encoder)}")
+                losses = compute_losses(gates, input, attn_mask, sent_embd, self.sent_encoder, self.loss_cfg)
 
                 loss_total = losses["total"]
                 loss_total.backward()
@@ -254,12 +283,12 @@ class SelectorTrainer:
                 example_count += batch_size
                 for k, v in losses.items():
                     totals[k] = totals.get(k, 0.0) + float(v.detach()) * batch_size
-
-            metrics = {k: v / example_count for k, v in totals.items() if v != 0.0}
+                    
+            metrics = {k: v / example_count for k, v in totals.items()}
             if self.cfg.runtime.epoch_log:
                 self.logger.info("Epoch %d/%d train:\n%s", epoch+1, self.cfg.train.epochs, dict_to_table(metrics))
 
-            self.log_eval()
+            self.log_eval(self.examples_to_log)
             self.save_checkpoint()
 
         self.save_final_plots()
@@ -285,10 +314,10 @@ def main(cfg):
     device = torch.device(cfg.runtime.device if torch.cuda.is_available() else "cpu")
     cfg.runtime.device = device.type
 
-    train_dl, eval_dl, tag_map = initialize_data(cfg.data, logger, device=device)
-    trainer = SelectorTrainer(cfg, train_dl, eval_dl, logger, xp, tag_map)
+    train_dl, test_dl = initialize_data(cfg.data, logger, device=device)
+    trainer = SelectorTrainer(cfg, train_dl, test_dl, logger, xp)
 
-    if cfg.train.eval_only:
+    if cfg.train.eval.eval_only:
         trainer.load_checkpoint()
         trainer.log_eval()
     else:

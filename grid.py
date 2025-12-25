@@ -21,22 +21,19 @@ also call `--combine-plots` to build a single grid PNG from existing
 `outputs/plots/<sig>/rates_cath.png` files using `.argv.json` as titles.
 """
 
-import json
-import math
-import subprocess
-import textwrap
+
+import subprocess, yaml
 from datetime import datetime
 from pathlib import Path
 
-import matplotlib.image as mpimg
-import matplotlib.pyplot as plt
+
 import yaml
 from tabulate import tabulate
 from tqdm import tqdm
 
 
 CONFIG_PATH = Path("grid.yaml")
-RUNS_DIR = Path("outputs/grid_runs")
+RUNS_DIR = Path("outputs/grids")
 
 
 def load_config(path: Path):
@@ -73,55 +70,6 @@ def run_and_capture_signature(cmd, pbar):
     if returncode != 0:
         raise subprocess.CalledProcessError(returncode, cmd)
     return signature
-
-
-# ---------------------------------------------------------------------------
-# Plot aggregation
-# ---------------------------------------------------------------------------
-def combine_cath_plots(
-    plots_root: Path = Path("outputs/plots"),
-    output_path: Path = Path("outputs/plots/combined_rates_cath.png"),
-    max_cols: int = 3,
-):
-    """Combine all rates_cath.png plots into a single grid PNG with titles from .argv.json."""
-    entries = []
-    for exp_dir in sorted(plots_root.iterdir()):
-        if not exp_dir.is_dir():
-            continue
-        img_path = exp_dir / "rates_cath.png"
-        argv_path = exp_dir / ".argv.json"
-        if img_path.exists() and argv_path.exists():
-            try:
-                with argv_path.open("r", encoding="utf-8") as fh:
-                    args = json.load(fh)
-                title = " ".join(str(a) for a in args) if isinstance(args, (list, tuple)) else str(args)
-            except Exception:
-                title = exp_dir.name
-            entries.append((img_path, title))
-
-    if not entries:
-        print(f"No plots found under {plots_root}")
-        return
-
-    cols = min(max_cols, len(entries))
-    rows = math.ceil(len(entries) / cols)
-    fig, axes = plt.subplots(rows, cols, figsize=(cols * 5, rows * 4))
-    axes = axes.reshape(-1) if hasattr(axes, "reshape") else [axes]
-
-    for ax in axes:
-        ax.axis("off")
-
-    for ax, (img_path, title) in zip(axes, entries):
-        img = mpimg.imread(img_path)
-        ax.imshow(img)
-        ax.set_title(textwrap.fill(title, 60), fontsize=8)
-        ax.axis("off")
-
-    plt.tight_layout()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=200)
-    plt.close(fig)
-    print(f"Saved combined plot to {output_path}")
 
 
 def main():
@@ -189,13 +137,6 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Grid sweep runner and plot combiner.")
-    parser.add_argument("--combine-plots", action="store_true", help="Combine rates_cath.png plots into one image.")
-    parser.add_argument("--plots-root", type=Path, default=Path("outputs/plots"), help="Root directory containing plot subfolders.")
-    parser.add_argument("--output", type=Path, default=Path("outputs/plots/combined_rates_cath.png"), help="Output path for combined plot.")
-    parser.add_argument("--max-cols", type=int, default=3, help="Maximum columns in the combined plot grid.")
     args = parser.parse_args()
 
-    if args.combine_plots:
-        combine_cath_plots(args.plots_root, args.output, max_cols=args.max_cols)
-    else:
-        main()
+    main()

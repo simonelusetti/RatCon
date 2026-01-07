@@ -3,8 +3,9 @@ defaults:
   - override: default
 
 model:
+  scnd_labels: False
   encoder: 
-    family: "sbert" # vanilla | sbert | retrieval | late
+    family: "sbert" # llm | sbert | e5 | bge
     name: "sentence-transformers/all-MiniLM-L6-v2"
   loss:
     l_rec: 1.0
@@ -25,15 +26,14 @@ model:
 data:
   runtime:
     rebuild: false
-    batch_size: 256
+    batch_size: 512
     num_workers: 8
   max_length: 512
   dataset: "mr"
   config: null
   subset: 1.0
-  tokenizer_name: "sentence-transformers/all-MiniLM-L6-v2"
   encoder: 
-    family: "sbert" # vanilla | sbert | retrieval | late
+    family: "sbert" # llm | sbert | retrieval | late
     name: "sentence-transformers/all-MiniLM-L6-v2"
 
 

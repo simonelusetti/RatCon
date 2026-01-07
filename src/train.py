@@ -1,6 +1,6 @@
-import os, torch, shutil, matplotlib.pyplot as plt
+import os, torch, shutil, matplotlib.pyplot as plt, json, textwrap
 
-from typing import Dict, Any
+from typing import Dict
 from logging import Logger
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
@@ -12,8 +12,6 @@ from luse.metrics import Counts
 from luse.sentence import (
     build_sentence_encoder,
     SentenceEncoderBase,
-    EmbdEncoder,
-    IdsEncoder,
 )
 from luse.log import (
     get_logger,
@@ -76,14 +74,11 @@ class SelectorTrainer:
 
         model_dim = torch.as_tensor(self.train_dl.dataset[0]["tkns_embd"]).shape[-1]  # model dim dynamically set without extra copy
         
-        self.sent_encoder = build_sentence_encoder(
+        self.sent_encoder, _ = build_sentence_encoder(
             cfg.model.encoder.family,
             encoder_name=cfg.model.encoder.name,
-        ).to(self.device)
-
-        self.sent_encoder.eval()
-        for p in self.sent_encoder.parameters():
-            p.requires_grad = False
+            device=self.device,
+        )
 
         self.model = RationaleSelectorModel(model_dim).to(self.device)
         self.optimizer = torch.optim.AdamW(
@@ -92,11 +87,16 @@ class SelectorTrainer:
             weight_decay=float(cfg.train.weight_decay)
         )
         
-        self.selection_history = []
-        self.label_history = []
-        self.labels_present = "labels" in self.test_dl.dataset[0] \
-            and self.test_dl.dataset[0]["labels"] is not None \
-            and self.test_dl.dataset[0]["labels"]
+        self.total_tokens_history = []
+        self.total_selected_history = []
+        self.label_key = "scnd_labels" if cfg.model.scnd_labels else "labels"
+        self.labels_present = (
+            self.label_key in self.test_dl.dataset[0]
+            and self.test_dl.dataset[0][self.label_key] is not None
+        )
+        if self.labels_present:
+            self.counts_gold_history = []
+            self.counts_pred_history = []
 
     def _to_device(self, batch: Dict):
         out = {}
@@ -106,6 +106,22 @@ class SelectorTrainer:
             else:
                 out[k] = v
         return out
+        
+    def full_conf_matrix(self):
+        txt = ""
+        new_txt = ""
+        for epoch, (gold, pred) in enumerate(zip(self.counts_gold_history, self.counts_pred_history)):
+            new_txt = gold.conf_matrix(pred, epoch)
+            if new_txt is None:
+                return
+            txt += new_txt
+        
+        out = "confusion_matrix.txt"
+        with open(out, "w") as f:
+            f.write(txt)
+        self.logger.info("Last epoch confusion matrix:\n%s", new_txt)
+        self.logger.info("Saved confusion matrix to %s", out)
+        
 
     def save_final_plots(self):
         fig, axs = plt.subplots(2, 1, figsize=(16, 16))
@@ -113,13 +129,16 @@ class SelectorTrainer:
         plots = [
             {
                 "type": "simple",
-                "data": self.selection_history,
+                "data": [s / max(t, 1) for s, t in zip(self.total_selected_history, self.total_tokens_history)],
                 "title": "Selection Rate Across Epochs",
                 "ylabel": "Selection Rate",
             },
             {
                 "type": "dict",
-                "data": self.label_history,
+                "data": [
+                    (pred / gold).data for pred, gold in \
+                        zip(self.counts_pred_history, self.counts_gold_history)
+                ],
                 "title": "Label Across Epochs",
                 "ylabel": "Share",
             },
@@ -135,9 +154,11 @@ class SelectorTrainer:
             elif plot_cfg["type"] == "dict" and self.labels_present:
                 epochs = range(1, len(plot_cfg["data"]) + 1)
                 labels = {k for d in plot_cfg["data"] for k in d}
+                values = []
                 for label in labels:
-                    values = [epoch.get(label, 0) for epoch in plot_cfg["data"]]                   
-                    ax.plot(epochs, values, label=label)
+                    epoch_values = [epoch.get(label, 0) for epoch in plot_cfg["data"]]              
+                    values.extend(epoch_values)     
+                    ax.plot(epochs, epoch_values, label=label)
                 ax.legend()
                 ax.legend(
                     bbox_to_anchor=(1.05, 1),
@@ -145,13 +166,29 @@ class SelectorTrainer:
                     fontsize="small",
                 )
             ax.set_ylim(min(values), max(values))
+            
+        argv_path = self.xp.folder / ".argv.json"
+        if argv_path.exists():
+            with open(argv_path) as f:
+                args = json.load(f)
 
-        fig.tight_layout()
+            argv_text = " | ".join(args)
+            argv_text = textwrap.fill(argv_text, width=140)
+
+            fig.suptitle(
+                argv_text,
+                fontsize=14,
+                y=0.98,
+                ha="center",
+            )
+        fig.tight_layout(rect=[0, 0, 1, 0.95])
+        
         out = "summary_plots.png"
         fig.savefig(out, bbox_inches="tight")
         plt.close(fig)
 
         self.logger.info(f"Saved combined plot file: {out} for experiment {self.xp.sig}")
+        self.full_conf_matrix()
 
     def save_checkpoint(self):
         state = {
@@ -174,15 +211,15 @@ class SelectorTrainer:
         total_tokens, total_selected, examples_used = 0, 0, 0
         
         examples_str = []
-        counts_part_pred = None
-        counts_part_gold = None
+        counts_pred = None
+        counts_gold = None
         counts_init = False
 
         for batch in tqdm(self.test_dl, desc="Eval: ", disable=not self.cfg.runtime.epoch_log):
             batch = self._to_device(batch)
             embeddings = batch["tkns_embd"]
             attention_mask = batch["attn_mask"]
-            labels = batch["labels"] if self.labels_present else None
+            labels = batch[self.label_key] if self.labels_present else None
             gates = self.model(embeddings, attention_mask, deterministic=True)
             
             if examples_used < examples:
@@ -205,43 +242,46 @@ class SelectorTrainer:
             if self.labels_present:
                 flat_labels = [x for sub in labels for x in sub]
                 if not counts_init:
-                    counts_part_pred = Counts(flat_labels, flat_attn & preds)
-                    counts_part_gold = Counts(flat_labels, selections=flat_attn)
+                    counts_pred = Counts(flat_labels, flat_attn, preds)
+                    counts_gold = Counts(flat_labels, flat_attn)
                     counts_init = True
                 else:
-                    counts_part_pred = counts_part_pred + Counts(flat_labels, flat_attn & preds)
-                    counts_part_gold = counts_part_gold + Counts(flat_labels, selections=flat_attn)
+                    counts_pred = counts_pred + Counts(flat_labels, flat_attn, preds)
+                    counts_gold = counts_gold + Counts(flat_labels, flat_attn)
                 
             total_selected += (preds * flat_attn).sum().item()
         
-        return total_selected, total_tokens, counts_part_gold, counts_part_pred, examples_str
-
+        return total_selected, total_tokens, counts_gold, counts_pred, examples_str
+    
+    @torch.no_grad()
     def log_eval(self, examples: int = 0):
         total_selected, total_tokens, \
-        counts_part_gold, counts_part_pred, examples_str = self.evaluate(examples=examples)
+        counts_gold, counts_pred, examples_str = self.evaluate(examples=examples)
         
-        selection_rate = total_selected / max(total_tokens, 1)
-        self.selection_history.append(selection_rate)
-                
-        if not self.labels_present:
-            if not self.cfg.runtime.epoch_log:
-                return
-            self.logger.info("Eval selection rate: %.5f", selection_rate)
-            return
-
-        label_share = counts_part_pred / counts_part_gold
-        self.label_history.append(label_share.data)
+        self.total_tokens_history.append(total_tokens)
+        self.total_selected_history.append(total_selected)
+        
+        if self.labels_present:
+            self.counts_gold_history.append(counts_gold)
+            self.counts_pred_history.append(counts_pred)
+        
         if not self.cfg.runtime.epoch_log:
             return
+        
+        self.logger.info("Eval selection rate: %.5f", total_selected / max(total_tokens, 1))
         
         if examples > 0 and examples_str:
             for i, (tokens, selected_tokens) in enumerate(examples_str):
                 self.logger.info("Eval Example %d:", i+1)
                 self.logger.info("Tokens: %s", " ".join(tokens))
                 self.logger.info("Selected Tokens: %s\n", " ".join(selected_tokens))
-    
-        self.logger.info("Eval selection rate: %.5f", selection_rate)
-        self.logger.info("Eval labels:\n%s", str(label_share))
+                
+        if self.labels_present:
+            self.logger.info("Eval labels:\n%s", str(counts_pred / counts_gold))
+            new_txt = counts_gold.conf_matrix(counts_pred, epoch=None)
+            if new_txt is None:
+                return
+            self.logger.info("Confusion Matrix:\n%s", new_txt)
 
     def train(self):
         if self.cfg.runtime.global_log:
@@ -264,13 +304,7 @@ class SelectorTrainer:
                 
                 gates = self.model(tkns_embd, attn_mask)
 
-                if isinstance(self.sent_encoder, EmbdEncoder):
-                    input = tkns_embd
-                elif isinstance(self.sent_encoder, IdsEncoder):
-                    input = ids
-                else:
-                    raise ValueError(f"Unknown sentence encoder type: {type(self.sent_encoder)}")
-                losses = compute_losses(gates, input, attn_mask, sent_embd, self.sent_encoder, self.loss_cfg)
+                losses = compute_losses(gates, ids, attn_mask, sent_embd, self.sent_encoder, self.loss_cfg)
 
                 loss_total = losses["total"]
                 loss_total.backward()

@@ -1,12 +1,7 @@
-baseline: ["runtime.global_log=True", "runtime.epoch_log=False"] 
+baseline: ["runtime.global_log=True", "runtime.epoch_log=False", "data.encoder.name=None", "model.encoder.name=None", "data.runtime.rebuild=True"] 
 sweep:
-  - ["model.loss.sparsity_target=0.3", "data.dataset=conll00"]
-  - ["model.loss.sparsity_target=0.1", "data.dataset=conll00"]
-  - ["model.loss.sparsity_target=0.3", "data.dataset=ud"]
-  - ["model.loss.sparsity_target=0.1", "data.dataset=ud"]
-  - ["model.loss.sparsity_target=0.3", "data.dataset=mr"]
-  - ["model.loss.sparsity_target=0.1", "data.dataset=mr"]
-  - ["model.loss.sparsity_target=0.3", "data.dataset=twitter"]
-  - ["model.loss.sparsity_target=0.1", "data.dataset=twitter"]
-  - ["model.loss.sparsity_target=0.3", "data.dataset=conll03"]
-  - ["model.loss.sparsity_target=0.1", "data.dataset=conll03"]
+  - ["data.encoder.family=llm", "model.encoder.family=llm"]
+  - ["data.encoder.family=e5", "model.encoder.family=e5"]
+  - ["data.encoder.family=bge", "model.encoder.family=bge"]
+  - ["data.encoder.family=sbert", "model.encoder.family=sbert"]
+  

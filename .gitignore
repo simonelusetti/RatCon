@@ -13,5 +13,4 @@ logs/
 exploration/__pycache__/
 exploration/data/*
 exploration/decomp/
-retrival.py
 beir_datasets/

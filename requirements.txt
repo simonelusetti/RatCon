@@ -9,3 +9,10 @@ pyyaml
 tqdm
 prettytable
 colorama
+matplotlib
+conllu
+torch_dct
+nltk
+plotext
+torch
+numpy

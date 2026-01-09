@@ -32,8 +32,8 @@ from tabulate import tabulate
 from tqdm import tqdm
 
 
-CONFIG_PATH = Path("grid.yaml")
-RUNS_DIR = Path("outputs/grids")
+CONFIG_PATH = Path("./utils/grid.yaml")
+RUNS_DIR = Path("../outputs/grids")
 
 
 def load_config(path: Path):

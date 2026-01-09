@@ -1,7 +1,0 @@
-baseline: ["runtime.global_log=True", "runtime.epoch_log=False", "data.encoder.name=None", "model.encoder.name=None", "data.runtime.rebuild=True"] 
-sweep:
-  - ["data.encoder.family=llm", "model.encoder.family=llm"]
-  - ["data.encoder.family=e5", "model.encoder.family=e5"]
-  - ["data.encoder.family=bge", "model.encoder.family=bge"]
-  - ["data.encoder.family=sbert", "model.encoder.family=sbert"]
-  

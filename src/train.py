@@ -6,15 +6,13 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from dora import get_xp, hydra_main, to_absolute_path, XP
 from pathlib import Path
+from transformers import AutoTokenizer
 
 from luse.metrics import Counts
-from luse.sentence import (
-    build_sentence_encoder,
-)
-from luse.log import (
-    get_logger,
-    dict_to_table,
-)
+from luse.sentence import SentenceEncoder
+from luse.selector import RationaleSelectorModel
+from luse.data import initialize_data
+from luse.log import get_logger, dict_to_table
 from luse.utils import (
     configure_runtime,
     open_selection_writer,
@@ -22,14 +20,10 @@ from luse.utils import (
     save_final_plots,
 )
 from luse.losses import (
-    recon_loss,
+    contrastive_loss_sym,
     sparsity_loss,
     entropy_loss,
 )
-from luse.data import (
-    initialize_data,
-)
-from luse.selector import RationaleSelectorModel
 
 
 def compute_losses(
@@ -40,21 +34,21 @@ def compute_losses(
     sent_encoder,
     loss_cfg,
 ):
-    pred_rep = sent_encoder.encode(ids, attn_mask * g)
+    pred_rep = sent_encoder.encode(ids, attn_mask, gates=g)
     full_rep = sent_encoder.encode(ids, attn_mask)
 
-    recon_l = recon_loss(pred_rep, full_rep) * loss_cfg.l_rec
+    recon_l = contrastive_loss_sym(pred_rep, full_rep, loss_cfg.tau) * loss_cfg.l_rec
     sparse_l = sparsity_loss(z, loss_cfg.sparsity_target) * loss_cfg.l_s
     ent_l = entropy_loss(z) * loss_cfg.l_e
 
-    total = recon_l + sparse_l 
+    total = recon_l + sparse_l + ent_l
 
     return {
         "total": total,
         "recon": recon_l,
         "sparse": sparse_l,
         "entropy": ent_l,
-    }
+    }, pred_rep
 
 
 class SelectorTrainer:
@@ -63,6 +57,8 @@ class SelectorTrainer:
         cfg: Dict,
         train_dl: DataLoader,
         test_dl: DataLoader,
+        sent_encoder: SentenceEncoder,
+        tokenizer: AutoTokenizer,
         logger: Logger,
         xp: XP,
     ):
@@ -75,18 +71,11 @@ class SelectorTrainer:
         self.examples_to_log = cfg.train.eval.examples
 
         self.checkpoint_path = cfg.train.checkpoint
-        self.grad_clip = cfg.train.grad_clip
         self.loss_cfg = cfg.model.loss
+        self.train_deterministic = cfg.train.deterministic_gates
 
-        # ------------------------------------------------------------------
-        # Sentence encoder (frozen, run at training time)
-        # ------------------------------------------------------------------
-        self.sent_encoder, _ = build_sentence_encoder(
-            cfg.model.encoder.family,
-            encoder_name=cfg.model.encoder.name,
-            device=self.device,
-        )
-
+        self.sent_encoder, self.tokenizer = sent_encoder, tokenizer
+        
         # Infer selector input dim from encoder output (first batch)
         with torch.no_grad():
             first = next(iter(self.train_dl))
@@ -98,8 +87,9 @@ class SelectorTrainer:
         self.model = RationaleSelectorModel(model_dim).to(self.device)
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
-            lr=float(cfg.train.lr),
-            weight_decay=float(cfg.train.weight_decay),
+            lr=float(cfg.model.optim.lr),
+            weight_decay=float(cfg.model.optim.weight_decay),
+            betas=tuple(cfg.model.optim.betas),
         )
 
         self.total_tokens_history = []
@@ -252,7 +242,6 @@ class SelectorTrainer:
         for epoch in epoch_iter:
             totals = None
             example_count = 0
-
             batch_iter = tqdm(
                 self.train_dl,
                 desc=f"Training {epoch+1}: ",
@@ -265,12 +254,24 @@ class SelectorTrainer:
                 attn = batch["attn_mask"]
 
                 tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
-                gates, z = self.model(tkns_embd, attn)
+                assert torch.isnan(tkns_embd).sum().item() == 0, "NaN in token embeddings"
+                gates, z = self.model(tkns_embd, attn, deterministic=self.train_deterministic)
+                assert torch.isnan(gates).sum().item() == 0, "NaN in gates"
+                self.optimizer.zero_grad()
+                losses, _ = compute_losses(gates, z, ids, attn, self.sent_encoder, self.loss_cfg)
 
-                self.optimizer.zero_grad(set_to_none=True)
-                losses = compute_losses(gates, z, ids, attn, self.sent_encoder, self.loss_cfg)
+                for name, value in losses.items():
+                    if not torch.isfinite(value):
+                        raise RuntimeError(f"Non-finite loss {name}: {value.item()}")
 
                 losses["total"].backward()
+
+                for name, param in self.model.named_parameters():
+                    if param.grad is None:
+                        continue
+                    if not torch.isfinite(param.grad).all():
+                        raise RuntimeError(f"Non-finite gradient in {name}")
+                
                 self.optimizer.step()
 
                 bs = ids.size(0)
@@ -313,14 +314,14 @@ def main(cfg):
     plot_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy(src, f"{plot_dir}/.argv.json")
 
-    configure_runtime(cfg)
+    configure_runtime(cfg.runtime.threads, cfg.runtime.interop_threads)
     if cfg.runtime.device == "cuda" and not torch.cuda.is_available():
         logger.warning("CUDA requested but unavailable, using CPU.")
     device = torch.device(cfg.runtime.device if torch.cuda.is_available() else "cpu")
     cfg.runtime.device = device.type
 
-    train_dl, test_dl = initialize_data(cfg.data, logger, device=device)
-    trainer = SelectorTrainer(cfg, train_dl, test_dl, logger, xp)
+    train_dl, test_dl, encoder, tokenizer = initialize_data(cfg.data, logger, device=device)
+    trainer = SelectorTrainer(cfg, train_dl, test_dl, encoder, tokenizer, logger, xp)
 
     if cfg.train.eval.eval_only:
         trainer.load_checkpoint()

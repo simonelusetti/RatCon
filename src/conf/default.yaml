@@ -11,7 +11,7 @@ model:
     sparsity_target: 0.5
     tau: 0.2
     fourier:
-      filter_mode: "none"
+      filter_mode: null
       cutoff: 0.5
   optim:
     lr: 5e-5
@@ -31,7 +31,7 @@ data:
   subset: 1.0
   encoder: 
     family: "sbert" # llm | sbert | retrieval | late
-    name: "sentence-transformers/all-MiniLM-L6-v2"
+    name: null
 
 
 train:

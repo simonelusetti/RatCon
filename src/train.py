@@ -1,4 +1,4 @@
-import os, torch, shutil, json
+import os, torch, shutil, json, math
 
 from typing import Dict
 from logging import Logger
@@ -147,16 +147,16 @@ class SelectorTrainer:
             attn = batch["attn_mask"]
 
             tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
-            gates, _ = self.model(tkns_embd, attn, deterministic=True)
+            g, z = self.model(tkns_embd, attn, deterministic=True)
 
             total_tokens += attn.sum().item()
-            total_selected += gates.sum().item()
+            total_selected += g.sum().item()
 
             if self.labels_present:
                 labels = batch[self.label_key]
                 flat_labels = [x for seq in labels for x in seq]
                 flat_attn = attn.bool().view(-1)
-                flat_preds = gates.view(-1)
+                flat_preds = g.view(-1)
 
                 if not counts_init:
                     counts_pred = Counts(flat_labels, flat_attn, flat_preds)
@@ -170,7 +170,7 @@ class SelectorTrainer:
             for i in range(ids.size(0)):
                 length = attn[i].sum().item()
                 toks = tokens_batch[i][:length]
-                gate_vals = gates[i, :length].detach().cpu().tolist()
+                gate_vals = g[i, :length].detach().cpu().tolist()
                 selected = [int(g > 0.5) for g in gate_vals]
 
                 all_tokens.append(toks)
@@ -188,6 +188,7 @@ class SelectorTrainer:
             counts_pred,
             examples_str,
             {"tokens": all_tokens, "selected": all_selected, "gates": all_gates},
+            g, z,
         )
 
     # ------------------------------------------------------------------
@@ -200,7 +201,7 @@ class SelectorTrainer:
             counts_gold,
             counts_pred,
             examples_str,
-            record,
+            record, g, z
         ) = self.evaluate(examples)
 
         if epoch >= 0:
@@ -230,6 +231,20 @@ class SelectorTrainer:
 
         if self.labels_present:
             self.logger.info("Eval labels:\n%s", str(counts_pred / counts_gold))
+            
+        with torch.no_grad():
+            g = g.detach()
+            p1 = g.mean().item()
+            p0 = 1.0 - p1
+            entropy = 0.0
+            if p0 > 0: entropy -= p0 * math.log(p0)
+            if p1 > 0: entropy -= p1 * math.log(p1)
+            self.logger.info(f"p1={p1:.4f} entropy={entropy:.4f}")
+            z = z.detach().view(-1)
+            hist = torch.histc(z, bins=10, min=0.0, max=1.0)
+            hist = (hist / hist.sum()).cpu().tolist()
+            self.logger.info(f"z_hist {hist}")
+
 
     # ------------------------------------------------------------------
 

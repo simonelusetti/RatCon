@@ -8,18 +8,19 @@ from dora import get_xp, hydra_main, to_absolute_path, XP
 from pathlib import Path
 from transformers import AutoTokenizer
 
-from luse.metrics import Counts
-from luse.sentence import SentenceEncoder
-from luse.selector import RationaleSelectorModel
-from luse.data import initialize_data
-from luse.log import get_logger, dict_to_table
-from luse.utils import (
+from .metrics import Counts
+from .sentence import SentenceEncoder
+from .selector import RationaleSelectorModel
+from .data import initialize_data
+from .utils import (
+    get_logger, 
+    dict_to_table,
     configure_runtime,
     open_selection_writer,
     to_device,
     save_final_plots,
 )
-from luse.losses import (
+from .losses import (
     recon_loss,
     sparsity_loss,
     certainty_loss,
@@ -34,7 +35,7 @@ def compute_losses(
     sent_encoder,
     loss_cfg,
 ):
-    pred_rep = sent_encoder.encode(ids, attn * z)
+    pred_rep = sent_encoder.encode(ids, attn * g)
     full_rep = sent_encoder.encode(ids, attn)
 
     recon_l = recon_loss(pred_rep, full_rep) * loss_cfg.l_r

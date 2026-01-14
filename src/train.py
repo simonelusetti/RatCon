@@ -63,16 +63,17 @@ class SelectorTrainer:
         logger: Logger,
         xp: XP,
     ):
+        self.device = cfg.runtime.device
+        self.examples_to_log = cfg.train.eval.examples
+        self.loss_cfg = cfg.model.loss
+
         self.cfg = cfg
         self.logger = logger
         self.train_dl = train_dl
         self.test_dl = test_dl
-        self.device = cfg.runtime.device
+        
         self.xp = xp
-        self.examples_to_log = cfg.train.eval.examples
-
-        self.checkpoint_path = cfg.train.checkpoint
-        self.loss_cfg = cfg.model.loss
+        self.checkpoint_path = "model.pth"
 
         self.sent_encoder, self.tokenizer = sent_encoder, tokenizer
         
@@ -224,11 +225,11 @@ class SelectorTrainer:
             return
 
         self.logger.info(
-            "Eval selection rate (g): %.5f",
+            "Hard selection rate (g): %.5f",
             total_selected / max(total_tokens, 1),
         )
         self.logger.info(
-            "Eval selection rate (z): %.5f",
+            "Soft selection rate (z): %.5f",
             total_selected_z / max(total_tokens, 1),
         )
 
@@ -241,10 +242,8 @@ class SelectorTrainer:
             self.logger.info("Eval labels:\n%s", str(counts_pred / counts_gold))
 
     def train(self):
-        if self.cfg.runtime.global_log:
-            epoch_iter = tqdm(range(self.cfg.train.epochs), desc="Training: ")
-        else:
-            epoch_iter = range(self.cfg.train.epochs)
+        epoch_iter = tqdm(range(self.cfg.train.epochs), desc="Training: ") \
+            if self.cfg.runtime.short_log else range(self.cfg.train.epochs)
 
         for epoch in epoch_iter:
             totals = None
@@ -252,7 +251,7 @@ class SelectorTrainer:
             batch_iter = tqdm(
                 self.train_dl,
                 desc=f"Training Epoch {epoch+1}: ",
-                disable=not self.cfg.runtime.epoch_log,
+                disable = not self.cfg.runtime.short_log,
             )
 
             for batch in batch_iter:
@@ -322,13 +321,11 @@ def main(cfg):
     plot_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy(src, f"{plot_dir}/.argv.json")
 
-    configure_runtime(cfg.runtime.threads, cfg.runtime.interop_threads)
-    if cfg.runtime.device == "cuda" and not torch.cuda.is_available():
+    cfg.runtime, changed_device = configure_runtime(cfg.runtime)
+    if changed_device:
         logger.warning("CUDA requested but unavailable, using CPU.")
-    device = torch.device(cfg.runtime.device if torch.cuda.is_available() else "cpu")
-    cfg.runtime.device = device.type
-
-    train_dl, test_dl, encoder, tokenizer = initialize_data(cfg.data, logger, device=device)
+    
+    train_dl, test_dl, encoder, tokenizer = initialize_data(cfg.data, logger, device=cfg.runtime.device)
     trainer = SelectorTrainer(cfg, train_dl, test_dl, encoder, tokenizer, logger, xp)
 
     if cfg.train.eval.eval_only:

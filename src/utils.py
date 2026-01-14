@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging, os, sys, torch, matplotlib.pyplot as plt
 
 from pathlib import Path
-from typing import Dict, Iterable, Mapping, Optional, Sequence
+from typing import Dict, Iterable, Mapping, Sequence, Tuple
 from dora import XP
 from prettytable import PrettyTable
 from tqdm import tqdm
@@ -14,14 +14,19 @@ from tqdm import tqdm
 # ---------------------------------------------------------------------------
 
 
-def configure_runtime(
-    threads: Optional[int] = None,
-    interop_threads: Optional[int] = None
-) -> None:
-    if threads is not None:
-        torch.set_num_threads(int(threads))
-    if interop_threads is not None:
-        torch.set_num_interop_threads(int(interop_threads))
+def configure_runtime(runtime_cfg: Dict) -> Tuple[Dict, bool]:
+    changed_device = False
+    
+    if "threads" in runtime_cfg and runtime_cfg["threads"] is not None:
+        torch.set_num_threads(int(runtime_cfg["threads"]))
+    if "interop_threads" in runtime_cfg and runtime_cfg["interop_threads"] is not None:
+        torch.set_num_interop_threads(int(runtime_cfg["interop_threads"]))
+    if runtime_cfg["device"] == "cuda" and not torch.cuda.is_available():
+        changed_device
+    device = torch.device(runtime_cfg["device"] if torch.cuda.is_available() else "cpu")
+    runtime_cfg["device"] = device.type
+    
+    return runtime_cfg, changed_device
         
 
 def to_device(device: torch.device, batch: Dict):

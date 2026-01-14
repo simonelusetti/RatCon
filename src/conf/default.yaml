@@ -5,25 +5,23 @@ defaults:
 model:
   scnd_labels: False
   loss:
-    l_rec: 1.0
+    l_r: 1.0
     l_s: 1.0
-    l_e: 1.0
-    sparsity_target: 0.5
+    l_c: 1.0
+    sparsity_target: 0.1
     tau: 0.2
     fourier:
       filter_mode: null
       cutoff: 0.5
   optim:
     lr: 5e-5
-    weight_decay: 1e-2
-    lr_adv: 5e-5
-    weight_decay_adv: 1e-2
+    weight_decay: 0 #1e-2
     betas: [0.9, 0.999]
 
 data:
   runtime:
     rebuild: false
-    batch_size: 512
+    batch_size: 256
     num_workers: 2
   max_length: 512
   dataset: "mr"
@@ -39,7 +37,6 @@ train:
     eval_only: false
     eval_epoch: true
     examples: 0
-  deterministic_gates: false
   epochs: 30
   lr: 1e-3
   weight_decay: 0.0

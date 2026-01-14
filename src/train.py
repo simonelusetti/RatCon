@@ -1,4 +1,4 @@
-import os, torch, shutil, json, math
+import os, torch, shutil, json
 
 from typing import Dict
 from logging import Logger
@@ -20,9 +20,9 @@ from luse.utils import (
     save_final_plots,
 )
 from luse.losses import (
-    contrastive_loss_sym,
+    recon_loss,
     sparsity_loss,
-    entropy_loss,
+    certainty_loss,
 )
 
 
@@ -30,24 +30,24 @@ def compute_losses(
     g: torch.Tensor,      
     z: torch.Tensor,     
     ids: torch.Tensor,
-    attn_mask: torch.Tensor,
+    attn: torch.Tensor,
     sent_encoder,
     loss_cfg,
 ):
-    pred_rep = sent_encoder.encode(ids, attn_mask, gates=g)
-    full_rep = sent_encoder.encode(ids, attn_mask)
+    pred_rep = sent_encoder.encode(ids, attn * z)
+    full_rep = sent_encoder.encode(ids, attn)
 
-    recon_l = contrastive_loss_sym(pred_rep, full_rep, loss_cfg.tau) * loss_cfg.l_rec
-    sparse_l = sparsity_loss(z, loss_cfg.sparsity_target) * loss_cfg.l_s
-    ent_l = entropy_loss(z) * loss_cfg.l_e
+    recon_l = recon_loss(pred_rep, full_rep) * loss_cfg.l_r
+    sparse_l = sparsity_loss(z * attn, loss_cfg.sparsity_target) * loss_cfg.l_s
+    ent_c = certainty_loss(z * attn) * loss_cfg.l_c
 
-    total = recon_l + sparse_l + ent_l
+    total = recon_l + sparse_l + ent_c
 
     return {
         "total": total,
         "recon": recon_l,
         "sparse": sparse_l,
-        "entropy": ent_l,
+        "certainty": ent_c,
     }, pred_rep
 
 
@@ -72,7 +72,6 @@ class SelectorTrainer:
 
         self.checkpoint_path = cfg.train.checkpoint
         self.loss_cfg = cfg.model.loss
-        self.train_deterministic = cfg.train.deterministic_gates
 
         self.sent_encoder, self.tokenizer = sent_encoder, tokenizer
         
@@ -133,7 +132,9 @@ class SelectorTrainer:
 
     @torch.no_grad()
     def evaluate(self, examples: int = 0):
-        total_tokens, total_selected = 0, 0
+        was_training = self.model.training
+        self.model.eval()
+        total_tokens, total_selected, total_selected_z = 0, 0, 0
         all_tokens, all_selected, all_gates = [], [], []
         examples_str = []
 
@@ -151,6 +152,7 @@ class SelectorTrainer:
 
             total_tokens += attn.sum().item()
             total_selected += g.sum().item()
+            total_selected_z += (z * attn).sum().item()
 
             if self.labels_present:
                 labels = batch[self.label_key]
@@ -181,27 +183,28 @@ class SelectorTrainer:
                     sel_tokens = [t for t, s in zip(toks, selected) if s]
                     examples_str.append((toks, sel_tokens))
 
+        if was_training:
+            self.model.train()
         return (
             total_selected,
             total_tokens,
+            total_selected_z,
             counts_gold,
             counts_pred,
             examples_str,
             {"tokens": all_tokens, "selected": all_selected, "gates": all_gates},
-            g, z,
         )
-
-    # ------------------------------------------------------------------
 
     @torch.no_grad()
     def log_eval(self, epoch: int = -1, examples: int = 0):
         (
             total_selected,
             total_tokens,
+            total_selected_z,
             counts_gold,
             counts_pred,
             examples_str,
-            record, g, z
+            record
         ) = self.evaluate(examples)
 
         if epoch >= 0:
@@ -220,8 +223,12 @@ class SelectorTrainer:
             return
 
         self.logger.info(
-            "Eval selection rate: %.5f",
+            "Eval selection rate (g): %.5f",
             total_selected / max(total_tokens, 1),
+        )
+        self.logger.info(
+            "Eval selection rate (z): %.5f",
+            total_selected_z / max(total_tokens, 1),
         )
 
         for i, (tokens, selected) in enumerate(examples_str):
@@ -231,22 +238,6 @@ class SelectorTrainer:
 
         if self.labels_present:
             self.logger.info("Eval labels:\n%s", str(counts_pred / counts_gold))
-            
-        with torch.no_grad():
-            g = g.detach()
-            p1 = g.mean().item()
-            p0 = 1.0 - p1
-            entropy = 0.0
-            if p0 > 0: entropy -= p0 * math.log(p0)
-            if p1 > 0: entropy -= p1 * math.log(p1)
-            self.logger.info(f"p1={p1:.4f} entropy={entropy:.4f}")
-            z = z.detach().view(-1)
-            hist = torch.histc(z, bins=10, min=0.0, max=1.0)
-            hist = (hist / hist.sum()).cpu().tolist()
-            self.logger.info(f"z_hist {hist}")
-
-
-    # ------------------------------------------------------------------
 
     def train(self):
         if self.cfg.runtime.global_log:
@@ -259,7 +250,7 @@ class SelectorTrainer:
             example_count = 0
             batch_iter = tqdm(
                 self.train_dl,
-                desc=f"Training {epoch+1}: ",
+                desc=f"Training Epoch {epoch+1}: ",
                 disable=not self.cfg.runtime.epoch_log,
             )
 
@@ -270,7 +261,7 @@ class SelectorTrainer:
 
                 tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
                 assert torch.isnan(tkns_embd).sum().item() == 0, "NaN in token embeddings"
-                gates, z = self.model(tkns_embd, attn, deterministic=self.train_deterministic)
+                gates, z = self.model(tkns_embd, attn, deterministic=False)
                 assert torch.isnan(gates).sum().item() == 0, "NaN in gates"
                 self.optimizer.zero_grad()
                 losses, _ = compute_losses(gates, z, ids, attn, self.sent_encoder, self.loss_cfg)
@@ -306,6 +297,7 @@ class SelectorTrainer:
                 )
 
             self.log_eval(epoch=epoch + 1, examples=self.examples_to_log)
+            self.model.train()
             self.save_checkpoint()
 
         save_final_plots(

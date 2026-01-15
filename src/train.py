@@ -39,8 +39,8 @@ def compute_losses(
     full_rep = sent_encoder.encode(ids, attn)
 
     recon_l = recon_loss(pred_rep, full_rep) * loss_cfg.l_r
-    sparse_l = sparsity_loss(z * attn, loss_cfg.sparsity_target) * loss_cfg.l_s
-    ent_c = certainty_loss(z * attn) * loss_cfg.l_c
+    sparse_l = sparsity_loss(z, attn, loss_cfg.s_target) * loss_cfg.l_s
+    ent_c = certainty_loss(z, attn) * loss_cfg.l_c
 
     total = recon_l + sparse_l + ent_c
 
@@ -53,24 +53,19 @@ def compute_losses(
 
 
 class SelectorTrainer:
-    def __init__(
-        self,
-        cfg: Dict,
-        train_dl: DataLoader,
-        test_dl: DataLoader,
-        sent_encoder: SentenceEncoder,
-        tokenizer: AutoTokenizer,
-        logger: Logger,
-        xp: XP,
-    ):
-        self.device = cfg.runtime.device
-        self.examples_to_log = cfg.train.eval.examples
+    def __init__(self, cfg: Dict, train_dl: DataLoader, test_dl: DataLoader, \
+        sent_encoder: SentenceEncoder,tokenizer: AutoTokenizer, logger: Logger, xp: XP):
+        
         self.loss_cfg = cfg.model.loss
 
-        self.cfg = cfg
         self.logger = logger
         self.train_dl = train_dl
         self.test_dl = test_dl
+        
+        self.epochs = cfg.train.epochs
+        self.short_log = cfg.runtime.eval.short_log
+        self.examples = cfg.runtime.eval.log_examples
+        self.device = cfg.runtime.device
         
         self.xp = xp
         self.checkpoint_path = "model.pth"
@@ -80,10 +75,8 @@ class SelectorTrainer:
         # Infer selector input dim from encoder output (first batch)
         with torch.no_grad():
             first = next(iter(self.train_dl))
-            ids = first["ids"].to(self.device)
-            attn = first["attn_mask"].to(self.device)
-            tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
-            model_dim = tkns_embd.shape[-1]
+            model_dim = self.sent_encoder.token_embeddings(first["ids"].to(self.device), \
+                first["attn_mask"].to(self.device)).shape[-1]
 
         self.model = RationaleSelectorModel(model_dim).to(self.device)
         self.optimizer = torch.optim.AdamW(
@@ -117,7 +110,7 @@ class SelectorTrainer:
             self.checkpoint_path,
             _use_new_zipfile_serialization=False,
         )
-        if not (self.cfg.runtime.global_log or self.cfg.runtime.epoch_log):
+        if not self.short_log:
             self.logger.info(
                 "Saved checkpoint to %s",
                 os.path.abspath(self.checkpoint_path),
@@ -134,7 +127,6 @@ class SelectorTrainer:
 
     @torch.no_grad()
     def evaluate(self, examples: int = 0):
-        was_training = self.model.training
         self.model.eval()
         total_tokens, total_selected, total_selected_z = 0, 0, 0
         all_tokens, all_selected, all_gates = [], [], []
@@ -144,7 +136,7 @@ class SelectorTrainer:
         counts_gold = None
         counts_init = False
 
-        for batch in tqdm(self.test_dl, desc="Eval: ", disable=not self.cfg.runtime.epoch_log):
+        for batch in tqdm(self.test_dl, desc="Eval: ", disable= not self.short_log):
             batch = to_device(self.device, batch)
             ids = batch["ids"]
             attn = batch["attn_mask"]
@@ -185,8 +177,6 @@ class SelectorTrainer:
                     sel_tokens = [t for t, s in zip(toks, selected) if s]
                     examples_str.append((toks, sel_tokens))
 
-        if was_training:
-            self.model.train()
         return (
             total_selected,
             total_tokens,
@@ -221,7 +211,7 @@ class SelectorTrainer:
             self.counts_gold_history.append(counts_gold)
             self.counts_pred_history.append(counts_pred)
 
-        if not self.cfg.runtime.epoch_log:
+        if self.short_log:
             return
 
         self.logger.info(
@@ -242,42 +232,21 @@ class SelectorTrainer:
             self.logger.info("Eval labels:\n%s", str(counts_pred / counts_gold))
 
     def train(self):
-        epoch_iter = tqdm(range(self.cfg.train.epochs), desc="Training: ") \
-            if self.cfg.runtime.short_log else range(self.cfg.train.epochs)
-
-        for epoch in epoch_iter:
+        for epoch in tqdm(range(self.epochs), desc="Training: ", disable = not self.short_log):
             totals = None
             example_count = 0
-            batch_iter = tqdm(
-                self.train_dl,
-                desc=f"Training Epoch {epoch+1}: ",
-                disable = not self.cfg.runtime.short_log,
-            )
-
-            for batch in batch_iter:
+            
+            for batch in tqdm(self.train_dl, desc=f"Training Epoch {epoch+1}: ", disable = self.short_log):
                 batch = to_device(self.device, batch)
                 ids = batch["ids"]
                 attn = batch["attn_mask"]
 
                 tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
-                assert torch.isnan(tkns_embd).sum().item() == 0, "NaN in token embeddings"
                 gates, z = self.model(tkns_embd, attn, deterministic=False)
-                assert torch.isnan(gates).sum().item() == 0, "NaN in gates"
+
                 self.optimizer.zero_grad()
                 losses, _ = compute_losses(gates, z, ids, attn, self.sent_encoder, self.loss_cfg)
-
-                for name, value in losses.items():
-                    if not torch.isfinite(value):
-                        raise RuntimeError(f"Non-finite loss {name}: {value.item()}")
-
                 losses["total"].backward()
-
-                for name, param in self.model.named_parameters():
-                    if param.grad is None:
-                        continue
-                    if not torch.isfinite(param.grad).all():
-                        raise RuntimeError(f"Non-finite gradient in {name}")
-                
                 self.optimizer.step()
 
                 bs = ids.size(0)
@@ -288,15 +257,9 @@ class SelectorTrainer:
                     totals[k] += float(v.detach()) * bs
 
             metrics = {k: v / example_count for k, v in totals.items()}
-            if self.cfg.runtime.epoch_log:
-                self.logger.info(
-                    "Epoch %d/%d train:\n%s",
-                    epoch + 1,
-                    self.cfg.train.epochs,
-                    dict_to_table(metrics),
-                )
-
-            self.log_eval(epoch=epoch + 1, examples=self.examples_to_log)
+            if not self.short_log:
+                self.logger.info(f"Epoch {epoch + 1}/{self.epochs} train:\n{dict_to_table(metrics)}")
+            self.log_eval(epoch=epoch + 1, examples=self.examples)
             self.model.train()
             self.save_checkpoint()
 
@@ -314,21 +277,16 @@ def main(cfg):
     logger.info(f"Exp signature: {xp.sig}")
     logger.info(repr(cfg))
     logger.info(f"Work dir: {os.getcwd()}")
-    
-    src = xp.folder / ".argv.json"
-    plot_dir = to_absolute_path("outputs/plots")
-    plot_dir = Path(os.path.join(plot_dir, xp.sig))
-    plot_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy(src, f"{plot_dir}/.argv.json")
 
     cfg.runtime, changed_device = configure_runtime(cfg.runtime)
     if changed_device:
         logger.warning("CUDA requested but unavailable, using CPU.")
     
-    train_dl, test_dl, encoder, tokenizer = initialize_data(cfg.data, logger, device=cfg.runtime.device)
+    train_dl, test_dl, encoder, tokenizer = \
+        initialize_data(cfg.data, cfg.runtime.data, logger, device=cfg.runtime.device)
     trainer = SelectorTrainer(cfg, train_dl, test_dl, encoder, tokenizer, logger, xp)
-
-    if cfg.train.eval.eval_only:
+    
+    if cfg.train.no_train:
         trainer.load_checkpoint()
         trainer.log_eval()
     else:

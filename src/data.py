@@ -247,13 +247,13 @@ def encode_examples(
 # Dataset cache and loading
 # ---------------------------------------------------------------------------
 
-def get_dataset(data_cfg: dict, tokenizer, logger=None) -> DatasetDict:
+def get_dataset(data_cfg: dict, runtime_cfg: dict, tokenizer, logger=None) -> DatasetDict:
     tokenizer_group = resolve_tokenizer_group(data_cfg.encoder.family)
     name = canonical_name(data_cfg.dataset)
     path = dataset_path(name, tokenizer_group, data_cfg.get("config"))
 
     text_field = TEXT_FIELD.get(name, "tokens")
-    if path.exists() and not data_cfg.runtime.rebuild:
+    if path.exists() and not runtime_cfg.rebuild:
         ds = load_from_disk(path)
         if text_field != "tokens" and "tokens" not in ds["train"].column_names and text_field in ds["train"].column_names:
             ds = ds.rename_column(text_field, "tokens")
@@ -280,20 +280,20 @@ def get_dataset(data_cfg: dict, tokenizer, logger=None) -> DatasetDict:
 # Entry point
 # ---------------------------------------------------------------------------
 
-def initialize_data(data_cfg: dict, logger=None, device="cpu") -> tuple[DataLoader, DataLoader]:
+def initialize_data(data_cfg: dict, runtime_cfg:dict, logger=None, device="cpu") -> tuple[DataLoader, DataLoader]:
     encoder, tokenizer = build_sentence_encoder(
         family=data_cfg.encoder.family,
         encoder_name=data_cfg.encoder.name,
         device=device,
     )
 
-    ds = get_dataset(data_cfg, tokenizer, logger)
+    ds = get_dataset(data_cfg, runtime_cfg, tokenizer, logger)
     ds = shuffle_and_subset(ds, data_cfg.subset)
 
     ds_train = DataLoader(
         ds["train"],
-        batch_size=data_cfg.runtime.batch_size,
-        num_workers=data_cfg.runtime.num_workers,
+        batch_size=runtime_cfg.batch_size,
+        num_workers=runtime_cfg.num_workers,
         collate_fn=collate,
         shuffle=True,
         pin_memory=(device == "cuda"),
@@ -301,8 +301,8 @@ def initialize_data(data_cfg: dict, logger=None, device="cpu") -> tuple[DataLoad
 
     ds_test = DataLoader(
         ds["test"],
-        batch_size=data_cfg.runtime.batch_size,
-        num_workers=data_cfg.runtime.num_workers,
+        batch_size=runtime_cfg.batch_size,
+        num_workers=runtime_cfg.num_workers,
         collate_fn=collate,
         shuffle=True,
         pin_memory=(device == "cuda"),

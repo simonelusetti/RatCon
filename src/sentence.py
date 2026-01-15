@@ -114,10 +114,8 @@ class FrozenSBERT(SentenceEncoder):
         hidden_states = model.embeddings(input_ids=input_ids)
         mask = attention_mask.to(dtype=hidden_states.dtype)
         key_mask = mask[:, None, None, :]
-        debug_info = self._first_fractional(attention_mask)
-        debug_logged = False
 
-        for layer_idx, layer in enumerate(model.encoder.layer):
+        for layer in model.encoder.layer:
             attn = layer.attention.self
             bsz, seq_len, _ = hidden_states.size()
 
@@ -133,22 +131,6 @@ class FrozenSBERT(SentenceEncoder):
             scores = scores / math.sqrt(attn.attention_head_size)
             probs = torch.softmax(scores, dim=-1)
             probs = attn.dropout(probs)
-
-            """
-            if debug_info is not None and not debug_logged and layer_idx == 0:
-                b_idx, t_idx, val = debug_info
-                probs_masked = probs * key_mask
-                col_raw = probs[b_idx, 0, :, t_idx].sum().item()
-                col_masked = probs_masked[b_idx, 0, :, t_idx].sum().item()
-                row_raw = probs[b_idx, 0, t_idx, :].sum().item()
-                row_masked = probs_masked[b_idx, 0, t_idx, :].sum().item()
-                print(
-                    "[DEBUG] fractional token "
-                    f"batch={b_idx} idx={t_idx} val={val:.4f} "
-                    f"col_raw={col_raw:.4f} col_masked={col_masked:.4f} "
-                    f"row_raw={row_raw:.4f} row_masked={row_masked:.4f}"
-                )
-                debug_logged = True"""
 
             probs = probs * key_mask
             denom = probs.sum(dim=-1, keepdim=True).clamp(min=1e-9)

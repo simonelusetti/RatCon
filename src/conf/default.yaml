@@ -8,9 +8,9 @@ model:
     l_r: 1.0
     l_s: 1.0
     l_c: 1.0
-    s_target: 0.1
+    s_target: 0.3
   optim:
-    lr: 5e-5
+    lr: 1e-3
     weight_decay: 1e-2
     betas: [0.9, 0.999]
 
@@ -25,6 +25,7 @@ data:
 
 train:
   epochs: 30
+  no_train: false
 
 runtime:
   threads: 32
@@ -37,7 +38,7 @@ runtime:
     num_workers: 2
   eval:
     short_log: false
-    examples: 0
+    log_examples: 0
 
 dora:
   exclude:

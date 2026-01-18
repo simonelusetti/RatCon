@@ -3,18 +3,19 @@ defaults:
   - override: default
 
 model:
-  scnd_labels: False
   loss:
     l_r: 1.0
-    l_s: 1.0
-    l_c: 1.0
+    l_s: 0.0
+    l_c: 0.0
     s_target: 0.3
+    tau: 1.0
   optim:
     lr: 1e-3
     weight_decay: 1e-2
     betas: [0.9, 0.999]
 
 data:
+  scnd_labels: False
   max_length: 512
   dataset: "mr"
   config: null

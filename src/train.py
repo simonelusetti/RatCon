@@ -4,8 +4,7 @@ from typing import Dict
 from logging import Logger
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from dora import get_xp, hydra_main, to_absolute_path, XP
-from pathlib import Path
+from dora import get_xp, hydra_main, XP
 from transformers import AutoTokenizer
 
 from .metrics import Counts
@@ -39,7 +38,7 @@ def compute_losses(
     full_rep = sent_encoder.encode(ids, attn)
 
     recon_l = recon_loss(pred_rep, full_rep) * loss_cfg.l_r
-    sparse_l = sparsity_loss(z, attn, loss_cfg.s_target) * loss_cfg.l_s
+    sparse_l = sparsity_loss(g, attn, loss_cfg.s_target) * loss_cfg.l_s
     ent_c = certainty_loss(z, attn) * loss_cfg.l_c
 
     total = recon_l + sparse_l + ent_c
@@ -78,7 +77,7 @@ class SelectorTrainer:
             model_dim = self.sent_encoder.token_embeddings(first["ids"].to(self.device), \
                 first["attn_mask"].to(self.device)).shape[-1]
 
-        self.model = RationaleSelectorModel(model_dim).to(self.device)
+        self.model = RationaleSelectorModel(model_dim, rho=cfg.model.loss.s_target, tau=cfg.model.loss.tau).to(self.device)
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=float(cfg.model.optim.lr),
@@ -89,7 +88,7 @@ class SelectorTrainer:
         self.total_tokens_history = []
         self.total_selected_history = []
 
-        self.label_key = "scnd_labels" if cfg.model.scnd_labels else "labels"
+        self.label_key = "scnd_labels" if cfg.data.scnd_labels else "labels"
         self.labels_present = (
             self.label_key in self.test_dl.dataset[0]
             and self.test_dl.dataset[0][self.label_key] is not None
@@ -229,7 +228,7 @@ class SelectorTrainer:
             self.logger.info("Selected Tokens: %s\n", " ".join(selected))
 
         if self.labels_present:
-            self.logger.info("Eval labels:\n%s", str(counts_pred / counts_gold))
+            self.logger.info("Eval labels:\n%s", (counts_pred / counts_gold).to_table())
 
     def train(self):
         for epoch in tqdm(range(self.epochs), desc="Training: ", disable = not self.short_log):

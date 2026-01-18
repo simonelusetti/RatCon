@@ -4,7 +4,7 @@ import torch
 
 from typing import Tuple
 from .data import PAD_TAG
-from .utils import format_dict
+from .utils import dict_to_table, format_dict
 
 class Counts(dict):
     def __init__(
@@ -63,6 +63,13 @@ class Counts(dict):
         }
         sorted_dict = dict(sorted(data_dict.items(), key=lambda x: x[1], reverse=True))
         return format_dict(sorted_dict)
+    
+    def to_table(self) -> str:
+        data_dict = {
+            **{f"{k}": v for k, v in self.data.items()},
+        }
+        sorted_dict = dict(sorted(data_dict.items(), key=lambda x: x[1], reverse=True))
+        return dict_to_table(sorted_dict)
     
     def preferences_over_total(self, total: int) -> Counts:
         result = Counts()

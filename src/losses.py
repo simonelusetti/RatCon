@@ -6,9 +6,10 @@ def recon_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return 1.0 - cos_sim.mean()
 
 
-def sparsity_loss(selection: torch.Tensor, attn: torch.Tensor, target: float = 0.5):
-    return ((selection - target) ** 2 * attn).sum() / attn.sum().clamp(min=1)
-
+def sparsity_loss(z: torch.Tensor, attn: torch.Tensor, target_rate: float):
+    rate = (z * attn).sum() / attn.sum().clamp(min=1)
+    return F.relu(rate - target_rate) ** 2
+ 
 
 def certainty_loss(z: torch.Tensor, attn: torch.Tensor):
     total = attn.sum().clamp(min=1)

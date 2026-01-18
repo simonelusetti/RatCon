@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging, torch
 from pathlib import Path
 from typing import Callable, Optional
-from datasets import DatasetDict, load_dataset, load_from_disk
+from datasets import DatasetDict, load_dataset, load_from_disk, Value, Sequence
 from dora import to_absolute_path
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
@@ -19,6 +19,7 @@ from .datasets_builders import (
     build_ud,
     build_treebank,
     build_conll2003,
+    build_wikiann,
     map_conll2003_secondary_labels,
 )
 
@@ -60,7 +61,7 @@ TEXT_FIELD = {
     "glue": "sentence1",
 }
 
-PAD_TAG = "<PAD>"
+PAD_TAG = "-100"
 
 SECONDARY_LABELS_DS = {
     "conll2003": map_conll2003_secondary_labels,
@@ -175,6 +176,8 @@ def resolve_dataset(
         ds = load_dataset("glue", "stsb")
     elif name == "conll2003":
         ds = build_conll2003()
+    elif name == "wikiann":
+        ds = build_wikiann()
     else:
         raise ValueError(f"Unsupported dataset: {name}")
 
@@ -233,6 +236,7 @@ def encode_examples(
     out = DatasetDict()
     for split, d in ds.items():
         cols = ["ids", "attn_mask", "tokens"]
+        
         if labels_present:
             cols.append("labels")
             if scnd_labels_map is not None:
@@ -266,6 +270,13 @@ def get_dataset(data_cfg: dict, runtime_cfg: dict, tokenizer, logger=None) -> Da
         logger.info(f"Building + tokenizing dataset (NO embeddings): {name}")
 
     ds_dict = resolve_dataset(name, text_field, logger, config=data_cfg.get("config", None))
+    
+    features = ds_dict["train"].features.copy()
+    if "labels" in features:
+        features["labels"] = Sequence(Value("string"))
+    if "scnd_labels" in features:
+        features["scnd_labels"] = Sequence(Value("string"))
+    ds_dict = ds_dict.cast(features)
 
     scnd_labels_map = SECONDARY_LABELS_DS.get(name, None)
     ds_tok = encode_examples(data_cfg, ds_dict, tokenizer, scnd_labels_map=scnd_labels_map)

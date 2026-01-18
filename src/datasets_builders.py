@@ -114,6 +114,24 @@ def build_conll2003() -> DatasetDict:
 def map_conll2003_secondary_labels(labels):
     return ["0" if lbl == "0" else "1" for lbl in labels]
 
+
+# ============================================================
+# wikiann
+# ============================================================
+
+def build_wikiann() -> DatasetDict:
+    ds = load_dataset("wikiann","en").rename_column("ner_tags", "labels")\
+        .remove_columns(["spans", "langs"])
+    train_ds = ds["train"]
+    test_ds = concatenate_datasets([ds["validation"], ds["test"]])
+    return DatasetDict({
+        "train": train_ds,
+        "test": test_ds,
+    })
+
+def map_conll2003_secondary_labels(labels):
+    return ["0" if lbl == "0" else "1" for lbl in labels]
+
 # ============================================================
 # ParaSCI
 # ============================================================

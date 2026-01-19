@@ -129,9 +129,6 @@ def build_wikiann() -> DatasetDict:
         "test": test_ds,
     })
 
-def map_conll2003_secondary_labels(labels):
-    return ["0" if lbl == "0" else "1" for lbl in labels]
-
 # ============================================================
 # ParaSCI
 # ============================================================

@@ -135,7 +135,7 @@ class SelectorTrainer:
         counts_gold = None
         counts_init = False
 
-        for batch in tqdm(self.test_dl, desc="Eval: ", disable= not self.short_log):
+        for batch in tqdm(self.test_dl, desc="Eval: ", disable = self.short_log):
             batch = to_device(self.device, batch)
             ids = batch["ids"]
             attn = batch["attn_mask"]

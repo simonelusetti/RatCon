@@ -1,8 +1,8 @@
+# llm | sbert | retrieval | late
+
 baseline: ["runtime.eval.short_log=True"] 
 sweep:
   - []
-  - ["data.dataset=conll00"]
-  - ["data.dataset=conll03"]
-  - ["data.dataset=twitter"]
-  - ["data.dataset=ud"]
-  - ["data.dataset=wikiann"]
+  - ["data.encoder.family=llm"]
+  - ["data.encoder.family=retrieval"]
+  - ["data.encoder.family=late"]

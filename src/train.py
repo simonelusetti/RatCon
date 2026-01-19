@@ -144,7 +144,7 @@ class SelectorTrainer:
             g, z = self.model(tkns_embd, attn, deterministic=True)
 
             total_tokens += attn.sum().item()
-            total_selected += g.sum().item()
+            total_selected += (g * attn).sum().item()
             total_selected_z += (z * attn).sum().item()
 
             if self.labels_present:

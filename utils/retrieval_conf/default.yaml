@@ -1,0 +1,16 @@
+eval:
+  split: validation
+  batch_size: 128
+  checkpoint: /home/simonelusetti/RatCon/outputs/xps/97d170e1/model.pth
+  random_seeds: [0,1,2,3,4]
+
+model:
+  selector:
+    rho: 0.2
+    tau: 1.0
+  encoder:
+    family: sbert
+    name: sentence-transformers/all-MiniLM-L6-v2
+
+runtime:
+  device: cpu

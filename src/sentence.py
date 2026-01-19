@@ -184,8 +184,57 @@ class _FrozenHFEncoder(SentenceEncoder):
 # ---------------------------------------------------------------------
 
 class FrozenE5(_FrozenHFEncoder):
+    def token_embeddings(self, input_ids, attention_mask):
+        """
+        SBERT-style soft attention mask injection for E5.
+        Supports attention_mask ∈ [0,1].
+        """
+        model = self.model
+        hidden_states = model.embeddings(input_ids=input_ids)
+
+        mask = attention_mask.to(dtype=hidden_states.dtype)        # [B, T]
+        key_mask = mask[:, None, None, :]                           # [B, 1, 1, T]
+
+        for layer in model.encoder.layer:
+            attn = layer.attention.self
+            bsz, seq_len, _ = hidden_states.size()
+
+            query = attn.query(hidden_states)
+            key   = attn.key(hidden_states)
+            value = attn.value(hidden_states)
+
+            query = query.view(
+                bsz, seq_len, attn.num_attention_heads, attn.attention_head_size
+            ).transpose(1, 2)
+            key = key.view(
+                bsz, seq_len, attn.num_attention_heads, attn.attention_head_size
+            ).transpose(1, 2)
+            value = value.view(
+                bsz, seq_len, attn.num_attention_heads, attn.attention_head_size
+            ).transpose(1, 2)
+
+            scores = torch.matmul(query, key.transpose(-1, -2))
+            scores = scores / math.sqrt(attn.attention_head_size)
+
+            probs = torch.softmax(scores, dim=-1)
+            probs = attn.dropout(probs)
+
+            # 🔑 soft mask injection (same as SBERT)
+            probs = probs * key_mask
+            probs = probs / probs.sum(dim=-1, keepdim=True).clamp(min=1e-9)
+
+            context = torch.matmul(probs, value)
+            context = context.permute(0, 2, 1, 3).contiguous()
+            context = context.view(bsz, seq_len, attn.all_head_size)
+
+            attn_output = layer.attention.output(context, hidden_states)
+            intermediate_output = layer.intermediate(attn_output)
+            hidden_states = layer.output(intermediate_output, attn_output)
+
+        return hidden_states
+
     def encode(self, input_ids, attention_mask):
-        token_emb = self.forward_hidden(input_ids, attention_mask)
+        token_emb = self.token_embeddings(input_ids, attention_mask)
         mask = attention_mask.unsqueeze(-1).type_as(token_emb)
 
         sent_emb = (token_emb * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-6)

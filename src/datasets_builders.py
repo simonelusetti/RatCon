@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import gzip, csv, re, nltk, random
 from collections import defaultdict
-from pathlib import Path
+from pathlib import Path, List, Tuple, Dict
 from typing import Callable
 from dora import to_absolute_path
 from urllib.request import urlretrieve
@@ -461,3 +461,117 @@ def build_shape(cfg: dict, tokenizer: AutoTokenizer | None = None) -> DatasetDic
     ds = ds["train"].train_test_split(test_size=0.2, seed=42)
                 
     return ds
+
+# ============================================================
+# WikiANN with entity swapping
+# ============================================================
+
+def extract_spans(labels: List[str]) -> List[Tuple[int, int, str]]:
+    spans = []
+    i = 0
+    n = len(labels)
+
+    while i < n:
+        lbl = labels[i]
+        if lbl.startswith("B-"):
+            typ = lbl[2:]
+            j = i + 1
+            while j < n and labels[j] == f"I-{typ}":
+                j += 1
+            spans.append((i, j, typ))
+            i = j
+        else:
+            i += 1
+
+    return spans
+
+
+def build_entity_bank(dataset: Dataset) -> Dict[str, List[List[str]]]:
+    bank = defaultdict(list)
+
+    for ex in dataset:
+        tokens = ex["tokens"]
+        labels = ex["labels"]
+
+        for i, j, typ in extract_spans(tokens, labels):
+            span_tokens = tokens[i:j]
+            if span_tokens:  # safety
+                bank[typ].append(span_tokens)
+
+    return {t: mentions for t, mentions in bank.items() if len(mentions) >= 2}
+
+
+def choose_replacement(candidates: List[List[str]],original: List[str],rng: \
+    random.Random, max_tries: int = 20,) -> List[str]:
+    if len(candidates) == 0:
+        return original
+    if len(candidates) == 1:
+        return candidates[0]
+    repl = candidates[rng.randrange(len(candidates))]
+    i = 0
+    while repl == original and i < max_tries:
+        repl = candidates[rng.randrange(len(candidates))]
+        i += 1
+    return repl
+
+
+def swap_entities(example: dict, bank: Dict[str, List[List[str]]], rng: random.Random) -> dict:
+    tokens = example["tokens"]
+    labels = example["labels"]
+
+    spans = extract_spans(tokens, labels)
+    if not spans:
+        return example
+
+    new_tokens = []
+    new_labels = []
+    cursor = 0
+
+    for i, j, typ in spans:
+        new_tokens.extend(tokens[cursor:i])
+        new_labels.extend(labels[cursor:i])
+
+        candidates = bank.get(typ)
+        if not candidates:
+            replacement = tokens[i:j]
+        else:
+            replacement = choose_replacement(candidates, tokens[i:j], rng)
+
+        new_tokens.extend(replacement)
+        new_labels.append(f"B-{typ}")
+        for _ in range(1, len(replacement)):
+            new_labels.append(f"I-{typ}")
+
+        cursor = j
+
+    new_tokens.extend(tokens[cursor:])
+    new_labels.extend(labels[cursor:])
+
+    return {"tokens": new_tokens, "labels": new_labels}
+
+
+def build_wikiann_swap(seed: int = 67) -> DatasetDict:
+    rng = random.Random(seed)
+    
+    ds = load_dataset("wikiann", "en") \
+        .rename_column("ner_tags", "labels") \
+        .remove_columns(["spans", "langs"])
+    train_ds = ds["train"]
+    
+    test_ds = concatenate_datasets([ds["validation"], ds["test"]])
+    base = DatasetDict({
+        "train": train_ds,
+        "test": test_ds,
+    })
+    
+    bank = build_entity_bank(base["train"])
+
+    def _swap(ex):
+        return swap_entities(ex, bank, rng)
+
+    swapped = DatasetDict({
+        "train": base["train"].map(_swap),
+        "test": base["test"].map(_swap),
+    })
+
+    return swapped

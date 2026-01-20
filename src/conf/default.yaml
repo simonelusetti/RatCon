@@ -4,9 +4,6 @@ defaults:
 
 model:
   loss:
-    l_r: 1.0
-    l_s: 0.0
-    l_c: 0.0
     s_target: 0.3
     tau: 1.0
   optim:
@@ -43,10 +40,8 @@ runtime:
 
 dora:
   exclude:
-    - "data.runtime.*"
     - "slurm.*"
     - "runtime.*"
-    - "train.eval.*"
 
 array: 0
 

@@ -2,7 +2,5 @@
 
 baseline: ["runtime.eval.short_log=True"] 
 sweep:
-  - []
   - ["data.encoder.family=llm"]
-  - ["data.encoder.family=retrieval"]
   - ["data.encoder.family=late"]

@@ -11,44 +11,14 @@ from .metrics import Counts
 from .sentence import SentenceEncoder
 from .selector import RationaleSelectorModel
 from .data import initialize_data
+from .losses import recon_loss
 from .utils import (
-    get_logger, 
-    dict_to_table,
+    get_logger,
     configure_runtime,
     open_selection_writer,
     to_device,
     save_final_plots,
 )
-from .losses import (
-    recon_loss,
-    sparsity_loss,
-    certainty_loss,
-)
-
-
-def compute_losses(
-    g: torch.Tensor,      
-    z: torch.Tensor,     
-    ids: torch.Tensor,
-    attn: torch.Tensor,
-    sent_encoder,
-    loss_cfg,
-):
-    pred_rep = sent_encoder.encode(ids, attn * g)
-    full_rep = sent_encoder.encode(ids, attn)
-
-    recon_l = recon_loss(pred_rep, full_rep) * loss_cfg.l_r
-    sparse_l = sparsity_loss(g, attn, loss_cfg.s_target) * loss_cfg.l_s
-    ent_c = certainty_loss(z, attn) * loss_cfg.l_c
-
-    total = recon_l + sparse_l + ent_c
-
-    return {
-        "total": total,
-        "recon": recon_l,
-        "sparse": sparse_l,
-        "certainty": ent_c,
-    }, pred_rep
 
 
 class SelectorTrainer:
@@ -212,15 +182,9 @@ class SelectorTrainer:
 
         if self.short_log:
             return
-
-        self.logger.info(
-            "Hard selection rate (g): %.5f",
-            total_selected / max(total_tokens, 1),
-        )
-        self.logger.info(
-            "Soft selection rate (z): %.5f",
-            total_selected_z / max(total_tokens, 1),
-        )
+        
+        rates = (total_selected / max(total_tokens, 1), total_selected_z / max(total_tokens, 1))
+        self.logger.info(f"Selection rates (g/z): {rates[0]:.5f} / {rates[1]:.5f}")
 
         for i, (tokens, selected) in enumerate(examples_str):
             self.logger.info("Eval Example %d:", i + 1)
@@ -232,7 +196,7 @@ class SelectorTrainer:
 
     def train(self):
         for epoch in tqdm(range(self.epochs), desc="Training: ", disable = not self.short_log):
-            totals = None
+            total_loss = 0.0
             example_count = 0
             
             for batch in tqdm(self.train_dl, desc=f"Training Epoch {epoch+1}: ", disable = self.short_log):
@@ -241,23 +205,22 @@ class SelectorTrainer:
                 attn = batch["attn_mask"]
 
                 tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
-                gates, z = self.model(tkns_embd, attn, deterministic=False)
+                gates, _ = self.model(tkns_embd, attn, deterministic=False)
 
                 self.optimizer.zero_grad()
-                losses, _ = compute_losses(gates, z, ids, attn, self.sent_encoder, self.loss_cfg)
-                losses["total"].backward()
+                pred_rep = self.sent_encoder.encode(ids, attn * gates)
+                full_rep = self.sent_encoder.encode(ids, attn)
+                loss = recon_loss(pred_rep, full_rep)
+                loss.backward()
                 self.optimizer.step()
 
                 bs = ids.size(0)
                 example_count += bs
-                for k, v in losses.items():
-                    if totals is None:
-                        totals = {key: 0.0 for key in losses.keys()}
-                    totals[k] += float(v.detach()) * bs
-
-            metrics = {k: v / example_count for k, v in totals.items()}
+                total_loss += float(loss.detach()) * bs
+                
+            avg_loss = total_loss / example_count
             if not self.short_log:
-                self.logger.info(f"Epoch {epoch + 1}/{self.epochs} train:\n{dict_to_table(metrics)}")
+                self.logger.info(f"Epoch {epoch + 1}/{self.epochs} loss: {avg_loss:.4f}")
             self.log_eval(epoch=epoch + 1, examples=self.examples)
             self.model.train()
             self.save_checkpoint()

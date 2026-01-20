@@ -75,24 +75,15 @@ class RationaleSelectorModel(nn.Module):
     ):
         B, T, D = embeddings.shape
 
-        # mask embeddings
         emb = embeddings * attn.unsqueeze(-1)
-
-        # 1) token scores
         scores = self.selector(emb)                     # [B, T]
         scores = scores.masked_fill(attn == 0, -1e9)
 
-        # 2) softmax competition
         p = torch.softmax(scores / self.tau, dim=1)     # sum p = 1
-
-        # 3) per-sentence budget
         T_eff = attn.sum(dim=1, keepdim=True)            # [B, 1]
         K = (self.rho * T_eff).round().clamp(min=1)      # [B, 1]
-
-        # 4) budgeted soft mass
         z = K * p                                        # sum z = K
 
-        # 5) hard Top-K (exact budget)
         if deterministic:
             g = self._hard_topk(z, K)
         else:

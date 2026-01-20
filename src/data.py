@@ -21,6 +21,7 @@ from .datasets_builders import (
     build_conll2003,
     build_wikiann,
     map_conll2003_secondary_labels,
+    build_wikiann_swap
 )
 
 # ---------------------------------------------------------------------------
@@ -42,6 +43,7 @@ ALIASES = {
     "mpqa": {"mpqa"},
     "fever": {"fever"},
     "glue": {"glue", "stsb"},
+    "wikiann_swap": {"wikiann_swap"}
 }
 
 TEXT_FIELD = {
@@ -178,6 +180,10 @@ def resolve_dataset(
         ds = build_conll2003()
     elif name == "wikiann":
         ds = build_wikiann()
+    elif name == "wikiann_swap":
+        ds = build_wikiann_swap()
+    elif name == "cnn_dailymail":
+        ds = load_dataset("cnn_dailymail", "3.0.0")
     else:
         raise ValueError(f"Unsupported dataset: {name}")
 

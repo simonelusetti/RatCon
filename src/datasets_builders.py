@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import gzip, csv, re, nltk, random
 from collections import defaultdict
-from pathlib import Path, List, Tuple, Dict
-from typing import Callable
+from pathlib import Path
+from typing import Callable, List, Tuple, Dict
 from dora import to_absolute_path
 from urllib.request import urlretrieve
 from conllu import parse_incr
@@ -467,16 +467,15 @@ def build_shape(cfg: dict, tokenizer: AutoTokenizer | None = None) -> DatasetDic
 # ============================================================
 
 def extract_spans(labels: List[str]) -> List[Tuple[int, int, str]]:
-    spans = []
-    i = 0
-    n = len(labels)
+    spans, i, n = [], 0, len(labels)
+    types = {1: "PER", 3: "ORG", 5: "LOC"}
 
     while i < n:
         lbl = labels[i]
-        if lbl.startswith("B-"):
-            typ = lbl[2:]
+        if lbl in {1,3,5}:
+            typ = types[lbl]
             j = i + 1
-            while j < n and labels[j] == f"I-{typ}":
+            while j < n and labels[j] in {2,4,6}:
                 j += 1
             spans.append((i, j, typ))
             i = j
@@ -489,13 +488,13 @@ def extract_spans(labels: List[str]) -> List[Tuple[int, int, str]]:
 def build_entity_bank(dataset: Dataset) -> Dict[str, List[List[str]]]:
     bank = defaultdict(list)
 
-    for ex in dataset:
+    for ex in tqdm(dataset, desc="Building entity bank"):
         tokens = ex["tokens"]
         labels = ex["labels"]
 
-        for i, j, typ in extract_spans(tokens, labels):
+        for i, j, typ in extract_spans(labels):
             span_tokens = tokens[i:j]
-            if span_tokens:  # safety
+            if span_tokens:
                 bank[typ].append(span_tokens)
 
     return {t: mentions for t, mentions in bank.items() if len(mentions) >= 2}
@@ -518,8 +517,9 @@ def choose_replacement(candidates: List[List[str]],original: List[str],rng: \
 def swap_entities(example: dict, bank: Dict[str, List[List[str]]], rng: random.Random) -> dict:
     tokens = example["tokens"]
     labels = example["labels"]
+    types = {"PER": 1, "ORG": 3, "LOC": 5}
 
-    spans = extract_spans(tokens, labels)
+    spans = extract_spans(labels)
     if not spans:
         return example
 
@@ -538,9 +538,9 @@ def swap_entities(example: dict, bank: Dict[str, List[List[str]]], rng: random.R
             replacement = choose_replacement(candidates, tokens[i:j], rng)
 
         new_tokens.extend(replacement)
-        new_labels.append(f"B-{typ}")
+        new_labels.append(types[typ])
         for _ in range(1, len(replacement)):
-            new_labels.append(f"I-{typ}")
+            new_labels.append(types[typ] + 1)
 
         cursor = j
 

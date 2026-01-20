@@ -8,6 +8,7 @@ from typing import Tuple, List, Dict, Any, Iterable
 # -----------------------
 # IO defaults
 # -----------------------
+
 XPS_DIR = Path("./outputs/xps")
 REL_FILE = Path("selections/eval_epoch_030.jsonl")
 
@@ -15,6 +16,7 @@ REL_FILE = Path("selections/eval_epoch_030.jsonl")
 # -----------------------
 # Basic helpers
 # -----------------------
+
 def to01(x) -> int:
     if isinstance(x, bool):
         return int(x)
@@ -49,6 +51,7 @@ def load_tokens_selected(path: Path) -> Tuple[List[List[str]], List[List[Any]]]:
 # ---------------------------
 # Word aggregation (OR rule)
 # ---------------------------
+
 def aggregate_to_words(tokens: List[str], selected: List[Any]) -> Tuple[List[str], List[int]]:
     """
     Merge subword tokens into words.
@@ -116,6 +119,7 @@ def sentence_stream(all_tokens, all_selected, lowercase: bool):
 # -----------------------------------
 # Context dependence (sentence-level)
 # -----------------------------------
+
 def log_odds_ratio(a: int, b: int, c: int, d: int, alpha: float = 0.5) -> float:
     return math.log((a + alpha) * (d + alpha)) - math.log((b + alpha) * (c + alpha))
 

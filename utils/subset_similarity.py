@@ -1,23 +1,23 @@
 from __future__ import annotations
 
-import argparse, json, torch
-import torch.nn.functional as F
+import argparse, json, torch, sys, torch.nn.functional as F
 from omegaconf import OmegaConf
+from pathlib import Path
 from tqdm import tqdm
 from torch.utils.data import DataLoader
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data import canonical_name, encode_examples, resolve_dataset, TEXT_FIELD, collate
 from src.selector import RationaleSelectorModel
 from src.sentence import build_sentence_encoder, DEFAULT_MODEL_NAMES
 from src.utils import configure_runtime
 
+
 FRACS = (0.1, 0.3, 0.5)
 ENCODERS = ("sbert", "e5", "bge", "llm")
 
-
-# -------------------------
-# helpers
-# -------------------------
 
 def build_data_cfg(args, family):
     return OmegaConf.create({
@@ -26,6 +26,17 @@ def build_data_cfg(args, family):
         "max_length": args.max_length,
         "encoder": {"family": family, "name": DEFAULT_MODEL_NAMES.get(family)},
         "config": json.loads(args.config_json) if args.config_json else None,
+    }), OmegaConf.create({
+        "threads": args.threads,
+        "interop_threads": args.interop_threads,
+        "device": args.device,
+        "token_parallelism": False,
+        "data": {
+            "rebuild": False,
+            "batch_size": 256,
+            "num_workers": args.num_workers,
+        },
+        "eval": {"short_log": False, "log_examples": 0}
     })
 
 
@@ -94,7 +105,6 @@ def main():
     p.add_argument("--keep-special", action="store_true", default=True)
     p.add_argument("--max-samples", type=int)
     p.add_argument("--subset", type=float)
-    p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--num-threads", type=int, default=48)
     p.add_argument("--config-json")
@@ -110,8 +120,8 @@ def main():
             family, DEFAULT_MODEL_NAMES.get(family), device.type
         )
 
-        cfg = build_data_cfg(args, family)
-        loader, split_ds = build_dataloader(args, cfg, tokenizer)
+        runtime_cfg, data_cfg = build_data_cfg(args, family)
+        loader, split_ds = build_dataloader(args, tokenizer)
 
         selector = None
         if args.selector_ckpt:

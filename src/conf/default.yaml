@@ -4,6 +4,7 @@ defaults:
 
 model:
   loss:
+    hard: true
     s_target: 0.3
     tau: 1.0
   optim:
@@ -12,7 +13,8 @@ model:
     betas: [0.9, 0.999]
 
 data:
-  scnd_labels: False
+  shuffle: false
+  scnd_labels: false
   max_length: 512
   dataset: "mr"
   config: null

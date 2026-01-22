@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import logging, os, sys, torch, matplotlib.pyplot as plt
+import logging, os, sys, json, torch, matplotlib.pyplot as plt, torch.nn.functional as F
 
 from pathlib import Path
 from typing import Dict, Iterable, Mapping, Sequence, Tuple
@@ -51,23 +51,20 @@ def open_selection_writer(xp: XP, epoch: int):
     return open(path, "w")
 
 
-def save_final_plots(total_selected_history, total_tokens_history,
-                     counts_pred_history, counts_gold_history, labels_present, logger, xp):
+def save_final_plots(
+    counts_pred_history, counts_gold_history, 
+    loss_history,
+    labels_present, logger, xp
+):
     fig, axs = plt.subplots(2, 1, figsize=(16, 16))
     axs = axs.flatten()
 
     plots = [
         {
             "type": "simple",
-            "data": [
-                s / max(t, 1)
-                for s, t in zip(
-                    total_selected_history,
-                    total_tokens_history,
-                )
-            ],
-            "title": "Selection Rate Across Epochs",
-            "ylabel": "Selection Rate",
+            "data": loss_history,
+            "title": "Loss Across Epochs",
+            "ylabel": "Loss Rate",
         },
         {
             "type": "dict",
@@ -87,6 +84,7 @@ def save_final_plots(total_selected_history, total_tokens_history,
         ax.set_title(plot_cfg["title"])
         ax.set_xlabel("Epoch")
         ax.set_ylabel(plot_cfg["ylabel"])
+        ax.set_yscale("log", nonpositive="clip")
         values = None
 
         if plot_cfg["type"] == "simple":
@@ -122,6 +120,20 @@ def save_final_plots(total_selected_history, total_tokens_history,
         out,
         xp.sig,
     )
+    
+    with open(Path("histories.json"), "w") as f:
+        json.dump(
+            {
+                "loss":loss_history,
+                "labels":[
+                    (pred / gold).data
+                    for pred, gold in zip(
+                        counts_pred_history,
+                        counts_gold_history,
+                    )
+                ]
+            },
+        f, indent=2)
 
     if labels_present:
         full_conf_matrix(logger, counts_gold_history, counts_pred_history, labels_present)
@@ -215,3 +227,54 @@ def format_dict(d, new_liners=None):
             lines.append("") 
 
     return "\n".join(lines)
+
+
+def tkns_to_words(
+    gates: torch.Tensor,          # [B, T]
+    attn_mask: torch.Tensor,      # [B, T]
+    word_ids: torch.Tensor,       # [B, T], -1 for invalid
+    labels: list[list[str]],      # [B, T], duplicated per word
+    threshold: float = 0.0,
+):
+    """
+    Word-level OR aggregation.
+
+    Returns:
+      word_pred: BoolTensor [B, W]   (selected words)
+      word_attn: BoolTensor [B, W]   (valid words)
+      word_labels: list[list[str]]  (one label per word, left-to-right)
+    """
+    device = gates.device
+    B, T = gates.shape
+
+    # Binary subword selection, masked by attention
+    sel = (gates > threshold) & attn_mask.bool()   # [B, T]
+
+    # Number of words in batch (max wid + 1)
+    W = int(word_ids.max().item()) + 1
+
+    # One-hot word assignment: [B, T, W]
+    word_onehot = torch.zeros(B, T, W, device=device, dtype=torch.bool)
+    valid = word_ids >= 0
+    word_onehot[valid] = F.one_hot(word_ids[valid], num_classes=W).bool()
+
+    # OR aggregation (max over subwords)
+    word_pred = (sel.unsqueeze(-1) & word_onehot).any(dim=1)        # [B, W]
+    word_attn = (attn_mask.bool().unsqueeze(-1) & word_onehot).any(dim=1)  # [B, W]
+
+    # ---- labels: extracted once per word (Python, ordered) ----
+    word_labels = []
+
+    for b in range(B):
+        label_by_wid = {}
+        for t, wid in enumerate(word_ids[b].tolist()):
+            if wid == -100:
+                continue
+            if wid not in label_by_wid:
+                label_by_wid[wid] = labels[b][t]
+
+        # ensure left-to-right order
+        wids_sorted = sorted(label_by_wid.keys())
+        word_labels.append([label_by_wid[wid] for wid in wids_sorted])
+
+    return word_pred, word_attn, word_labels

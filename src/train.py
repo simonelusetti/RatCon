@@ -1,4 +1,4 @@
-import os, torch, shutil, json
+import os, torch, json
 
 from typing import Dict
 from logging import Logger
@@ -18,6 +18,7 @@ from .utils import (
     open_selection_writer,
     to_device,
     save_final_plots,
+    tkns_to_words
 )
 
 
@@ -25,7 +26,7 @@ class SelectorTrainer:
     def __init__(self, cfg: Dict, train_dl: DataLoader, test_dl: DataLoader, \
         sent_encoder: SentenceEncoder,tokenizer: AutoTokenizer, logger: Logger, xp: XP):
         
-        self.loss_cfg = cfg.model.loss
+        self.hard_gates = cfg.model.loss.hard
 
         self.logger = logger
         self.train_dl = train_dl
@@ -55,16 +56,16 @@ class SelectorTrainer:
             betas=tuple(cfg.model.optim.betas),
         )
 
-        self.total_tokens_history = []
-        self.total_selected_history = []
-
         self.label_key = "scnd_labels" if cfg.data.scnd_labels else "labels"
         self.labels_present = (
             self.label_key in self.test_dl.dataset[0]
             and self.test_dl.dataset[0][self.label_key] is not None
         )
-        self.counts_gold_history = []
-        self.counts_pred_history = []
+        
+        self.counts_gold_history, self.counts_pred_history  = [], []
+        self.total_tokens_history, self.total_selected_history = [], []
+        self.loss_history = []
+        
     
     def save_checkpoint(self):
         state = {
@@ -97,7 +98,7 @@ class SelectorTrainer:
     @torch.no_grad()
     def evaluate(self, examples: int = 0):
         self.model.eval()
-        total_tokens, total_selected, total_selected_z = 0, 0, 0
+        total_tokens, total_selected, total_selected_z, total_loss, examples_count = 0, 0, 0, 0.0, 0
         all_tokens, all_selected, all_gates = [], [], []
         examples_str = []
 
@@ -109,13 +110,29 @@ class SelectorTrainer:
             batch = to_device(self.device, batch)
             ids = batch["ids"]
             attn = batch["attn_mask"]
+            word_ids = batch["word_ids"]
+            bs = ids.size(0)
 
             tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
             g, z = self.model(tkns_embd, attn, deterministic=True)
+            gates = g if self.hard_gates else z
+            
+            pred_rep = self.sent_encoder.encode(ids, attn * gates)
+            full_rep = self.sent_encoder.encode(ids, attn)
+            loss = recon_loss(pred_rep, full_rep)
+            total_loss += float(loss.detach()) * bs
+            examples_count += bs
+            
+            word_pred, word_attn, word_lbls = tkns_to_words(
+                gates=g,
+                attn_mask=attn,
+                labels=batch[self.label_key],
+                word_ids=batch["word_ids"],
+                threshold=0.5,
+            )
 
             total_tokens += attn.sum().item()
-            total_selected += (g * attn).sum().item()
-            total_selected_z += (z * attn).sum().item()
+            total_selected += (gates * attn).sum().item()
 
             if self.labels_present:
                 labels = batch[self.label_key]
@@ -132,7 +149,7 @@ class SelectorTrainer:
                     counts_gold = counts_gold + Counts(flat_labels, flat_attn)
 
             tokens_batch = batch["tokens"]
-            for i in range(ids.size(0)):
+            for i in range(bs):
                 length = attn[i].sum().item()
                 toks = tokens_batch[i][:length]
                 gate_vals = g[i, :length].detach().cpu().tolist()
@@ -145,11 +162,13 @@ class SelectorTrainer:
                 if len(examples_str) < examples:
                     sel_tokens = [t for t, s in zip(toks, selected) if s]
                     examples_str.append((toks, sel_tokens))
-
+                    
+        avg_loss = total_loss / examples_count
+        self.loss_history.append(avg_loss)
+        
         return (
             total_selected,
             total_tokens,
-            total_selected_z,
             counts_gold,
             counts_pred,
             examples_str,
@@ -161,7 +180,6 @@ class SelectorTrainer:
         (
             total_selected,
             total_tokens,
-            total_selected_z,
             counts_gold,
             counts_pred,
             examples_str,
@@ -183,8 +201,7 @@ class SelectorTrainer:
         if self.short_log:
             return
         
-        rates = (total_selected / max(total_tokens, 1), total_selected_z / max(total_tokens, 1))
-        self.logger.info(f"Selection rates (g/z): {rates[0]:.5f} / {rates[1]:.5f}")
+        self.logger.info(f"Selection rate: {total_selected / max(total_tokens, 1)}")
 
         for i, (tokens, selected) in enumerate(examples_str):
             self.logger.info("Eval Example %d:", i + 1)
@@ -205,7 +222,9 @@ class SelectorTrainer:
                 attn = batch["attn_mask"]
 
                 tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
-                gates, _ = self.model(tkns_embd, attn, deterministic=False)
+                g, z = self.model(tkns_embd, attn, deterministic=False)
+                
+                gates = g if self.hard_gates else z
 
                 self.optimizer.zero_grad()
                 pred_rep = self.sent_encoder.encode(ids, attn * gates)
@@ -226,8 +245,8 @@ class SelectorTrainer:
             self.save_checkpoint()
 
         save_final_plots(
-            self.total_selected_history, self.total_tokens_history,
             self.counts_pred_history, self.counts_gold_history, 
+            self.loss_history,
             self.labels_present, self.logger, self.xp
         )
 

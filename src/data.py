@@ -91,8 +91,9 @@ def dataset_path(name: str, tokenizer_group: str, config: dict | None) -> Path:
     return Path(to_absolute_path(f"./data/cache/{name}{suffix}"))
 
 
-def shuffle_and_subset(ds: DatasetDict, subset: float | int | None) -> DatasetDict:
-    ds = DatasetDict({k: v.shuffle(seed=42) for k, v in ds.items()})
+def shuffle_and_subset(ds: DatasetDict, subset: float | int | None, shuffle: bool) -> DatasetDict:
+    if shuffle:
+        ds = DatasetDict({k: v.shuffle(seed=42) for k, v in ds.items()})
 
     if subset is None or subset == 1.0:
         return ds
@@ -124,6 +125,17 @@ def collate(batch: list[dict]) -> dict:
             [torch.as_tensor(x["attn_mask"], dtype=torch.long) for x in batch],
             batch_first=True,
             padding_value=0,
+        ),
+        "word_ids": pad_sequence(
+            [
+                torch.as_tensor(
+                    [-1 if w is None else w for w in x["word_ids"]],
+                    dtype=torch.long,
+                )
+                for x in batch
+            ],
+            batch_first=True,
+            padding_value=-1,
         ),
         "tokens": tokens_padded,
     }
@@ -217,11 +229,12 @@ def encode_examples(
             max_length=data_cfg.max_length,
             is_split_into_words=isinstance(text, list),
         )
-
+        
         out = {
             "ids": enc["input_ids"],
             "attn_mask": enc["attention_mask"],
             "tokens": tokenizer.convert_ids_to_tokens(enc["input_ids"]),
+            "word_ids": enc.word_ids(),
         }
 
         labels = example.get("labels", None)
@@ -241,7 +254,7 @@ def encode_examples(
 
     out = DatasetDict()
     for split, d in ds.items():
-        cols = ["ids", "attn_mask", "tokens"]
+        cols = ["ids", "attn_mask", "tokens", "word_ids"]
         
         if labels_present:
             cols.append("labels")
@@ -305,14 +318,14 @@ def initialize_data(data_cfg: dict, runtime_cfg:dict, logger=None, device="cpu")
     )
 
     ds = get_dataset(data_cfg, runtime_cfg, tokenizer, logger)
-    ds = shuffle_and_subset(ds, data_cfg.subset)
+    ds = shuffle_and_subset(ds, data_cfg.subset, data_cfg.shuffle)
 
     ds_train = DataLoader(
         ds["train"],
         batch_size=runtime_cfg.batch_size,
         num_workers=runtime_cfg.num_workers,
         collate_fn=collate,
-        shuffle=True,
+        shuffle=data_cfg.shuffle,
         pin_memory=(device == "cuda"),
     )
 
@@ -321,7 +334,7 @@ def initialize_data(data_cfg: dict, runtime_cfg:dict, logger=None, device="cpu")
         batch_size=runtime_cfg.batch_size,
         num_workers=runtime_cfg.num_workers,
         collate_fn=collate,
-        shuffle=True,
+        shuffle=data_cfg.shuffle,
         pin_memory=(device == "cuda"),
     )
 

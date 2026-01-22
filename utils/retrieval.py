@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import torch
-import numpy as np
+import torch, sys, numpy as np
 from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 from datasets import load_dataset
-
+from pathlib import Path
 from dora import hydra_main
 from omegaconf import DictConfig
-
-import sys
-from pathlib import Path
 
 # ---------------------------------------------------------------------
 # Path setup (Hydra-safe)

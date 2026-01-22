@@ -1,0 +1,141 @@
+
+==========================================================================================
+PAIR: 0d489b81  vs  97d170e1
+==========================================================================================
+=== Global distances ===
+A: outputs/xps/0d489b81/selections/eval_epoch_030.json
+B: outputs/xps/97d170e1/selections/eval_epoch_030.json
+File A: total_tokens=196628 selected_tokens=59128
+File B: total_tokens=196628 selected_tokens=59128
+Weighted L1 drift over p(t)=P(sel|t): 0.216724
+JS distance over q(t) selected-token mass: 0.354160
+
+=== Top 10 tokens with largest +Δp (B selects more | token) (min_count=20) ===
+          spoil  Δp=+0.9167  pA=0.0833 pB=1.0000  nA=12 nB=12  kA=1 kB=12
+         kelley  Δp=+0.9000  pA=0.0000 pB=0.9000  nA=10 nB=10  kA=0 kB=9
+            dam  Δp=+0.9000  pA=0.0000 pB=0.9000  nA=10 nB=10  kA=0 kB=9
+             bu  Δp=+0.8710  pA=0.0323 pB=0.9032  nA=31 nB=31  kA=1 kB=28
+           ##to  Δp=+0.8571  pA=0.0000 pB=0.8571  nA=14 nB=14  kA=0 kB=12
+         boring  Δp=+0.8519  pA=0.0741 pB=0.9259  nA=27 nB=27  kA=2 kB=25
+           mary  Δp=+0.8500  pA=0.0000 pB=0.8500  nA=20 nB=20  kA=0 kB=17
+            lee  Δp=+0.8500  pA=0.1500 pB=1.0000  nA=60 nB=60  kA=9 kB=60
+        russian  Δp=+0.8182  pA=0.0000 pB=0.8182  nA=11 nB=11  kA=0 kB=9
+        formula  Δp=+0.8182  pA=0.1364 pB=0.9545  nA=22 nB=22  kA=3 kB=21
+
+=== Top 10 tokens with largest -Δp (A selects more | token) (min_count=20) ===
+           dogs  Δp=-1.0000  pA=1.0000 pB=0.0000  nA=10 nB=10  kA=10 kB=0
+         aliens  Δp=-0.9444  pA=1.0000 pB=0.0556  nA=18 nB=18  kA=18 kB=1
+           save  Δp=-0.9429  pA=0.9714 pB=0.0286  nA=35 nB=35  kA=34 kB=1
+        vampire  Δp=-0.9412  pA=1.0000 pB=0.0588  nA=17 nB=17  kA=17 kB=1
+          guard  Δp=-0.9167  pA=0.9167 pB=0.0000  nA=12 nB=12  kA=11 kB=0
+       vampires  Δp=-0.9167  pA=1.0000 pB=0.0833  nA=12 nB=12  kA=12 kB=1
+            cox  Δp=-0.9091  pA=1.0000 pB=0.0909  nA=11 nB=11  kA=11 kB=1
+             hu  Δp=-0.9048  pA=0.9048 pB=0.0000  nA=21 nB=21  kA=19 kB=0
+       security  Δp=-0.9000  pA=0.9000 pB=0.0000  nA=10 nB=10  kA=9 kB=0
+         saving  Δp=-0.8750  pA=1.0000 pB=0.1250  nA=16 nB=16  kA=16 kB=2
+
+=== Top 10 log-odds z-score shifts on selected-token mass (A higher z => more selected in A) ===
+              ,  z=-36.271  delta=-0.866  kA=2489 kB=5650  nA=9129 nB=9129
+              .  z=-35.762  delta=-0.904  kA=2195 kB=5191  nA=7375 nB=7375
+           this  z=+18.750  delta=+1.664  kA=785 kB=146  nA=1038 nB=1038
+             it  z=-14.737  delta=-1.005  kA=286 kB=789  nA=1608 nB=1608
+              '  z=+13.943  delta=+0.600  kA=1496 kB=823  nA=3260 nB=3260
+             on  z=-13.400  delta=-1.154  kA=173 kB=555  nA=903 nB=903
+              s  z=+13.077  delta=+0.906  kA=710 kB=283  nA=1986 nB=1986
+            one  z=+12.382  delta=+2.282  kA=313 kB=29  nA=683 nB=683
+             of  z=+12.311  delta=+0.699  kA=910 kB=446  nA=3978 nB=3978
+              -  z=+12.158  delta=+0.740  kA=820 kB=388  nA=2324 nB=2324
+
+==========================================================================================
+PAIR: 0d489b81  vs  bb5979a9
+==========================================================================================
+=== Global distances ===
+A: outputs/xps/0d489b81/selections/eval_epoch_030.json
+B: outputs/xps/bb5979a9/selections/eval_epoch_030.json
+File A: total_tokens=196628 selected_tokens=59128
+File B: total_tokens=196628 selected_tokens=59128
+Weighted L1 drift over p(t)=P(sel|t): 0.178479
+JS distance over q(t) selected-token mass: 0.306481
+
+=== Top 10 tokens with largest +Δp (B selects more | token) (min_count=20) ===
+       animated  Δp=+1.0000  pA=0.0000 pB=1.0000  nA=18 nB=18  kA=0 kB=18
+        country  Δp=+0.9545  pA=0.0000 pB=0.9545  nA=22 nB=22  kA=0 kB=21
+         boring  Δp=+0.9259  pA=0.0741 pB=1.0000  nA=27 nB=27  kA=2 kB=27
+          ##imo  Δp=+0.9091  pA=0.0000 pB=0.9091  nA=11 nB=11  kA=0 kB=10
+      animation  Δp=+0.9091  pA=0.0909 pB=1.0000  nA=11 nB=11  kA=1 kB=11
+           ##ky  Δp=+0.9091  pA=0.0909 pB=1.0000  nA=11 nB=11  kA=1 kB=11
+             mr  Δp=+0.9032  pA=0.0323 pB=0.9355  nA=31 nB=31  kA=1 kB=29
+           ##gs  Δp=+0.9000  pA=0.1000 pB=1.0000  nA=10 nB=10  kA=1 kB=10
+            bra  Δp=+0.9000  pA=0.1000 pB=1.0000  nA=10 nB=10  kA=1 kB=10
+        captain  Δp=+0.8571  pA=0.0714 pB=0.9286  nA=14 nB=14  kA=1 kB=13
+
+=== Top 10 tokens with largest -Δp (A selects more | token) (min_count=20) ===
+          blake  Δp=-1.0000  pA=1.0000 pB=0.0000  nA=11 nB=11  kA=11 kB=0
+       haunting  Δp=-1.0000  pA=1.0000 pB=0.0000  nA=11 nB=11  kA=11 kB=0
+          blair  Δp=-1.0000  pA=1.0000 pB=0.0000  nA=17 nB=17  kA=17 kB=0
+           dogs  Δp=-1.0000  pA=1.0000 pB=0.0000  nA=10 nB=10  kA=10 kB=0
+         priest  Δp=-0.9091  pA=1.0000 pB=0.0909  nA=11 nB=11  kA=11 kB=1
+         aliens  Δp=-0.8889  pA=1.0000 pB=0.1111  nA=18 nB=18  kA=18 kB=2
+          stall  Δp=-0.8750  pA=0.8750 pB=0.0000  nA=16 nB=16  kA=14 kB=0
+         nights  Δp=-0.8462  pA=0.8462 pB=0.0000  nA=13 nB=13  kA=11 kB=0
+        jackson  Δp=-0.8333  pA=0.8333 pB=0.0000  nA=30 nB=30  kA=25 kB=0
+            ale  Δp=-0.8333  pA=0.8333 pB=0.0000  nA=12 nB=12  kA=10 kB=0
+
+=== Top 10 log-odds z-score shifts on selected-token mass (A higher z => more selected in A) ===
+            the  z=-39.549  delta=-1.292  kA=1164 kB=4132  nA=8721 nB=8721
+              ,  z=-24.442  delta=-0.607  kA=2489 kB=4448  nA=9129 nB=9129
+             of  z=+19.051  delta=+1.395  kA=910 kB=213  nA=3978 nB=3978
+              a  z=+17.308  delta=+0.692  kA=1832 kB=920  nA=4419 nB=4419
+              s  z=+17.063  delta=+1.458  kA=710 kB=159  nA=1986 nB=1986
+             in  z=-14.402  delta=-1.033  kA=251 kB=723  nA=2549 nB=2549
+           with  z=+14.170  delta=+1.517  kA=476 kB=100  nA=1287 nB=1287
+            her  z=+11.334  delta=+1.708  kA=283 kB=49  nA=597 nB=597
+            but  z=-10.074  delta=-0.933  kA=158 kB=407  nA=879 nB=879
+           this  z=+9.842  delta=+0.584  kA=785 kB=438  nA=1038 nB=1038
+
+==========================================================================================
+PAIR: 97d170e1  vs  bb5979a9
+==========================================================================================
+=== Global distances ===
+A: outputs/xps/97d170e1/selections/eval_epoch_030.json
+B: outputs/xps/bb5979a9/selections/eval_epoch_030.json
+File A: total_tokens=196628 selected_tokens=59128
+File B: total_tokens=196628 selected_tokens=59128
+Weighted L1 drift over p(t)=P(sel|t): 0.214201
+JS distance over q(t) selected-token mass: 0.355329
+
+=== Top 10 tokens with largest +Δp (B selects more | token) (min_count=20) ===
+        violent  Δp=+1.0000  pA=0.0000 pB=1.0000  nA=18 nB=18  kA=0 kB=18
+        survive  Δp=+1.0000  pA=0.0000 pB=1.0000  nA=15 nB=15  kA=0 kB=15
+        destroy  Δp=+1.0000  pA=0.0000 pB=1.0000  nA=12 nB=12  kA=0 kB=12
+         murder  Δp=+1.0000  pA=0.0000 pB=1.0000  nA=34 nB=34  kA=0 kB=34
+        america  Δp=+1.0000  pA=0.0000 pB=1.0000  nA=30 nB=30  kA=0 kB=30
+           evil  Δp=+0.9851  pA=0.0000 pB=0.9851  nA=67 nB=67  kA=0 kB=66
+          scary  Δp=+0.9583  pA=0.0417 pB=1.0000  nA=24 nB=24  kA=1 kB=24
+      dangerous  Δp=+0.9375  pA=0.0000 pB=0.9375  nA=16 nB=16  kA=0 kB=15
+     washington  Δp=+0.9286  pA=0.0000 pB=0.9286  nA=14 nB=14  kA=0 kB=13
+        captain  Δp=+0.9286  pA=0.0000 pB=0.9286  nA=14 nB=14  kA=0 kB=13
+
+=== Top 10 tokens with largest -Δp (A selects more | token) (min_count=20) ===
+         prince  Δp=-1.0000  pA=1.0000 pB=0.0000  nA=11 nB=11  kA=11 kB=0
+       princess  Δp=-1.0000  pA=1.0000 pB=0.0000  nA=14 nB=14  kA=14 kB=0
+          blake  Δp=-1.0000  pA=1.0000 pB=0.0000  nA=11 nB=11  kA=11 kB=0
+            sea  Δp=-1.0000  pA=1.0000 pB=0.0000  nA=22 nB=22  kA=22 kB=0
+         bottle  Δp=-1.0000  pA=1.0000 pB=0.0000  nA=11 nB=11  kA=11 kB=0
+            lee  Δp=-0.9833  pA=1.0000 pB=0.0167  nA=60 nB=60  kA=60 kB=1
+         taylor  Δp=-0.9333  pA=1.0000 pB=0.0667  nA=15 nB=15  kA=15 kB=1
+            jet  Δp=-0.9231  pA=0.9231 pB=0.0000  nA=13 nB=13  kA=12 kB=0
+            sun  Δp=-0.9091  pA=1.0000 pB=0.0909  nA=11 nB=11  kA=11 kB=1
+           liam  Δp=-0.9091  pA=1.0000 pB=0.0909  nA=11 nB=11  kA=11 kB=1
+
+=== Top 10 log-odds z-score shifts on selected-token mass (A higher z => more selected in A) ===
+            the  z=-42.554  delta=-1.518  kA=923 kB=4132  nA=8721 nB=8721
+              .  z=+31.923  delta=+0.773  kA=5191 kB=2495  nA=7375 nB=7375
+             in  z=-18.663  delta=-2.588  kA=43 kB=723  nA=2549 nB=2549
+              "  z=+15.910  delta=+1.356  kA=658 kB=164  nA=1843 nB=1843
+              -  z=-13.930  delta=-0.835  kA=388 kB=902  nA=2324 nB=2324
+             to  z=+13.507  delta=+0.449  kA=2287 kB=1474  nA=3747 nB=3747
+              ,  z=+12.974  delta=+0.259  kA=5650 kB=4448  nA=9129 nB=9129
+           that  z=+12.455  delta=+0.960  kA=596 kB=224  nA=1797 nB=1797
+             on  z=+11.971  delta=+0.960  kA=555 kB=211  nA=903 nB=903
+              a  z=+11.844  delta=+0.491  kA=1502 kB=920  nA=4419 nB=4419

@@ -1,6 +1,7 @@
-# llm | sbert | retrieval | late
-
-baseline: ["runtime.eval.short_log=True"] 
+baseline: [] 
 sweep:
-  - ["data.encoder.family=llm"]
-  - ["data.encoder.family=late"]
+  - []
+  - ["array=1"]
+  - ["array=2"]
+  - ["model.loss.hard=false"]
+  - ["data.dataset=conll03", "train.epochs=300"]

@@ -1,7 +1,4 @@
-baseline: [] 
+baseline: ["model.loss.s_target=0.1", "model.loss.hard=false"]
 sweep:
   - []
-  - ["array=1"]
-  - ["array=2"]
-  - ["model.loss.hard=false"]
-  - ["data.dataset=conll03", "train.epochs=300"]
+  - ["data.dataset=conll03"]

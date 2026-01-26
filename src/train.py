@@ -173,18 +173,20 @@ class SelectorTrainer:
             counts_pred,
             examples_str,
             {"tokens": all_tokens, "selected": all_selected, "gates": all_gates},
+            avg_loss
         )
 
     @torch.no_grad()
-    def log_eval(self, epoch: int = -1, examples: int = 0):
+    def log_eval(self, epoch: int = -1):
         (
             total_selected,
             total_tokens,
             counts_gold,
             counts_pred,
             examples_str,
-            record
-        ) = self.evaluate(examples)
+            record,
+            avg_loss,
+        ) = self.evaluate(self.examples)
 
         if epoch >= 0:
             writer = open_selection_writer(self.xp, epoch)
@@ -202,6 +204,7 @@ class SelectorTrainer:
             return
         
         self.logger.info(f"Selection rate: {total_selected / max(total_tokens, 1)}")
+        self.logger.info(f"Eval loss: {avg_loss}")
 
         for i, (tokens, selected) in enumerate(examples_str):
             self.logger.info("Eval Example %d:", i + 1)
@@ -240,7 +243,7 @@ class SelectorTrainer:
             avg_loss = total_loss / example_count
             if not self.short_log:
                 self.logger.info(f"Epoch {epoch + 1}/{self.epochs} loss: {avg_loss:.4f}")
-            self.log_eval(epoch=epoch + 1, examples=self.examples)
+            self.log_eval(epoch=epoch + 1)
             self.model.train()
             self.save_checkpoint()
 

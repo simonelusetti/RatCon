@@ -44,6 +44,7 @@ dora:
   exclude:
     - "slurm.*"
     - "runtime.*"
+    - "train.no_train"
 
 array: 0
 

@@ -110,7 +110,7 @@ def save_final_plots(
             )
 
         if values:
-            ax.set_ylim(min(values), max(values))
+            ax.set_ylim(min(values), max(values) * 1.2)
 
     fig.tight_layout()
     out = "summary_plots.png"

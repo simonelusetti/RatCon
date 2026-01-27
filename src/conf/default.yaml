@@ -4,7 +4,8 @@ defaults:
 
 model:
   loss:
-    hard: true
+    l_e: 1.0
+    hard: false
     s_target: 0.3
     tau: 1.0
   optim:

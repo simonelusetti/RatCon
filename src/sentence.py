@@ -135,9 +135,9 @@ class SentenceEncoder(nn.Module):
             return tkns_embedding_bert(self.transformer.auto_model, input_ids, attention_mask)
         elif isinstance(self, _FrozenHFEncoder):
             if isinstance(self, FrozenE5) or isinstance(self, FrozenBGE):
-                return tkns_embedding_bert(self.transformer.auto_model, input_ids, attention_mask)
+                return tkns_embedding_bert(self.model, input_ids, attention_mask)
             elif isinstance(self, FrozenLLMEncoder):
-                return tkns_embedding_gpt(self.transformer.auto_model, input_ids, attention_mask)
+                return tkns_embedding_gpt(self.model, input_ids, attention_mask)
             raise ValueError(f"Unknown tokenizer type: {type}")
 
     def encode(self, input_ids, attention_mask):
@@ -183,7 +183,7 @@ class _FrozenHFEncoder(SentenceEncoder):
 
 class FrozenE5(_FrozenHFEncoder):
     def encode(self, input_ids, attention_mask):
-        token_emb = tkns_embedding_bert(self.transformer.auto_model, input_ids, attention_mask)
+        token_emb = tkns_embedding_bert(self.model, input_ids, attention_mask)
         mask = attention_mask.unsqueeze(-1).type_as(token_emb)
 
         sent_emb = (token_emb * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-6)
@@ -195,7 +195,7 @@ class FrozenE5(_FrozenHFEncoder):
 
 class FrozenBGE(_FrozenHFEncoder):
     def encode(self, input_ids, attention_mask):
-        token_emb = tkns_embedding_bert(self.transformer.auto_model, input_ids, attention_mask)
+        token_emb = tkns_embedding_bert(self.model, input_ids, attention_mask)
         sent_emb = token_emb[:, 0]
         return F.normalize(sent_emb, dim=-1) if self.normalize else sent_emb
 
@@ -205,7 +205,7 @@ class FrozenBGE(_FrozenHFEncoder):
 
 class FrozenLLMEncoder(_FrozenHFEncoder):
     def encode(self, input_ids, attention_mask):
-        token_emb = tkns_embedding_gpt(self.transformer.auto_model, input_ids, attention_mask)
+        token_emb = tkns_embedding_gpt(self.model, input_ids, attention_mask)
         hard_mask = attention_mask > 0
         idx = hard_mask.long().sum(dim=1).clamp(min=1) - 1
         sent_emb = token_emb[torch.arange(token_emb.size(0)), idx]

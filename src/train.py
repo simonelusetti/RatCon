@@ -22,12 +22,23 @@ from .utils import (
     dict_to_table
 )
 
+def compute_losses(ids, attn, g, z, e_loss_raw, sent_encoder, loss_cfg):
+    e_loss = e_loss_raw * loss_cfg.l_e
+    gates = g if loss_cfg.hard else z
+    pred_rep = sent_encoder.encode(ids, attn * gates)
+    full_rep = sent_encoder.encode(ids, attn)
+    r_loss = recon_loss(pred_rep, full_rep)
+    return {
+        "recon": float(r_loss.detach()),
+        "entropy": float(e_loss.detach()),
+        "total": float((r_loss + e_loss).detach())
+    }, r_loss + e_loss, gates
 
 class SelectorTrainer:
     def __init__(self, cfg: Dict, train_dl: DataLoader, test_dl: DataLoader, \
         sent_encoder: SentenceEncoder,tokenizer: AutoTokenizer, logger: Logger, xp: XP):
         
-        self.hard_gates = cfg.model.loss.hard
+        self.loss_cfg = cfg.model.loss
 
         self.logger = logger
         self.train_dl = train_dl
@@ -43,7 +54,6 @@ class SelectorTrainer:
 
         self.sent_encoder, self.tokenizer = sent_encoder, tokenizer
         
-        # Infer selector input dim from encoder output (first batch)
         with torch.no_grad():
             first = next(iter(self.train_dl))
             model_dim = self.sent_encoder.token_embeddings(first["ids"].to(self.device), \
@@ -100,7 +110,7 @@ class SelectorTrainer:
     def evaluate(self, examples: int = 0):
         self.model.eval()
         total_tokens, total_selected, examples_count = 0, 0, 0
-        losses = {"total": 0.0, "recon": 0.0, "entropy": 0.0}
+        total_losses = {"total": 0.0, "recon": 0.0, "entropy": 0.0}
         all_tokens, all_selected, all_gates = [], [], []
         examples_str = []
 
@@ -124,17 +134,11 @@ class SelectorTrainer:
 
             tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
             g, z, e_loss = self.model(tkns_embd, attn, deterministic=True)
-            gates = g if self.hard_gates else z
-            
-            pred_rep = self.sent_encoder.encode(ids, attn * gates)
-            full_rep = self.sent_encoder.encode(ids, attn)
-            r_loss = recon_loss(pred_rep, full_rep)
-            loss = r_loss + e_loss 
-            losses["recon"] += float(r_loss.detach())
-            losses["entropy"] += float(e_loss.detach())
-            losses["total"] += float((r_loss + e_loss).detach())
+            losses, _, gates = compute_losses(ids, attn, g, z, e_loss, self.sent_encoder, self.loss_cfg)
             bs = ids.size(0)
             examples_count += bs
+            
+            total_losses = {k: v+losses[k] for k, v in losses.items()}
             
             word_pred, word_attn, word_lbls = tkns_to_words(
                 gates=g,
@@ -176,7 +180,7 @@ class SelectorTrainer:
                     sel_tokens = [t for t, s in zip(toks, selected) if s]
                     examples_str.append((toks, sel_tokens))
                     
-        losses = {k: v / examples_count for k, v in losses.items()}
+        total_losses = {k: v / examples_count for k, v in total_losses.items()}
         self.loss_history.append(losses)
         
         return (
@@ -186,7 +190,7 @@ class SelectorTrainer:
             counts_pred,
             examples_str,
             {"tokens": all_tokens, "selected": all_selected, "gates": all_gates},
-            losses
+            total_losses
         )
 
     @torch.no_grad()
@@ -247,38 +251,29 @@ class SelectorTrainer:
                 disable=self.short_log,
             )
 
-            losses = {"total": 0.0, "recon": 0.0, "entropy": 0.0}
+            total_losses = {"total": 0.0, "recon": 0.0, "entropy": 0.0}
             examples_count = 0
             
             for batch in batch_bar:
+                self.optimizer.zero_grad(set_to_none=True)
                 batch = to_device(self.device, batch)
                 ids = batch["ids"]
                 attn = batch["attn_mask"]
 
                 tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
                 g, z, e_loss = self.model(tkns_embd, attn, deterministic=False)
-                
-                gates = g if self.hard_gates else z
-
-                self.optimizer.zero_grad()
-                
-                pred_rep = self.sent_encoder.encode(ids, attn * gates)
-                full_rep = self.sent_encoder.encode(ids, attn)
-                r_loss = recon_loss(pred_rep, full_rep)
-                loss = r_loss + e_loss 
-                losses["recon"] += float(r_loss.detach())
-                losses["entropy"] += float(e_loss.detach())
-                losses["total"] += float((r_loss + e_loss).detach())
+                losses, loss, _ = compute_losses(ids, attn, g, z, e_loss, self.sent_encoder, self.loss_cfg)
                 bs = ids.size(0)
                 examples_count += bs
                 
                 loss.backward()
                 self.optimizer.step()
+                total_losses = {k: v+losses[k] for k, v in losses.items()}
                 
-            losses = {k: v / examples_count for k, v in losses.items()}
             if not self.short_log:
+                total_losses = {k: v/examples_count for k, v in total_losses.items()}
                 self.logger.info(f"Epoch {epoch + 1}/{self.epochs}")
-                self.logger.info(f"\n{dict_to_table(losses)}")
+                self.logger.info(f"\n{dict_to_table(total_losses)}")
             self.log_eval(epoch=epoch + 1)
             self.model.train()
             self.save_checkpoint()

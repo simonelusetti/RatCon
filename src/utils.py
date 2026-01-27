@@ -8,6 +8,8 @@ from dora import XP
 from prettytable import PrettyTable
 from tqdm import tqdm
 
+from tqdm import tqdm
+tqdm._instances.clear()
 
 # ---------------------------------------------------------------------------
 # Runtime Config
@@ -61,10 +63,10 @@ def save_final_plots(
 
     plots = [
         {
-            "type": "simple",
+            "type": "dict",
             "data": loss_history,
-            "title": "Loss Across Epochs",
-            "ylabel": "Loss Rate",
+            "title": "Losses Accross Epochs",
+            "ylabel": "Share",
         },
         {
             "type": "dict",
@@ -181,8 +183,9 @@ def get_logger(
     if logger.hasHandlers():
         logger.handlers.clear()
 
-    use_tqdm = sys.stdout.isatty() and not os.environ.get("DISABLE_TQDM")
-    ch = TqdmLoggingHandler() if use_tqdm else logging.StreamHandler()
+    use_tqdm = not os.environ.get("DISABLE_TQDM")
+    ch = TqdmLoggingHandler() if use_tqdm else logging.StreamHandler(sys.stderr)
+
     ch.setLevel(logging.INFO)
     ch_format = "%(asctime)s - %(levelname)s - %(message)s"
     ch.setFormatter(logging.Formatter(ch_format))
@@ -195,7 +198,6 @@ def get_logger(
     logger.addHandler(fh)
     return logger
 
-
 def make_table(
     fields: Sequence[str],
     rows: Iterable[Sequence[object]],
@@ -205,7 +207,6 @@ def make_table(
     for row in rows:
         table.add_row(row)
     return table
-
 
 def dict_to_table(
     losses: Mapping[str, float],

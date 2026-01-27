@@ -284,8 +284,47 @@ def build_twitter() -> DatasetDict:
 # UD English
 # ============================================================
 
+UD_BASE_URL = "https://raw.githubusercontent.com/UniversalDependencies/UD_English-EWT/master/"
+UD_FILES = {
+    "train": "en_ewt-ud-train.conllu",
+    "dev":   "en_ewt-ud-dev.conllu",
+    "test":  "en_ewt-ud-test.conllu",
+}
+
+def download_ud(raw_root: Path) -> dict:
+    raw_root.mkdir(parents=True, exist_ok=True)
+    data = {}
+
+    for split, fname in UD_FILES.items():
+        path = raw_root / fname
+        if not path.exists():
+            urlretrieve(UD_BASE_URL + fname, path)
+
+        rows = []
+        with open(path, encoding="utf-8") as f:
+            for sent in parse_incr(f):
+                cleaned = [
+                    tok for tok in sent
+                    if isinstance(tok["id"], int)  # remove MWTs / empty nodes
+                ]
+
+                tokens  = [tok["form"]   for tok in cleaned]
+                upos    = [tok["upos"]   for tok in cleaned]
+                heads   = [tok["head"]   for tok in cleaned]
+                deprel  = [tok["deprel"] for tok in cleaned]
+
+                rows.append({
+                    "tokens": tokens,
+                    "upos": upos,
+                    "heads": heads,
+                    "deprel": deprel,
+                })
+
+        data[split] = rows
+
+    return data
+
 def _is_core_np(upos, deprel):
-    # Core NP heads: NOUN, PROPN, some PRON
     if upos in {"NOUN", "PROPN"}:
         return True
     if upos == "PRON" and deprel not in {"nsubj:relcl", "obj:relcl"}:
@@ -297,20 +336,20 @@ def _chunk_ud_labels(tokens, upos, heads, deprel):
     n = len(tokens)
     labels = ["O"] * n
 
-    # build children index
     children = {i: [] for i in range(n)}
     for i, h in enumerate(heads):
-        if h > 0:
+        if h and h > 0:
             children[h - 1].append(i)
 
-    # collect NP spans as sets of indices
     np_spans = []
 
     for i in range(n):
         if not _is_core_np(upos[i], deprel[i]):
             continue
+
         span = {i}
         queue = [i]
+
         while queue:
             h = queue.pop()
             for c in children.get(h, []):
@@ -319,7 +358,6 @@ def _chunk_ud_labels(tokens, upos, heads, deprel):
                 h_upos = upos[h]
 
                 attach = False
-
                 if rel in {
                     "compound", "compound:prt", "flat", "flat:name",
                     "goeswith", "fixed", "nummod"
@@ -339,21 +377,19 @@ def _chunk_ud_labels(tokens, upos, heads, deprel):
                     attach = True
                 elif rel in {"obl:npmod", "obl:tmod"}:
                     attach = True
-                elif rel == "obl":
-                    # head must itself be adjectival modifier
-                    if deprel[h] == "amod":
-                        attach = True
+                elif rel == "obl" and deprel[h] == "amod":
+                    attach = True
+
                 if attach and c not in span:
                     span.add(c)
                     queue.append(c)
 
-        # attach intervening tokens
         min_i, max_i = min(span), max(span)
         for j in range(min_i + 1, max_i):
             span.add(j)
+
         np_spans.append(span)
 
-    # merge overlapping spans (safety)
     merged = []
     for span in sorted(np_spans, key=lambda s: min(s)):
         if not merged or min(span) > max(merged[-1]):
@@ -361,59 +397,56 @@ def _chunk_ud_labels(tokens, upos, heads, deprel):
         else:
             merged[-1] |= span
 
-    # BIO encoding
     for span in merged:
-        indices = sorted(span)
-        labels[indices[0]] = "B-NP"
-        for j in indices[1:]:
+        idx = sorted(span)
+        labels[idx[0]] = "B-NP"
+        for j in idx[1:]:
             labels[j] = "I-NP"
 
     return labels
 
-
 def build_ud() -> DatasetDict:
-    base_url = "https://raw.githubusercontent.com/UniversalDependencies/UD_English-EWT/master/"
-    raw_root = Path("./data/raw/ud")
-    raw_root.mkdir(parents=True, exist_ok=True)
+    raw = download_ud(Path("./data/raw/ud"))
 
-    def load(fname):
-        path = raw_root / fname
-        if not path.exists():
-            urlretrieve(base_url + fname, path)
-
+    def build(split_rows):
         rows = []
-        with open(path, encoding="utf-8") as f:
-            for sent in parse_incr(f):
-                cleaned_sent = [
-                    tok for tok in sent
-                    if isinstance(tok["id"], int)   # removes MWTs like "1-2"
-                ]
-                
-                assert all(isinstance(tok["id"], int) for tok in cleaned_sent)
-                assert all(tok["head"] is None or isinstance(tok["head"], int) for tok in cleaned_sent)
-
-                tokens  = [tok["form"]   for tok in cleaned_sent]
-                upos    = [tok["upos"]   for tok in cleaned_sent]
-                heads   = [tok["head"]   for tok in cleaned_sent]
-                deprel  = [tok["deprel"] for tok in cleaned_sent]
-
-                chunk_lables = _chunk_ud_labels(tokens, upos, heads, deprel)
-
-                rows.append({
-                    "tokens": tokens,
-                    "labels": chunk_lables,
-                })
-
+        for ex in split_rows:
+            labels = _chunk_ud_labels(
+                ex["tokens"],
+                ex["upos"],
+                ex["heads"],
+                ex["deprel"],
+            )
+            rows.append({
+                "tokens": ex["tokens"],
+                "labels": labels,
+            })
         return Dataset.from_list(rows)
 
-    train_ds = load("en_ewt-ud-train.conllu")
-    dev_ds   = load("en_ewt-ud-dev.conllu")
-    test_ds  = load("en_ewt-ud-test.conllu")
-    test_ds = concatenate_datasets([dev_ds, test_ds])
+    train = build(raw["train"])
+    test  = build(raw["dev"] + raw["test"])
 
     return DatasetDict({
-        "train": train_ds,
-        "test": test_ds,
+        "train": train,
+        "test": test,
+    })
+
+def build_ud_pos() -> DatasetDict:
+    raw = download_ud(Path("./data/raw/ud"))
+
+    def build(split_rows):
+        return Dataset.from_list([
+            {
+                "tokens": ex["tokens"],
+                "labels": ex["upos"],
+            }
+            for ex in split_rows
+        ])
+
+    return DatasetDict({
+        "train": build(raw["train"]),
+        "validation": build(raw["dev"]),
+        "test": build(raw["test"]),
     })
 
 

@@ -18,7 +18,8 @@ from .utils import (
     open_selection_writer,
     to_device,
     save_final_plots,
-    tkns_to_words
+    tkns_to_words,
+    dict_to_table
 )
 
 
@@ -98,7 +99,8 @@ class SelectorTrainer:
     @torch.no_grad()
     def evaluate(self, examples: int = 0):
         self.model.eval()
-        total_tokens, total_selected, total_selected_z, total_loss, examples_count = 0, 0, 0, 0.0, 0
+        total_tokens, total_selected, examples_count = 0, 0, 0
+        losses = {"total": 0.0, "recon": 0.0, "entropy": 0.0}
         all_tokens, all_selected, all_gates = [], [], []
         examples_str = []
 
@@ -106,7 +108,14 @@ class SelectorTrainer:
         counts_gold = None
         counts_init = False
 
-        for batch in tqdm(self.test_dl, desc="Eval: ", disable = self.short_log):
+        for batch in tqdm(
+            self.test_dl,
+            desc="Eval",
+            position=2,
+            leave=False,
+            dynamic_ncols=True,
+            disable=self.short_log,
+        ):
             batch = to_device(self.device, batch)
             ids = batch["ids"]
             attn = batch["attn_mask"]
@@ -114,13 +123,17 @@ class SelectorTrainer:
             bs = ids.size(0)
 
             tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
-            g, z = self.model(tkns_embd, attn, deterministic=True)
+            g, z, e_loss = self.model(tkns_embd, attn, deterministic=True)
             gates = g if self.hard_gates else z
             
             pred_rep = self.sent_encoder.encode(ids, attn * gates)
             full_rep = self.sent_encoder.encode(ids, attn)
-            loss = recon_loss(pred_rep, full_rep)
-            total_loss += float(loss.detach()) * bs
+            r_loss = recon_loss(pred_rep, full_rep)
+            loss = r_loss + e_loss 
+            losses["recon"] += float(r_loss.detach())
+            losses["entropy"] += float(e_loss.detach())
+            losses["total"] += float((r_loss + e_loss).detach())
+            bs = ids.size(0)
             examples_count += bs
             
             word_pred, word_attn, word_lbls = tkns_to_words(
@@ -163,8 +176,8 @@ class SelectorTrainer:
                     sel_tokens = [t for t, s in zip(toks, selected) if s]
                     examples_str.append((toks, sel_tokens))
                     
-        avg_loss = total_loss / examples_count
-        self.loss_history.append(avg_loss)
+        losses = {k: v / examples_count for k, v in losses.items()}
+        self.loss_history.append(losses)
         
         return (
             total_selected,
@@ -173,7 +186,7 @@ class SelectorTrainer:
             counts_pred,
             examples_str,
             {"tokens": all_tokens, "selected": all_selected, "gates": all_gates},
-            avg_loss
+            losses
         )
 
     @torch.no_grad()
@@ -185,7 +198,7 @@ class SelectorTrainer:
             counts_pred,
             examples_str,
             record,
-            avg_loss,
+            losses
         ) = self.evaluate(self.examples)
 
         if epoch >= 0:
@@ -204,7 +217,7 @@ class SelectorTrainer:
             return
         
         self.logger.info(f"Selection rate: {total_selected / max(total_tokens, 1)}")
-        self.logger.info(f"Eval loss: {avg_loss}")
+        self.logger.info(f"\n{dict_to_table(losses)}")
 
         for i, (tokens, selected) in enumerate(examples_str):
             self.logger.info("Eval Example %d:", i + 1)
@@ -215,34 +228,57 @@ class SelectorTrainer:
             self.logger.info("Eval labels:\n%s", (counts_pred / counts_gold).to_table())
 
     def train(self):
-        for epoch in tqdm(range(self.epochs), desc="Training: ", disable = not self.short_log):
-            total_loss = 0.0
-            example_count = 0
+        epoch_bar = tqdm(
+            range(self.epochs),
+            desc="Training",
+            position=0,
+            leave=True,
+            dynamic_ncols=True,
+            disable=not self.short_log,
+        )
+
+        for epoch in epoch_bar:
+            batch_bar = tqdm(
+                self.train_dl,
+                desc=f"Training Epoch {epoch+1}",
+                position=1,
+                leave=False,
+                dynamic_ncols=True,
+                disable=self.short_log,
+            )
+
+            losses = {"total": 0.0, "recon": 0.0, "entropy": 0.0}
+            examples_count = 0
             
-            for batch in tqdm(self.train_dl, desc=f"Training Epoch {epoch+1}: ", disable = self.short_log):
+            for batch in batch_bar:
                 batch = to_device(self.device, batch)
                 ids = batch["ids"]
                 attn = batch["attn_mask"]
 
                 tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
-                g, z = self.model(tkns_embd, attn, deterministic=False)
+                g, z, e_loss = self.model(tkns_embd, attn, deterministic=False)
                 
                 gates = g if self.hard_gates else z
 
                 self.optimizer.zero_grad()
+                
                 pred_rep = self.sent_encoder.encode(ids, attn * gates)
                 full_rep = self.sent_encoder.encode(ids, attn)
-                loss = recon_loss(pred_rep, full_rep)
+                r_loss = recon_loss(pred_rep, full_rep)
+                loss = r_loss + e_loss 
+                losses["recon"] += float(r_loss.detach())
+                losses["entropy"] += float(e_loss.detach())
+                losses["total"] += float((r_loss + e_loss).detach())
+                bs = ids.size(0)
+                examples_count += bs
+                
                 loss.backward()
                 self.optimizer.step()
-
-                bs = ids.size(0)
-                example_count += bs
-                total_loss += float(loss.detach()) * bs
                 
-            avg_loss = total_loss / example_count
+            losses = {k: v / examples_count for k, v in losses.items()}
             if not self.short_log:
-                self.logger.info(f"Epoch {epoch + 1}/{self.epochs} loss: {avg_loss:.4f}")
+                self.logger.info(f"Epoch {epoch + 1}/{self.epochs}")
+                self.logger.info(f"\n{dict_to_table(losses)}")
             self.log_eval(epoch=epoch + 1)
             self.model.train()
             self.save_checkpoint()

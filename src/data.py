@@ -21,7 +21,8 @@ from .datasets_builders import (
     build_conll2003,
     build_wikiann,
     map_conll2003_secondary_labels,
-    build_wikiann_swap
+    build_wikiann_swap,
+    build_ud_pos
 )
 
 # ---------------------------------------------------------------------------
@@ -35,6 +36,7 @@ ALIASES = {
     "conll2003": {"conll2003", "conll03"},
     "conll2000": {"conll2000", "conll00"},
     "ud": {"ud"},
+    "ud_pos": {"ud_raw","ud_pos"},
     "treebank": {"treebank", "tb"},
     "movie_rationales": {"movie_rationales", "mr"},
     "parasci": {"parasci", "ps"},
@@ -196,6 +198,8 @@ def resolve_dataset(
         ds = build_wikiann_swap()
     elif name == "cnn_dailymail":
         ds = load_dataset("cnn_dailymail", "3.0.0")
+    elif name == "ud_pos":
+        ds = build_ud_pos()
     else:
         raise ValueError(f"Unsupported dataset: {name}")
 

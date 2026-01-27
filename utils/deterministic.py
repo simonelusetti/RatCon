@@ -6,6 +6,7 @@ from pathlib import Path
 from tqdm import tqdm
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
+from collections import defaultdict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -26,7 +27,7 @@ def build_cfgs(args):
         "max_length": args.max_length,
         "encoder": {
             "family": "sbert",
-            "name": "all-MiniLM-L6-v2",  # or whatever your default is
+            "name": "all-MiniLM-L6-v2",
         },
         "config": json.loads(args.config_json) if args.config_json else None,
     })
@@ -50,9 +51,8 @@ def build_dataloader(args, data_cfg, runtime_cfg, tokenizer):
     text_field = TEXT_FIELD.get(name, "tokens")
     ds = resolve_dataset(name, text_field, config=data_cfg.get("config"))
 
-    drop_cols = {"labels", "scnd_labels"} & set(ds["train"].column_names)
-    if drop_cols:
-        ds = ds.remove_columns(list(drop_cols))
+    if "labels" not in ds["train"].column_names:
+        raise ValueError("Dataset must provide token-level string labels.")
 
     ds = encode_examples(data_cfg, ds, tokenizer)
     split = ds[args.split]
@@ -74,10 +74,10 @@ def build_dataloader(args, data_cfg, runtime_cfg, tokenizer):
 
 
 # -------------------------
-# partition logic
+# token helpers
 # -------------------------
 
-def non_special_masks(ids, attn, tokenizer):
+def selectable_masks(ids, attn, tokenizer):
     special_ids = {
         tokenizer.cls_token_id,
         tokenizer.sep_token_id,
@@ -93,29 +93,29 @@ def non_special_masks(ids, attn, tokenizer):
 
     valid = attn.bool()
     selectable = valid & ~special
-    return selectable, special
+    n_select = selectable.sum(1)
+    return selectable, special, n_select
 
 
-def random_partition(selectable):
-    rand = torch.rand_like(selectable.float())
-    a = selectable & (rand < 0.5)
-    b = selectable & ~a
+def sample_random_subset(selectable, special, k):
+    """
+    selectable: [B, L] bool
+    special:    [B, L] bool
+    k:          [B] long
+    """
+    B, L = selectable.shape
+    scores = torch.rand(B, L, device=selectable.device)
+    scores = scores.masked_fill(~selectable, -1e9)
 
-    # ensure both non-empty
-    a_empty = a.sum(1) == 0
-    b_empty = b.sum(1) == 0
+    kmax = int(k.max().item())
+    topk = scores.topk(kmax, dim=1).indices
 
-    for i in torch.where(a_empty)[0]:
-        j = torch.where(b[i])[0][0]
-        a[i, j] = True
-        b[i, j] = False
+    mask = torch.zeros(B, L, device=selectable.device, dtype=torch.bool)
+    r = torch.arange(B, device=selectable.device)[:, None]
+    mask[r, topk] = (torch.arange(kmax, device=selectable.device)[None, :] < k[:, None])
 
-    for i in torch.where(b_empty)[0]:
-        j = torch.where(a[i])[0][0]
-        b[i, j] = True
-        a[i, j] = False
-
-    return a, b
+    mask |= special
+    return mask
 
 
 # -------------------------
@@ -125,88 +125,91 @@ def random_partition(selectable):
 def main():
     p = argparse.ArgumentParser()
 
-    p.add_argument("--dataset", default="mr")
+    p.add_argument("--dataset", default="conll2003")
     p.add_argument("--split", default="train")
     p.add_argument("--index", type=int)
 
     p.add_argument("--device", default="cpu")
     p.add_argument("--max-length", type=int, default=128)
 
-    p.add_argument("--batch-size", type=int, default=64)
+    p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--num-workers", type=int, default=0)
 
-    p.add_argument("--threads", type=int, default=48)
-    p.add_argument("--interop-threads", type=int, default=1)
+    p.add_argument("--threads", type=int, default=32)
+    p.add_argument("--interop-threads", type=int, default=8)
 
     p.add_argument("--subset", type=float)
     p.add_argument("--max-samples", type=int)
 
-    p.add_argument("--trials", type=int, default=100)
-    p.add_argument("--normalize-sum", action="store_true")
+    p.add_argument("--trials", type=int, default=200)
+    p.add_argument("--frac", type=float, default=0.30)
+    p.add_argument("--best-frac", type=float, default=0.05)
 
     p.add_argument("--config-json")
 
     args = p.parse_args()
 
     torch.manual_seed(0)
-
     device = torch.device(args.device)
 
-    # ---- SBERT only ----
     encoder, tokenizer = build_sentence_encoder(
         "sbert", "all-MiniLM-L6-v2", device.type
     )
 
     data_cfg, runtime_cfg = build_cfgs(args)
     loader = build_dataloader(args, data_cfg, runtime_cfg, tokenizer)
+
     configure_runtime(runtime_cfg)
 
-    all_means = []
-    all_stds = []
+    selected_counts = defaultdict(float)
+    total_counts = defaultdict(float)
 
-    for batch in tqdm(loader, desc="SBERT"):
+    for batch in tqdm(loader, desc="Sampling subsets"):
         ids = batch["ids"].to(device)
         attn = batch["attn_mask"].to(device)
+        labels = batch["labels"]  # list[list[str]]
 
         with torch.no_grad():
             full = encoder.encode(ids, attn)
 
-        selectable, special = non_special_masks(ids, attn, tokenizer)
+        selectable, special, n_select = selectable_masks(ids, attn, tokenizer)
+        k = torch.clamp((n_select.float() * args.frac).round().long(), min=1)
 
-        B = ids.size(0)
-        sims = torch.zeros(args.trials, B, device=device)
+        B, L = ids.shape
+        T = args.trials
 
-        for t in range(args.trials):
-            mask_a, mask_b = random_partition(selectable)
-            mask_a |= special
-            mask_b |= special
+        sims = torch.empty(T, B, device=device)
+        masks = torch.empty(T, B, L, device=device, dtype=torch.bool)
 
+        for t in range(T):
+            mask = sample_random_subset(selectable, special, k)
+            masks[t] = mask
             with torch.no_grad():
-                a = encoder.encode(ids, mask_a)
-                b = encoder.encode(ids, mask_b)
+                rep = encoder.encode(ids, mask)
+            sims[t] = F.cosine_similarity(rep, full, dim=-1)
 
-            summed = a + b
-            if args.normalize_sum:
-                summed = 0.5 * summed
+        M = max(1, int(round(args.best_frac * T)))
+        best_idx = sims.topk(M, dim=0).indices  # [M, B]
 
-            sims[t] = F.cosine_similarity(summed, full, dim=-1)
+        for b in range(B):
+            sel_pos = selectable[b]
+            if sel_pos.sum() == 0:
+                continue
 
-        # per-sentence stats
-        mean = sims.mean(0)
-        std = sims.std(0)
+            idx = torch.where(sel_pos)[0].tolist()
+            token_labels = [labels[b][i] for i in idx]
 
-        all_means.append(mean.cpu())
-        all_stds.append(std.cpu())
+            best_masks = masks[best_idx[:, b], b][:, sel_pos]
+            selected_per_token = best_masks.sum(0).cpu().tolist()
 
-    all_means = torch.cat(all_means)
-    all_stds = torch.cat(all_stds)
+            for lab, count in zip(token_labels, selected_per_token):
+                selected_counts[lab] += count
+                total_counts[lab] += M
 
-    print("==== Additivity distribution (SBERT) ====")
-    print(f"Sentences: {all_means.numel()}")
-    print(f"Mean cosine: {all_means.mean():.4f} ± {all_means.std():.4f}")
-    print(f"Mean intra-sentence std: {all_stds.mean():.4f}")
-    print(f"Median intra-sentence std: {all_stds.median():.4f}")
-    print(f"Max intra-sentence std: {all_stds.max():.4f}")
+    print("\n==== P(token selected | label) on best subsets ====")
+    for lab in sorted(total_counts):
+        p_sel = selected_counts[lab] / total_counts[lab]
+        print(f"{lab:8s} : {p_sel:.4f}")
 
 
 if __name__ == "__main__":

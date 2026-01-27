@@ -78,8 +78,23 @@ class RationaleSelectorModel(nn.Module):
         emb = embeddings * attn.unsqueeze(-1)
         scores = self.selector(emb)                     # [B, T]
         scores = scores.masked_fill(attn == 0, -1e9)
+        """
+        with torch.no_grad():
+            p_detached = torch.softmax(scores / self.tau, dim=1)
+            entropy = -(p_detached * (p_detached + 1e-12).log()).sum(dim=1)  # [B]
+            T_eff = attn.sum(dim=1).clamp(min=1)
+            max_entropy = T_eff.log()
+            norm_entropy = entropy / max_entropy
+            print(
+                f"[Selector entropy] mean={norm_entropy.mean().item():.3f} std={norm_entropy.std().item():.3f} \
+                    min={norm_entropy.min().item():.3f} max={norm_entropy.max().item():.3f}"
+            )"""
 
         p = torch.softmax(scores / self.tau, dim=1)     # sum p = 1
+        entropy = -(p * (p + 1e-12).log()).sum(dim=1)  # [B]
+        T_eff = attn.sum(dim=1).clamp(min=1)
+        max_entropy = T_eff.log()
+        norm_entropy = (entropy / max_entropy).mean()
         T_eff = attn.sum(dim=1, keepdim=True)            # [B, 1]
         K = (self.rho * T_eff).round().clamp(min=1)      # [B, 1]
         z = K * p                                        # sum z = K
@@ -90,4 +105,4 @@ class RationaleSelectorModel(nn.Module):
             h = self._hard_topk(z, K)
             g = h + (z - z.detach())                     # ST estimator
 
-        return g, z
+        return g, z, norm_entropy

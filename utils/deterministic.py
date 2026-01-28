@@ -1,12 +1,11 @@
-from __future__ import annotations
-
 import argparse, json, sys, torch
 import torch.nn.functional as F
 from pathlib import Path
 from tqdm import tqdm
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, DictConfig
 from torch.utils.data import DataLoader
 from collections import defaultdict
+from transformers import PreTrainedTokenizerBase
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -15,12 +14,7 @@ from src.data import canonical_name, encode_examples, resolve_dataset, TEXT_FIEL
 from src.sentence import build_sentence_encoder
 from src.utils import configure_runtime
 
-
-# -------------------------
-# configs
-# -------------------------
-
-def build_cfgs(args):
+def build_cfgs(args: argparse.Namespace) -> tuple[DictConfig, DictConfig]:
     data_cfg = OmegaConf.create({
         "dataset": args.dataset,
         "subset": 1.0,
@@ -46,7 +40,12 @@ def build_cfgs(args):
     return data_cfg, runtime_cfg
 
 
-def build_dataloader(args, data_cfg, runtime_cfg, tokenizer):
+def build_dataloader(
+    args: argparse.Namespace,
+    data_cfg: DictConfig,
+    runtime_cfg: DictConfig,
+    tokenizer: PreTrainedTokenizerBase,
+) -> DataLoader:
     name = canonical_name(data_cfg.dataset)
     text_field = TEXT_FIELD.get(name, "tokens")
     ds = resolve_dataset(name, text_field, config=data_cfg.get("config"))
@@ -72,12 +71,11 @@ def build_dataloader(args, data_cfg, runtime_cfg, tokenizer):
         pin_memory=(args.device == "cuda"),
     )
 
-
-# -------------------------
-# token helpers
-# -------------------------
-
-def selectable_masks(ids, attn, tokenizer):
+def selectable_masks(
+    ids: torch.Tensor,
+    attn: torch.Tensor,
+    tokenizer: PreTrainedTokenizerBase,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     special_ids = {
         tokenizer.cls_token_id,
         tokenizer.sep_token_id,
@@ -97,12 +95,7 @@ def selectable_masks(ids, attn, tokenizer):
     return selectable, special, n_select
 
 
-def sample_random_subset(selectable, special, k):
-    """
-    selectable: [B, L] bool
-    special:    [B, L] bool
-    k:          [B] long
-    """
+def sample_random_subset(selectable: torch.Tensor, special: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
     B, L = selectable.shape
     scores = torch.rand(B, L, device=selectable.device)
     scores = scores.masked_fill(~selectable, -1e9)
@@ -117,12 +110,7 @@ def sample_random_subset(selectable, special, k):
     mask |= special
     return mask
 
-
-# -------------------------
-# main
-# -------------------------
-
-def main():
+def main() -> None:
     p = argparse.ArgumentParser()
 
     p.add_argument("--dataset", default="conll2003")
@@ -167,7 +155,7 @@ def main():
     for batch in tqdm(loader, desc="Sampling subsets"):
         ids = batch["ids"].to(device)
         attn = batch["attn_mask"].to(device)
-        labels = batch["labels"]  # list[list[str]]
+        labels = batch["labels"]
 
         with torch.no_grad():
             full = encoder.encode(ids, attn)
@@ -189,7 +177,7 @@ def main():
             sims[t] = F.cosine_similarity(rep, full, dim=-1)
 
         M = max(1, int(round(args.best_frac * T)))
-        best_idx = sims.topk(M, dim=0).indices  # [M, B]
+        best_idx = sims.topk(M, dim=0).indices
 
         for b in range(B):
             sel_pos = selectable[b]

@@ -16,3 +16,5 @@ nltk
 plotext
 torch
 numpy
+typing_extensions
+entmax

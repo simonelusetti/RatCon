@@ -1,5 +1,3 @@
-# @package _global_
-
 data:
   dataset: "shape"
   config:

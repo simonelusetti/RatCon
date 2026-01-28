@@ -1,0 +1,7 @@
+setup.cfg
+setup.py
+src/ratcon.egg-info/PKG-INFO
+src/ratcon.egg-info/SOURCES.txt
+src/ratcon.egg-info/dependency_links.txt
+src/ratcon.egg-info/requires.txt
+src/ratcon.egg-info/top_level.txt

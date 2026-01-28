@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import gzip, csv, re, nltk, random
 from collections import defaultdict
 from pathlib import Path
@@ -24,15 +22,11 @@ RATIONALE_DS_FIELD = {
     "twitter": {"tokens": "text", "rationale": "selected_text"},
 }
 
-# ============================================================
-# Helpers
-# ============================================================
-
-def extract_sentences(s: str):
+def extract_sentences(s: str) -> list[str]:
     return [m[0] or m[1] for m in re.findall(r"'(.*?)'|\"(.*?)\"", s)]
 
     
-def find_sublist(haystack, needle):
+def find_sublist(haystack: list[str], needle: list[str]) -> tuple[int | None, int | None]:
     for i in range(len(haystack) - len(needle) + 1):
         if haystack[i:i+len(needle)] == needle:
             return i, i + len(needle)
@@ -65,11 +59,6 @@ def _read_csv(
             examples.append({"tokens": words, "labels": rationale})
     return Dataset.from_list(examples)
 
-
-# ============================================================
-# NLTK POS
-# ============================================================
-
 def load_nltk_pos_corpus(
     corpus_name: str,
     corpus_loader: Callable[[], list[list[tuple[str, str]]]],
@@ -97,10 +86,6 @@ def load_nltk_pos_corpus(
 def build_treebank() -> DatasetDict:
     return load_nltk_pos_corpus("treebank", treebank.tagged_sents)
 
-# ============================================================
-# CoNLL-2003
-# ============================================================
-
 def build_conll2003() -> DatasetDict:
     ds = load_dataset("conll2003").rename_column("ner_tags", "labels")\
         .remove_columns(["id", "pos_tags", "chunk_tags"])
@@ -111,13 +96,8 @@ def build_conll2003() -> DatasetDict:
         "test": test_ds,
     })
 
-def map_conll2003_secondary_labels(labels):
+def map_conll2003_secondary_labels(labels: list[str]) -> list[str]:
     return ["0" if lbl == "0" else "1" for lbl in labels]
-
-
-# ============================================================
-# wikiann
-# ============================================================
 
 def build_wikiann() -> DatasetDict:
     ds = load_dataset("wikiann","en").rename_column("ner_tags", "labels")\
@@ -129,16 +109,12 @@ def build_wikiann() -> DatasetDict:
         "test": test_ds,
     })
 
-# ============================================================
-# ParaSCI
-# ============================================================
-
 BASE = Path(to_absolute_path("data/raw/parasci/ParaSCI-master/Data"))
 SUBSETS = ["ParaSCI-ACL", "ParaSCI-arXiv"]
 SPLITS = ["train", "val", "test"]
 
 
-def load_pairs(folder: Path, split: str):
+def load_pairs(folder: Path, split: str) -> list[tuple[str, str]]:
     src = folder / split / f"{split}.src"
     tgt = folder / split / f"{split}.tgt"
     if not src.exists():
@@ -188,10 +164,6 @@ def build_both_parasci() -> tuple[DatasetDict, DatasetDict]:
     return build_parasci(), build_parasci_concat()
 
 
-# ============================================================
-# CoNLL-2000
-# ============================================================
-
 def _parse_conll2000(path: Path) -> Dataset:
     sentences, tokens, labels = [], [], []
 
@@ -225,7 +197,7 @@ def build_conll2000() -> DatasetDict:
         base_url = "https://www.clips.uantwerpen.be/conll2000/chunking/"
         raw_root = Path(to_absolute_path("./data/raw/conll2000"))
         raw_root.mkdir(parents=True, exist_ok=True)
-        def ensure(fname):
+        def ensure(fname: str) -> Path:
             gz = raw_root / fname
             txt = raw_root / fname.replace(".gz", "")
             if not gz.exists():
@@ -243,11 +215,6 @@ def build_conll2000() -> DatasetDict:
     })
 
 
-# ============================================================
-# Movie Rationales (labels = rationale)
-# ============================================================
-
-
 def build_movie_reviews() -> DatasetDict:
     root = Path(to_absolute_path("./data/raw/movie_rationales"))
 
@@ -260,10 +227,6 @@ def build_movie_reviews() -> DatasetDict:
         "test": concatenate_datasets([val_ds, test_ds]),
     })
 
-
-# ============================================================
-# Twitter / Sentiment
-# ============================================================
 
 def build_twitter() -> DatasetDict:
     root = Path(to_absolute_path("./data/raw/twitter"))
@@ -280,10 +243,6 @@ def build_twitter() -> DatasetDict:
     })
 
 
-# ============================================================
-# UD English
-# ============================================================
-
 UD_BASE_URL = "https://raw.githubusercontent.com/UniversalDependencies/UD_English-EWT/master/"
 UD_FILES = {
     "train": "en_ewt-ud-train.conllu",
@@ -291,7 +250,7 @@ UD_FILES = {
     "test":  "en_ewt-ud-test.conllu",
 }
 
-def download_ud(raw_root: Path) -> dict:
+def download_ud(raw_root: Path) -> dict[str, list[dict]]:
     raw_root.mkdir(parents=True, exist_ok=True)
     data = {}
 
@@ -305,7 +264,7 @@ def download_ud(raw_root: Path) -> dict:
             for sent in parse_incr(f):
                 cleaned = [
                     tok for tok in sent
-                    if isinstance(tok["id"], int)  # remove MWTs / empty nodes
+                    if isinstance(tok["id"], int)
                 ]
 
                 tokens  = [tok["form"]   for tok in cleaned]
@@ -324,7 +283,7 @@ def download_ud(raw_root: Path) -> dict:
 
     return data
 
-def _is_core_np(upos, deprel):
+def _is_core_np(upos: str, deprel: str) -> bool:
     if upos in {"NOUN", "PROPN"}:
         return True
     if upos == "PRON" and deprel not in {"nsubj:relcl", "obj:relcl"}:
@@ -332,7 +291,7 @@ def _is_core_np(upos, deprel):
     return False
 
 
-def _chunk_ud_labels(tokens, upos, heads, deprel):
+def _chunk_ud_labels(tokens: list[str], upos: list[str], heads: list[int], deprel: list[str]) -> list[str]:
     n = len(tokens)
     labels = ["O"] * n
 
@@ -408,7 +367,7 @@ def _chunk_ud_labels(tokens, upos, heads, deprel):
 def build_ud() -> DatasetDict:
     raw = download_ud(Path("./data/raw/ud"))
 
-    def build(split_rows):
+    def build(split_rows: list[dict]) -> Dataset:
         rows = []
         for ex in split_rows:
             labels = _chunk_ud_labels(
@@ -434,7 +393,7 @@ def build_ud() -> DatasetDict:
 def build_ud_pos() -> DatasetDict:
     raw = download_ud(Path("./data/raw/ud"))
 
-    def build(split_rows):
+    def build(split_rows: list[dict]) -> Dataset:
         return Dataset.from_list([
             {
                 "tokens": ex["tokens"],
@@ -450,16 +409,12 @@ def build_ud_pos() -> DatasetDict:
     })
 
 
-# ============================================================
-# Shape dataset
-# ============================================================
-
-def _word_shape(w,r):
+def _word_shape(w: str, r: float) -> tuple[str, str]:
     if random.random() < r:
         return w, "True"
     return "".join("X" if c.isupper() else "x" if c.isalpha() else c for c in w), "False"
 
-def _apply_shape(example, rate):
+def _apply_shape(example: dict, rate: float) -> dict:
     tokens = example["tokens"]
     new_tokens, changed = [], []
     for w in tokens.split():
@@ -495,10 +450,6 @@ def build_shape(cfg: dict, tokenizer: AutoTokenizer | None = None) -> DatasetDic
                 
     return ds
 
-# ============================================================
-# WikiANN with entity swapping
-# ============================================================
-
 def extract_spans(labels: List[str]) -> List[Tuple[int, int, str]]:
     spans, i, n = [], 0, len(labels)
     types = {1: "PER", 3: "ORG", 5: "LOC"}
@@ -533,8 +484,12 @@ def build_entity_bank(dataset: Dataset) -> Dict[str, List[List[str]]]:
     return {t: mentions for t, mentions in bank.items() if len(mentions) >= 2}
 
 
-def choose_replacement(candidates: List[List[str]],original: List[str],rng: \
-    random.Random, max_tries: int = 20,) -> List[str]:
+def choose_replacement(
+    candidates: List[List[str]],
+    original: List[str],
+    rng: random.Random,
+    max_tries: int = 20,
+) -> List[str]:
     if len(candidates) == 0:
         return original
     if len(candidates) == 1:
@@ -599,7 +554,7 @@ def build_wikiann_swap(seed: int = 67) -> DatasetDict:
     
     bank = build_entity_bank(base["train"])
 
-    def _swap(ex):
+    def _swap(ex: dict) -> dict:
         return swap_entities(ex, bank, rng)
 
     swapped = DatasetDict({

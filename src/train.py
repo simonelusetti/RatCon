@@ -1,14 +1,16 @@
-import os, torch, json
+import os
+import json
+import torch
 
-from typing import Dict
 from logging import Logger
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from dora import get_xp, hydra_main, XP
+from omegaconf import DictConfig
 from transformers import AutoTokenizer
 
 from .metrics import Counts
-from .sentence import SentenceEncoder
+from .sentence import SentenceEncoder, FrozenLLMEncoder
 from .selector import RationaleSelectorModel
 from .data import initialize_data
 from .losses import recon_loss
@@ -19,47 +21,86 @@ from .utils import (
     to_device,
     save_final_plots,
     tkns_to_words,
-    dict_to_table
+    dict_to_table,
 )
 
-def compute_losses(ids, attn, g, z, e_loss_raw, sent_encoder, loss_cfg):
-    e_loss = e_loss_raw * loss_cfg.l_e
+
+# --------------------------------------------------
+# Loss
+# --------------------------------------------------
+
+def compute_losses(
+    ids: torch.Tensor,
+    attn: torch.Tensor,
+    g: torch.Tensor,
+    z: torch.Tensor,
+    sent_encoder: SentenceEncoder,
+    loss_cfg: DictConfig,
+) -> tuple[dict[str, float], torch.Tensor, torch.Tensor]:
+
+    assert not torch.isnan(ids).any(), "Input IDs contain NaNs"
+    assert not torch.isnan(attn).any(), "Attention mask contains NaNs"
+    assert not torch.isnan(g).any(), "Gates contain NaNs"
+    assert not torch.isnan(z).any(), "Soft selections contain NaNs"
+
     gates = g if loss_cfg.hard else z
-    pred_rep = sent_encoder.encode(ids, attn * gates)
+
+    if isinstance(sent_encoder, FrozenLLMEncoder):
+        pred_rep = sent_encoder.encode(ids, attn * gates, original_attn=attn)
+    else:
+        pred_rep = sent_encoder.encode(ids, attn * gates)
+
     full_rep = sent_encoder.encode(ids, attn)
-    r_loss = recon_loss(pred_rep, full_rep)
-    return {
-        "recon": float(r_loss.detach()),
-        "entropy": float(e_loss.detach()),
-        "total": float((r_loss + e_loss).detach())
-    }, r_loss + e_loss, gates
+    loss = recon_loss(pred_rep, full_rep)
+
+    return {"loss": float(loss.detach())}, loss, gates
+
+
+# --------------------------------------------------
+# Trainer
+# --------------------------------------------------
 
 class SelectorTrainer:
-    def __init__(self, cfg: Dict, train_dl: DataLoader, test_dl: DataLoader, \
-        sent_encoder: SentenceEncoder,tokenizer: AutoTokenizer, logger: Logger, xp: XP):
-        
-        self.loss_cfg = cfg.model.loss
+    def __init__(
+        self,
+        cfg: DictConfig,
+        train_dl: DataLoader,
+        test_dl: DataLoader,
+        sent_encoder: SentenceEncoder,
+        tokenizer: AutoTokenizer,
+        logger: Logger,
+        xp: XP,
+    ) -> None:
 
+        self.loss_cfg = cfg.model.loss
         self.logger = logger
         self.train_dl = train_dl
         self.test_dl = test_dl
-        
+
         self.epochs = cfg.train.epochs
         self.short_log = cfg.runtime.eval.short_log
         self.examples = cfg.runtime.eval.log_examples
         self.device = cfg.runtime.device
-        
+
         self.xp = xp
         self.checkpoint_path = "model.pth"
 
-        self.sent_encoder, self.tokenizer = sent_encoder, tokenizer
-        
+        self.sent_encoder = sent_encoder
+        self.tokenizer = tokenizer
+
         with torch.no_grad():
             first = next(iter(self.train_dl))
-            model_dim = self.sent_encoder.token_embeddings(first["ids"].to(self.device), \
-                first["attn_mask"].to(self.device)).shape[-1]
+            model_dim = self.sent_encoder.token_embeddings(
+                first["ids"].to(self.device),
+                first["attn_mask"].to(self.device),
+            ).shape[-1]
 
-        self.model = RationaleSelectorModel(model_dim, rho=cfg.model.loss.s_target, tau=cfg.model.loss.tau).to(self.device)
+        self.model = RationaleSelectorModel(
+            model_dim,
+            rho=cfg.model.loss.s_target,
+            tau=cfg.model.loss.tau,
+        ).to(self.device)
+
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=float(cfg.model.optim.lr),
@@ -72,32 +113,35 @@ class SelectorTrainer:
             self.label_key in self.test_dl.dataset[0]
             and self.test_dl.dataset[0][self.label_key] is not None
         )
-        
-        self.counts_gold_history, self.counts_pred_history  = [], []
-        self.total_tokens_history, self.total_selected_history = [], []
+
+        self.counts_gold_history = []
+        self.counts_pred_history = []
+        self.total_tokens_history = []
+        self.total_selected_history = []
         self.loss_history = []
-        
-    
-    def save_checkpoint(self):
-        state = {
-            "model": self.model.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
-            "meta": {
-                "sig": self.xp.sig,
-            },
-        }
+
+
+    # --------------------------------------------------
+
+    def save_checkpoint(self) -> None:
         torch.save(
-            state,
+            {
+                "model": self.model.state_dict(),
+                "optimizer": self.optimizer.state_dict(),
+                "meta": {"sig": self.xp.sig},
+            },
             self.checkpoint_path,
             _use_new_zipfile_serialization=False,
         )
+
         if not self.short_log:
             self.logger.info(
                 "Saved checkpoint to %s",
                 os.path.abspath(self.checkpoint_path),
             )
-            
-    def load_checkpoint(self):
+
+
+    def load_checkpoint(self) -> None:
         state = torch.load(self.checkpoint_path, map_location=self.device)
         self.model.load_state_dict(state["model"], strict=False)
         self.optimizer.load_state_dict(state["optimizer"])
@@ -106,11 +150,21 @@ class SelectorTrainer:
             os.path.abspath(self.checkpoint_path),
         )
 
+
+    # --------------------------------------------------
+    # Evaluation
+    # --------------------------------------------------
+
     @torch.no_grad()
     def evaluate(self, examples: int = 0):
+
         self.model.eval()
-        total_tokens, total_selected, examples_count = 0, 0, 0
-        total_losses = {"total": 0.0, "recon": 0.0, "entropy": 0.0}
+
+        total_tokens = 0
+        total_selected = 0
+        examples_count = 0
+        total_losses = {"loss": 0.0}
+
         all_tokens, all_selected, all_gates = [], [], []
         examples_str = []
 
@@ -127,26 +181,20 @@ class SelectorTrainer:
             disable=self.short_log,
         ):
             batch = to_device(self.device, batch)
+
             ids = batch["ids"]
             attn = batch["attn_mask"]
-            word_ids = batch["word_ids"]
             bs = ids.size(0)
 
             tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
-            g, z, e_loss = self.model(tkns_embd, attn, deterministic=True)
-            losses, _, gates = compute_losses(ids, attn, g, z, e_loss, self.sent_encoder, self.loss_cfg)
-            bs = ids.size(0)
-            examples_count += bs
-            
-            total_losses = {k: v+losses[k] for k, v in losses.items()}
-            
-            word_pred, word_attn, word_lbls = tkns_to_words(
-                gates=g,
-                attn_mask=attn,
-                labels=batch[self.label_key],
-                word_ids=batch["word_ids"],
-                threshold=0.5,
+            g, z = self.model(tkns_embd, attn, deterministic=True)
+
+            losses, _, gates = compute_losses(
+                ids, attn, g, z, self.sent_encoder, self.loss_cfg
             )
+
+            examples_count += bs
+            total_losses["loss"] += losses["loss"]
 
             total_tokens += attn.sum().item()
             total_selected += (gates * attn).sum().item()
@@ -162,15 +210,15 @@ class SelectorTrainer:
                     counts_gold = Counts(flat_labels, flat_attn)
                     counts_init = True
                 else:
-                    counts_pred = counts_pred + Counts(flat_labels, flat_attn, flat_preds)
-                    counts_gold = counts_gold + Counts(flat_labels, flat_attn)
+                    counts_pred += Counts(flat_labels, flat_attn, flat_preds)
+                    counts_gold += Counts(flat_labels, flat_attn)
 
             tokens_batch = batch["tokens"]
             for i in range(bs):
                 length = attn[i].sum().item()
                 toks = tokens_batch[i][:length]
-                gate_vals = g[i, :length].detach().cpu().tolist()
-                selected = [int(g > 0.5) for g in gate_vals]
+                gate_vals = g[i, :length].cpu().tolist()
+                selected = [int(v > 0.5) for v in gate_vals]
 
                 all_tokens.append(toks)
                 all_selected.append(selected)
@@ -179,10 +227,10 @@ class SelectorTrainer:
                 if len(examples_str) < examples:
                     sel_tokens = [t for t, s in zip(toks, selected) if s]
                     examples_str.append((toks, sel_tokens))
-                    
-        total_losses = {k: v / examples_count for k, v in total_losses.items()}
-        self.loss_history.append(losses)
-        
+
+        total_losses["loss"] /= max(examples_count, 1)
+        self.loss_history.append(total_losses)
+
         return (
             total_selected,
             total_tokens,
@@ -190,11 +238,14 @@ class SelectorTrainer:
             counts_pred,
             examples_str,
             {"tokens": all_tokens, "selected": all_selected, "gates": all_gates},
-            total_losses
+            total_losses,
         )
 
+
+    # --------------------------------------------------
+
     @torch.no_grad()
-    def log_eval(self, epoch: int = -1):
+    def log_eval(self, epoch: int = -1) -> None:
         (
             total_selected,
             total_tokens,
@@ -202,7 +253,7 @@ class SelectorTrainer:
             counts_pred,
             examples_str,
             record,
-            losses
+            losses,
         ) = self.evaluate(self.examples)
 
         if epoch >= 0:
@@ -219,7 +270,7 @@ class SelectorTrainer:
 
         if self.short_log:
             return
-        
+
         self.logger.info(f"Selection rate: {total_selected / max(total_tokens, 1)}")
         self.logger.info(f"\n{dict_to_table(losses)}")
 
@@ -231,7 +282,13 @@ class SelectorTrainer:
         if self.labels_present:
             self.logger.info("Eval labels:\n%s", (counts_pred / counts_gold).to_table())
 
-    def train(self):
+
+    # --------------------------------------------------
+    # Training
+    # --------------------------------------------------
+
+    def train(self) -> None:
+
         epoch_bar = tqdm(
             range(self.epochs),
             desc="Training",
@@ -242,53 +299,66 @@ class SelectorTrainer:
         )
 
         for epoch in epoch_bar:
-            batch_bar = tqdm(
+            self.model.train()
+            total_losses = {"loss": 0.0}
+            examples_count = 0
+
+            for batch in tqdm(
                 self.train_dl,
-                desc=f"Training Epoch {epoch+1}",
+                desc=f"Training Epoch {epoch + 1}",
                 position=1,
                 leave=False,
                 dynamic_ncols=True,
                 disable=self.short_log,
-            )
-
-            total_losses = {"total": 0.0, "recon": 0.0, "entropy": 0.0}
-            examples_count = 0
-            
-            for batch in batch_bar:
+            ):
                 self.optimizer.zero_grad(set_to_none=True)
+
                 batch = to_device(self.device, batch)
                 ids = batch["ids"]
                 attn = batch["attn_mask"]
 
                 tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
-                g, z, e_loss = self.model(tkns_embd, attn, deterministic=False)
-                losses, loss, _ = compute_losses(ids, attn, g, z, e_loss, self.sent_encoder, self.loss_cfg)
-                bs = ids.size(0)
-                examples_count += bs
-                
+                g, z = self.model(tkns_embd, attn, deterministic=False)
+
+                losses, loss, _ = compute_losses(
+                    ids, attn, g, z, self.sent_encoder, self.loss_cfg
+                )
+
                 loss.backward()
                 self.optimizer.step()
-                total_losses = {k: v+losses[k] for k, v in losses.items()}
-                
+
+                bs = ids.size(0)
+                examples_count += bs
+                total_losses["loss"] += losses["loss"]
+
+            total_losses["loss"] /= max(examples_count, 1)
+
             if not self.short_log:
-                total_losses = {k: v/examples_count for k, v in total_losses.items()}
                 self.logger.info(f"Epoch {epoch + 1}/{self.epochs}")
                 self.logger.info(f"\n{dict_to_table(total_losses)}")
-            self.log_eval(epoch=epoch + 1)
-            self.model.train()
+
+            self.log_eval(epoch + 1)
             self.save_checkpoint()
 
         save_final_plots(
-            self.counts_pred_history, self.counts_gold_history, 
+            self.counts_pred_history,
+            self.counts_gold_history,
             self.loss_history,
-            self.labels_present, self.logger, self.xp
+            self.labels_present,
+            self.logger,
+            self.xp,
         )
 
 
+# --------------------------------------------------
+# Main
+# --------------------------------------------------
+
 @hydra_main(config_path="conf", config_name="default", version_base="1.1")
-def main(cfg):
+def main(cfg: DictConfig) -> None:
     logger = get_logger()
     xp = get_xp()
+
     logger.info(f"Exp signature: {xp.sig}")
     logger.info(repr(cfg))
     logger.info(f"Work dir: {os.getcwd()}")
@@ -296,11 +366,18 @@ def main(cfg):
     cfg.runtime, changed_device = configure_runtime(cfg.runtime)
     if changed_device:
         logger.warning("CUDA requested but unavailable, using CPU.")
-    
-    train_dl, test_dl, encoder, tokenizer = \
-        initialize_data(cfg.data, cfg.runtime.data, logger, device=cfg.runtime.device)
-    trainer = SelectorTrainer(cfg, train_dl, test_dl, encoder, tokenizer, logger, xp)
-    
+
+    train_dl, test_dl, encoder, tokenizer = initialize_data(
+        cfg.data,
+        cfg.runtime.data,
+        logger,
+        device=cfg.runtime.device,
+    )
+
+    trainer = SelectorTrainer(
+        cfg, train_dl, test_dl, encoder, tokenizer, logger, xp
+    )
+
     if cfg.train.no_train:
         trainer.load_checkpoint()
         trainer.log_eval()

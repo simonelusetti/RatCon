@@ -1,14 +1,14 @@
-from __future__ import annotations
-
 import logging, torch
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, TypedDict
+from typing_extensions import NotRequired
 from datasets import DatasetDict, load_dataset, load_from_disk, Value, Sequence
 from dora import to_absolute_path
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
+from transformers import PreTrainedTokenizerBase
 
-from .sentence import resolve_tokenizer_group, build_sentence_encoder
+from .sentence import resolve_tokenizer_group, build_sentence_encoder, SentenceEncoder
 
 from .datasets_builders import (
     build_both_parasci,
@@ -24,10 +24,6 @@ from .datasets_builders import (
     build_wikiann_swap,
     build_ud_pos
 )
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 
 ALIASES = {
     "cnn_dailymail": {"cnn", "cnn_dailymail"},
@@ -71,10 +67,21 @@ SECONDARY_LABELS_DS = {
     "conll2003": map_conll2003_secondary_labels,
 }
 
+class TokenizedExample(TypedDict):
+    ids: list[int]
+    attn_mask: list[int]
+    word_ids: list[int | None]
+    tokens: list[str]
+    labels: NotRequired[list[str]]
+    scnd_labels: NotRequired[list[str]]
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+class CollatedBatch(TypedDict, total=False):
+    ids: torch.Tensor
+    attn_mask: torch.Tensor
+    word_ids: torch.Tensor
+    tokens: list[list[str]]
+    labels: list[list[str]]
+    scnd_labels: list[list[str]]
 
 def canonical_name(name: str) -> str:
     for canon, aliases in ALIASES.items():
@@ -84,9 +91,6 @@ def canonical_name(name: str) -> str:
 
 
 def dataset_path(name: str, tokenizer_group: str, config: dict | None) -> Path:
-    """
-    Cache path for the TOKENIZED dataset.
-    """
     suffix = f"_tok={tokenizer_group}"
     if config:
         suffix += "_" + "_".join(str(v) for v in config.values())
@@ -109,7 +113,7 @@ def shuffle_and_subset(ds: DatasetDict, subset: float | int | None, shuffle: boo
     return ds
 
 
-def collate(batch: list[dict]) -> dict:
+def collate(batch: list[TokenizedExample]) -> CollatedBatch:
     tokens = [x["tokens"] for x in batch]
     tokens_max_len = max(len(x) for x in tokens)
     tokens_padded = [
@@ -157,6 +161,8 @@ def collate(batch: list[dict]) -> dict:
             x + [PAD_TAG] * (scnd_max_len - len(x))
             for x in scnd_labels
         ]
+        
+    assert not torch.isnan(out["ids"]).any(), "Collated IDs contain NaNs"
 
     return out
 
@@ -207,25 +213,19 @@ def resolve_dataset(
         ds = ds.rename_column(text_field, "tokens")
 
     assert isinstance(ds, DatasetDict), "Expected DatasetDict"
-   
     assert "train" in ds and "test" in ds, "Dataset must have train and test splits"
     return ds
-
-
-# ---------------------------------------------------------------------------
-# Tokenization / label alignment
-# ---------------------------------------------------------------------------
 
 @torch.no_grad()
 def encode_examples(
     data_cfg: dict,
     ds: DatasetDict,
-    tokenizer,
+    tokenizer: PreTrainedTokenizerBase,
     scnd_labels_map: Callable | None = None,
 ) -> DatasetDict:
     labels_present = "labels" in ds["train"].column_names
 
-    def _encode(example):
+    def _encode(example: dict) -> TokenizedExample:
         text = example["tokens"]
         enc = tokenizer(
             text,
@@ -270,11 +270,12 @@ def encode_examples(
     return out
 
 
-# ---------------------------------------------------------------------------
-# Dataset cache and loading
-# ---------------------------------------------------------------------------
-
-def get_dataset(data_cfg: dict, runtime_cfg: dict, tokenizer, logger=None) -> DatasetDict:
+def get_dataset(
+    data_cfg: dict,
+    runtime_cfg: dict,
+    tokenizer: PreTrainedTokenizerBase,
+    logger: logging.Logger | None = None,
+) -> DatasetDict:
     tokenizer_group = resolve_tokenizer_group(data_cfg.encoder.family)
     name = canonical_name(data_cfg.dataset)
     path = dataset_path(name, tokenizer_group, data_cfg.get("config"))
@@ -310,11 +311,12 @@ def get_dataset(data_cfg: dict, runtime_cfg: dict, tokenizer, logger=None) -> Da
     return ds_tok
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-def initialize_data(data_cfg: dict, runtime_cfg:dict, logger=None, device="cpu") -> tuple[DataLoader, DataLoader]:
+def initialize_data(
+    data_cfg: dict,
+    runtime_cfg: dict,
+    logger: logging.Logger | None = None,
+    device: str = "cpu",
+) -> tuple[DataLoader, DataLoader, SentenceEncoder, PreTrainedTokenizerBase]:
     encoder, tokenizer = build_sentence_encoder(
         family=data_cfg.encoder.family,
         encoder_name=data_cfg.encoder.name,

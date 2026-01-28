@@ -21,7 +21,7 @@ data:
   config: null
   subset: 1.0
   encoder: 
-    family: "sbert" # llm | sbert | retrieval | late
+    family: "sbert"
     name: null
 
 train:

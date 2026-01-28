@@ -1,15 +1,9 @@
-from __future__ import annotations
-
 import torch
 import math
 import torch.nn as nn
 import torch.nn.functional as F
 from sentence_transformers import SentenceTransformer
 from transformers import AutoModel, AutoTokenizer
-
-# ---------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------
 
 ALIASES = {
     "sbert": {"sbert"},
@@ -56,7 +50,11 @@ def resolve_tokenizer(family: str) -> AutoTokenizer:
     return AutoTokenizer.from_pretrained(CANONICAL_TOKENIZERS[group], use_fast=True)
 
 
-def tkns_embedding_bert(model, input_ids, attention_mask):
+def tkns_embedding_bert(
+    model: AutoModel,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+) -> torch.Tensor:
         hidden_states = model.embeddings(input_ids)
         key_mask = attention_mask[:, None, None, :].type_as(hidden_states)
 
@@ -90,47 +88,45 @@ def tkns_embedding_bert(model, input_ids, attention_mask):
         return hidden_states
         
 def tkns_embedding_gpt(model, input_ids, attention_mask):
-    hidden_states = model.embed_in(input_ids)  # [B,T,H]
+    hidden_states = model.embed_in(input_ids)
     bsz, seq_len, _ = hidden_states.size()
-    key_mask = attention_mask[:, None, None, :].to(dtype=hidden_states.dtype)  # [B,1,1,T]
 
-    num_heads = int(model.config.num_attention_heads)
+    attn = attention_mask.clamp(min=0.0)
+    key_mask = attn[:, None, None, :]
+
+    num_heads = model.config.num_attention_heads
+    head_dim = model.config.hidden_size // num_heads
 
     for block in model.layers:
-        attn = block.attention
+        attn_mod = block.attention
         ln_out = block.input_layernorm(hidden_states)
 
-        qkv = attn.query_key_value(ln_out)
-        head_dim = int(getattr(attn, "head_size", None))
+        qkv = attn_mod.query_key_value(ln_out)
         qkv = qkv.view(bsz, seq_len, num_heads, 3 * head_dim).permute(0, 2, 1, 3)
-        query, key, value = torch.split(qkv, head_dim, dim=-1)  # each [B,nh,T,hd]
+        query, key, value = torch.split(qkv, head_dim, dim=-1)
 
-        scores = torch.matmul(query, key.transpose(-1, -2)) / math.sqrt(head_dim)  # [B,nh,T,T]
+        scores = torch.matmul(query, key.transpose(-1, -2)) / math.sqrt(head_dim)
+        scores = scores + torch.log(key_mask.clamp(min=1e-6))
+
         probs = torch.softmax(scores, dim=-1)
+        context = torch.matmul(probs, value)
 
-        probs = probs * key_mask
-        probs = probs / probs.sum(dim=-1, keepdim=True).clamp(min=1e-9)
+        context = context.permute(0, 2, 1, 3).contiguous()
+        context = context.view(bsz, seq_len, num_heads * head_dim)
 
-        context = torch.matmul(probs, value)  # [B,nh,T,hd]
-        context = context.permute(0, 2, 1, 3).contiguous().view(bsz, seq_len, num_heads * head_dim)  # [B,T,H]
-
-        attn_out = attn.dense(context)
-        hidden_states = hidden_states + attn_out
-
-        mlp_in = block.post_attention_layernorm(hidden_states)
-        mlp_out = block.mlp(mlp_in)
-        hidden_states = hidden_states + mlp_out
-        hidden_states = model.final_layer_norm(hidden_states)
+        hidden_states = hidden_states + attn_mod.dense(context)
+        hidden_states = hidden_states + block.mlp(block.post_attention_layernorm(hidden_states))
+        hidden_states = block.post_attention_layernorm(hidden_states)
 
     return hidden_states
 
 
 class SentenceEncoder(nn.Module):
-    def __init__(self, normalize: bool):
+    def __init__(self, normalize: bool) -> None:
         super().__init__()
         self.normalize = normalize
 
-    def token_embeddings(self, input_ids: torch.Tensor, attention_mask: torch.Tensor):
+    def token_embeddings(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         if isinstance(self, FrozenSBERT):
             return tkns_embedding_bert(self.transformer.auto_model, input_ids, attention_mask)
         elif isinstance(self, _FrozenHFEncoder):
@@ -140,15 +136,11 @@ class SentenceEncoder(nn.Module):
                 return tkns_embedding_gpt(self.model, input_ids, attention_mask)
             raise ValueError(f"Unknown tokenizer type: {type}")
 
-    def encode(self, input_ids, attention_mask):
+    def encode(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError()
 
-# ---------------------------------------------------------------------
-# SBERT (kept separate, uses SentenceTransformer internals)
-# ---------------------------------------------------------------------
-
 class FrozenSBERT(SentenceEncoder):
-    def __init__(self, model_name: str, normalize: bool, device: str):
+    def __init__(self, model_name: str, normalize: bool, device: str) -> None:
         super().__init__(normalize)
         self.model = SentenceTransformer(model_name, device=device)
         self.transformer = self.model[0]
@@ -157,19 +149,15 @@ class FrozenSBERT(SentenceEncoder):
         for p in self.model.parameters():
             p.requires_grad = False
 
-    def encode(self, input_ids, attention_mask):
+    def encode(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         token_emb = tkns_embedding_bert(self.transformer.auto_model, input_ids, attention_mask)
         mask = attention_mask.unsqueeze(-1).type_as(token_emb)
 
         sent_emb = (token_emb * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-6)
         return F.normalize(sent_emb, dim=-1) if self.normalize else sent_emb
 
-# ---------------------------------------------------------------------
-# Generic frozen HF encoder with shared mask injection
-# ---------------------------------------------------------------------
-
 class _FrozenHFEncoder(SentenceEncoder):
-    def __init__(self, model_name: str, normalize: bool):
+    def __init__(self, model_name: str, normalize: bool) -> None:
         super().__init__(normalize)
         self.model = AutoModel.from_pretrained(model_name)
 
@@ -177,43 +165,34 @@ class _FrozenHFEncoder(SentenceEncoder):
         for p in self.model.parameters():
             p.requires_grad = False
 
-# ---------------------------------------------------------------------
-# E5 / retrieval-style mean pooling
-# ---------------------------------------------------------------------
-
 class FrozenE5(_FrozenHFEncoder):
-    def encode(self, input_ids, attention_mask):
+    def encode(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         token_emb = tkns_embedding_bert(self.model, input_ids, attention_mask)
         mask = attention_mask.unsqueeze(-1).type_as(token_emb)
 
         sent_emb = (token_emb * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-6)
         return F.normalize(sent_emb, dim=-1) if self.normalize else sent_emb
 
-# ---------------------------------------------------------------------
-# BGE (CLS pooling)
-# ---------------------------------------------------------------------
-
 class FrozenBGE(_FrozenHFEncoder):
-    def encode(self, input_ids, attention_mask):
+    def encode(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         token_emb = tkns_embedding_bert(self.model, input_ids, attention_mask)
         sent_emb = token_emb[:, 0]
         return F.normalize(sent_emb, dim=-1) if self.normalize else sent_emb
 
-# ---------------------------------------------------------------------
-# LLM-style last-token pooling
-# ---------------------------------------------------------------------
 
 class FrozenLLMEncoder(_FrozenHFEncoder):
-    def encode(self, input_ids, attention_mask):
+    def encode(self, input_ids, attention_mask, original_attn=None):
+        if original_attn is None:
+            original_attn = attention_mask
+
         token_emb = tkns_embedding_gpt(self.model, input_ids, attention_mask)
-        hard_mask = attention_mask > 0
-        idx = hard_mask.long().sum(dim=1).clamp(min=1) - 1
-        sent_emb = token_emb[torch.arange(token_emb.size(0)), idx]
+
+        pool_mask = original_attn.unsqueeze(-1).type_as(token_emb)
+        denom = pool_mask.sum(dim=1).clamp(min=1e-6)
+        sent_emb = (token_emb * pool_mask).sum(dim=1) / denom
+
         return F.normalize(sent_emb, dim=-1) if self.normalize else sent_emb
 
-# ---------------------------------------------------------------------
-# Factory
-# ---------------------------------------------------------------------
 
 def build_sentence_encoder(
     family: str,

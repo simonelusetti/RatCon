@@ -1,7 +1,5 @@
-#!/usr/bin/env python3
-from __future__ import annotations
-
 import torch, sys, numpy as np
+from typing import Callable
 from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
@@ -10,30 +8,22 @@ from pathlib import Path
 from dora import hydra_main
 from omegaconf import DictConfig
 
-# ---------------------------------------------------------------------
-# Path setup (Hydra-safe)
-# ---------------------------------------------------------------------
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.selector import RationaleSelectorModel
-from src.sentence import build_sentence_encoder
-
-# ---------------------------------------------------------------------
-# Dataset (Retrieval-style)
-# ---------------------------------------------------------------------
+from src.sentence import build_sentence_encoder, SentenceEncoder
 
 class RetrievalDataset(Dataset):
-    def __init__(self, tokenizer, queries, docs):
+    def __init__(self, tokenizer, queries, docs) -> None:
         self.tokenizer = tokenizer
         self.queries = queries
         self.docs = docs
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.queries)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         tq = self.tokenizer(self.queries[idx], truncation=True, return_tensors="pt")
         td = self.tokenizer(self.docs[idx], truncation=True, return_tensors="pt")
 
@@ -45,8 +35,8 @@ class RetrievalDataset(Dataset):
         }
 
 
-def collate_fn(batch):
-    def pad(key, dtype):
+def collate_fn(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+    def pad(key: str, dtype: torch.dtype) -> torch.Tensor:
         return pad_sequence(
             [x[key].to(dtype) for x in batch],
             batch_first=True,
@@ -60,40 +50,37 @@ def collate_fn(batch):
         "d_attn": pad("d_attn", torch.float),
     }
 
-# ---------------------------------------------------------------------
-# Selector utilities
-# ---------------------------------------------------------------------
-
 @torch.no_grad()
-def compute_gates(encoder, selector, ids, attn):
+def compute_gates(
+    encoder: SentenceEncoder,
+    selector: RationaleSelectorModel | Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    ids: torch.Tensor,
+    attn: torch.Tensor,
+) -> torch.Tensor:
     token_emb = encoder.token_embeddings(ids, attn)
 
     if isinstance(selector, RationaleSelectorModel):
-        g, _ = selector(token_emb, attn, deterministic=True)
+        g, _, _ = selector(token_emb, attn, deterministic=True)
         return g
     else:
         return selector(token_emb, attn)
 
 
-def random_selector(p: float):
+def random_selector(p: float) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
     @torch.no_grad()
-    def _selector(token_emb, attn):
+    def _selector(token_emb: torch.Tensor, attn: torch.Tensor) -> torch.Tensor:
         return (torch.rand_like(attn) < p).float() * attn
     return _selector
 
-# ---------------------------------------------------------------------
-# Retrieval metrics
-# ---------------------------------------------------------------------
-
-def recall_at_k(ranks, k):
+def recall_at_k(ranks: list[int], k: int) -> float:
     return float(np.mean([1.0 if r < k else 0.0 for r in ranks]))
 
 
-def mean_reciprocal_rank(ranks):
+def mean_reciprocal_rank(ranks: list[int]) -> float:
     return float(np.mean([1.0 / (r + 1) for r in ranks]))
 
 
-def compute_metrics(ranks):
+def compute_metrics(ranks: list[int]) -> dict[str, float]:
     return {
         "R@1": recall_at_k(ranks, 1),
         "R@5": recall_at_k(ranks, 5),
@@ -102,18 +89,19 @@ def compute_metrics(ranks):
     }
 
 
-def aggregate_metrics(metrics_list):
+def aggregate_metrics(metrics_list: list[dict[str, float]]) -> tuple[dict[str, float], dict[str, float]]:
     keys = metrics_list[0].keys()
     mean = {k: float(np.mean([m[k] for m in metrics_list])) for k in keys}
     std = {k: float(np.std([m[k] for m in metrics_list])) for k in keys}
     return mean, std
 
-# ---------------------------------------------------------------------
-# Evaluation
-# ---------------------------------------------------------------------
-
 @torch.no_grad()
-def evaluate_retrieval(encoder, selector, dataloader, device):
+def evaluate_retrieval(
+    encoder: SentenceEncoder,
+    selector: RationaleSelectorModel | Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None,
+    dataloader: DataLoader,
+    device: torch.device,
+) -> list[int]:
     ranks = []
 
     for batch in tqdm(dataloader, desc="Retrieval eval"):
@@ -146,7 +134,12 @@ def evaluate_retrieval(encoder, selector, dataloader, device):
 
 
 @torch.no_grad()
-def estimate_selection_rate(encoder, selector, dataloader, device):
+def estimate_selection_rate(
+    encoder: SentenceEncoder,
+    selector: RationaleSelectorModel | Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    dataloader: DataLoader,
+    device: torch.device,
+) -> float:
     sel = 0.0
     tot = 0.0
 
@@ -164,12 +157,8 @@ def estimate_selection_rate(encoder, selector, dataloader, device):
 
     return sel / max(tot, 1.0)
 
-# ---------------------------------------------------------------------
-# Main (Hydra)
-# ---------------------------------------------------------------------
-
 @hydra_main(config_path="retrieval_conf", config_name="default", version_base="1.1")
-def main(cfg: DictConfig):
+def main(cfg: DictConfig) -> None:
 
     device = cfg.runtime.device
     if device == "cuda" and not torch.cuda.is_available():
@@ -191,17 +180,11 @@ def main(cfg: DictConfig):
         collate_fn=collate_fn,
     )
 
-    # --------------------------------------------------
-    # Base encoder
-    # --------------------------------------------------
     print("\nEvaluating base encoder...")
     base_ranks = evaluate_retrieval(encoder, None, loader, device)
     base_metrics = compute_metrics(base_ranks)
     print(base_metrics)
 
-    # --------------------------------------------------
-    # Selector
-    # --------------------------------------------------
     with torch.no_grad():
         sample = dataset[0]
         ids = sample["q_ids"].unsqueeze(0).to(device)
@@ -220,24 +203,15 @@ def main(cfg: DictConfig):
     for p in selector.parameters():
         p.requires_grad = False
 
-    # --------------------------------------------------
-    # Sparsity
-    # --------------------------------------------------
     print("\nEstimating selector sparsity...")
     p_sel = estimate_selection_rate(encoder, selector, loader, device)
     print(f"Mean selection rate: {p_sel:.4f}")
 
-    # --------------------------------------------------
-    # Trained selector
-    # --------------------------------------------------
     print("\nEvaluating trained selector...")
     trained_ranks = evaluate_retrieval(encoder, selector, loader, device)
     trained_metrics = compute_metrics(trained_ranks)
     print(trained_metrics)
 
-    # --------------------------------------------------
-    # Random baselines (aggregated)
-    # --------------------------------------------------
     print("\nRandom selector baselines...")
     rand_metrics_all = []
 
@@ -253,9 +227,6 @@ def main(cfg: DictConfig):
     for k in rand_mean:
         print(f"{k}: {rand_mean[k]:.4f} ± {rand_std[k]:.4f}")
 
-    # --------------------------------------------------
-    # Comparisons
-    # --------------------------------------------------
     print("\nΔ (trained - random mean):")
     for k in trained_metrics:
         print(f"{k}: {trained_metrics[k] - rand_mean[k]:+.4f}")

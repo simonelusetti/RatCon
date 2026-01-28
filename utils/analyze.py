@@ -1,23 +1,12 @@
-from __future__ import annotations
-
 import argparse, json, math
 from collections import defaultdict
 from pathlib import Path
-from typing import Tuple, List, Dict, Any, Iterable
-
-# -----------------------
-# IO defaults
-# -----------------------
+from typing import Tuple, List, Dict, Iterable
 
 XPS_DIR = Path("./outputs/xps")
 REL_FILE = Path("selections/eval_epoch_030.jsonl")
 
-
-# -----------------------
-# Basic helpers
-# -----------------------
-
-def to01(x) -> int:
+def to01(x: bool | int | float) -> int:
     if isinstance(x, bool):
         return int(x)
     if isinstance(x, (int, float)):
@@ -29,7 +18,7 @@ def is_jsonl(path: Path) -> bool:
     return path.suffix.lower() in {".jsonl", ".ndjson"}
 
 
-def load_tokens_selected(path: Path) -> Tuple[List[List[str]], List[List[Any]]]:
+def load_tokens_selected(path: Path) -> Tuple[List[List[str]], List[List[int | float | bool]]]:
     if is_jsonl(path):
         tokens_all, sel_all = [], []
         with path.open("r", encoding="utf-8") as f:
@@ -47,18 +36,7 @@ def load_tokens_selected(path: Path) -> Tuple[List[List[str]], List[List[Any]]]:
 
     raise ValueError(f"Unrecognized format in {path}")
 
-
-# ---------------------------
-# Word aggregation (OR rule)
-# ---------------------------
-
-def aggregate_to_words(tokens: List[str], selected: List[Any]) -> Tuple[List[str], List[int]]:
-    """
-    Merge subword tokens into words.
-
-    Word selection = 1 iff ANY subword token was selected.
-    (logical OR over subwords)
-    """
+def aggregate_to_words(tokens: List[str], selected: List[int | float | bool]) -> Tuple[List[str], List[int]]:
     assert len(tokens) == len(selected)
 
     words: List[str] = []
@@ -67,7 +45,7 @@ def aggregate_to_words(tokens: List[str], selected: List[Any]) -> Tuple[List[str
     cur_word = ""
     cur_selected = 0
 
-    def flush():
+    def flush() -> None:
         nonlocal cur_word, cur_selected
         if cur_word:
             words.append(cur_word)
@@ -78,13 +56,11 @@ def aggregate_to_words(tokens: List[str], selected: List[Any]) -> Tuple[List[str
     for tok, sel in zip(tokens, selected):
         s = to01(sel)
 
-        # SentencePiece new word
         if tok.startswith("▁"):
             flush()
             cur_word = tok[1:]
             cur_selected = s
 
-        # WordPiece continuation
         elif tok.startswith("##"):
             if not cur_word:
                 cur_word = tok[2:]
@@ -93,7 +69,6 @@ def aggregate_to_words(tokens: List[str], selected: List[Any]) -> Tuple[List[str
                 cur_word += tok[2:]
                 cur_selected |= s
 
-        # Plain token → new word
         else:
             flush()
             cur_word = tok
@@ -103,10 +78,11 @@ def aggregate_to_words(tokens: List[str], selected: List[Any]) -> Tuple[List[str
     return words, word_sel
 
 
-def sentence_stream(all_tokens, all_selected, lowercase: bool):
-    """
-    Yields (words, selected01) per sentence.
-    """
+def sentence_stream(
+    all_tokens: List[List[List[str]]],
+    all_selected: List[List[List[int | float | bool]]],
+    lowercase: bool,
+) -> Iterable[Tuple[List[str], List[int]]]:
     for batch_tokens, batch_selected in zip(all_tokens, all_selected):
         for sent_toks, sent_sel in zip(batch_tokens, batch_selected):
             words, sels = aggregate_to_words(sent_toks, sent_sel)
@@ -114,11 +90,6 @@ def sentence_stream(all_tokens, all_selected, lowercase: bool):
                 words = [w.lower() for w in words]
             if words:
                 yield words, sels
-
-
-# -----------------------------------
-# Context dependence (sentence-level)
-# -----------------------------------
 
 def log_odds_ratio(a: int, b: int, c: int, d: int, alpha: float = 0.5) -> float:
     return math.log((a + alpha) * (d + alpha)) - math.log((b + alpha) * (c + alpha))
@@ -128,7 +99,7 @@ def build_vocab_and_sentences(
     sent_stream: Iterable[Tuple[List[str], List[int]]],
     max_vocab: int,
     min_word_count: int,
-):
+) -> tuple[list[tuple[list[str], list[int]]], dict[str, int], set[str]]:
     sents = []
     counts = defaultdict(int)
 
@@ -152,7 +123,7 @@ def compute_context_dependence(
     min_co: int,
     alpha: float,
     topk_ctx: int,
-):
+) -> Dict[str, dict]:
     occ = defaultdict(int)
     sel = defaultdict(int)
 
@@ -161,7 +132,6 @@ def compute_context_dependence(
     c = defaultdict(lambda: defaultdict(int))
     d = defaultdict(lambda: defaultdict(int))
 
-    # Collect statistics
     for words, sels in sents:
         sent_set = set(words)
 
@@ -236,7 +206,7 @@ def compute_context_dependence(
     return results
 
 
-def format_report(results: Dict[str, Any], top_tokens: int, topk_ctx: int) -> str:
+def format_report(results: Dict[str, dict], top_tokens: int, topk_ctx: int) -> str:
     ranked = sorted(results.items(), key=lambda kv: kv[1]["cd"], reverse=True)
     out = []
     out.append("=== WORD-LEVEL CONTEXT DEPENDENCE REPORT ===\n")
@@ -267,7 +237,7 @@ def format_report(results: Dict[str, Any], top_tokens: int, topk_ctx: int) -> st
     return "\n".join(out)
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser("Single-run word context dependence (sentence-level)")
     ap.add_argument("--sig", required=True)
     ap.add_argument("--xps_dir", type=Path, default=XPS_DIR)

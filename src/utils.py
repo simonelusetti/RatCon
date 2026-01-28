@@ -1,21 +1,15 @@
-from __future__ import annotations
-
 import logging, os, sys, json, torch, matplotlib.pyplot as plt, torch.nn.functional as F
 
 from pathlib import Path
-from typing import Dict, Iterable, Mapping, Sequence, Tuple
+from typing import Dict, Iterable, Mapping, Sequence, Tuple, TextIO, TYPE_CHECKING
 from dora import XP
 from prettytable import PrettyTable
 from tqdm import tqdm
 
-from tqdm import tqdm
+if TYPE_CHECKING:
+    from .metrics import Counts
+
 tqdm._instances.clear()
-
-# ---------------------------------------------------------------------------
-# Runtime Config
-# ---------------------------------------------------------------------------
-
-
 def configure_runtime(runtime_cfg: Dict) -> Tuple[Dict, bool]:
     changed_device = False
     
@@ -29,9 +23,8 @@ def configure_runtime(runtime_cfg: Dict) -> Tuple[Dict, bool]:
     runtime_cfg["device"] = device.type
     
     return runtime_cfg, changed_device
-        
 
-def to_device(device: torch.device, batch: Dict):
+def to_device(device: torch.device, batch: Dict) -> Dict:
     out = {}
     for k, v in batch.items():
         if isinstance(v, torch.Tensor):
@@ -40,13 +33,7 @@ def to_device(device: torch.device, batch: Dict):
             out[k] = v
     return out
 
-
-# ---------------------------------------------------------------------------
-# I/O Utilities
-# ---------------------------------------------------------------------------
-
-
-def open_selection_writer(xp: XP, epoch: int):
+def open_selection_writer(xp: XP, epoch: int) -> TextIO:
     out_dir = xp.folder / "selections"
     out_dir.mkdir(exist_ok=True)
     path = out_dir / f"eval_epoch_{epoch:03d}.json"
@@ -54,10 +41,13 @@ def open_selection_writer(xp: XP, epoch: int):
 
 
 def save_final_plots(
-    counts_pred_history, counts_gold_history, 
-    loss_history,
-    labels_present, logger, xp
-):
+    counts_pred_history: Sequence["Counts"],
+    counts_gold_history: Sequence["Counts"],
+    loss_history: list,
+    labels_present: bool,
+    logger: logging.Logger,
+    xp: XP,
+) -> None:
     fig, axs = plt.subplots(2, 1, figsize=(16, 16))
     axs = axs.flatten()
 
@@ -140,7 +130,12 @@ def save_final_plots(
     if labels_present:
         full_conf_matrix(logger, counts_gold_history, counts_pred_history, labels_present)
 
-def full_conf_matrix(logger, counts_gold_history, counts_pred_history, labels_present):
+def full_conf_matrix(
+    logger: logging.Logger,
+    counts_gold_history: Sequence["Counts"],
+    counts_pred_history: Sequence["Counts"],
+    labels_present: bool,
+) -> None:
     if not labels_present:
         return
 
@@ -170,7 +165,7 @@ class TqdmLoggingHandler(logging.Handler):
             msg = self.format(record)
             tqdm.write(msg)
             sys.stdout.flush()
-        except Exception:  # pragma: no cover - logging fallback
+        except Exception:
             self.handleError(record)
 
 
@@ -216,7 +211,7 @@ def dict_to_table(
     return make_table(fields, rows)
 
 
-def format_dict(d, new_liners=None):
+def format_dict(d: Mapping[str, int | float | str], new_liners: set[str] | None = None) -> str:
     extra_newline_after = new_liners or set()
     lines = []
 
@@ -231,39 +226,21 @@ def format_dict(d, new_liners=None):
 
 
 def tkns_to_words(
-    gates: torch.Tensor,          # [B, T]
-    attn_mask: torch.Tensor,      # [B, T]
-    word_ids: torch.Tensor,       # [B, T], -1 for invalid
-    labels: list[list[str]],      # [B, T], duplicated per word
+    gates: torch.Tensor,
+    attn_mask: torch.Tensor,
+    word_ids: torch.Tensor,
+    labels: list[list[str]],
     threshold: float = 0.0,
-):
-    """
-    Word-level OR aggregation.
-
-    Returns:
-      word_pred: BoolTensor [B, W]   (selected words)
-      word_attn: BoolTensor [B, W]   (valid words)
-      word_labels: list[list[str]]  (one label per word, left-to-right)
-    """
+) -> tuple[torch.Tensor, torch.Tensor, list[list[str]]]:
     device = gates.device
     B, T = gates.shape
-
-    # Binary subword selection, masked by attention
-    sel = (gates > threshold) & attn_mask.bool()   # [B, T]
-
-    # Number of words in batch (max wid + 1)
+    sel = (gates > threshold) & attn_mask.bool()
     W = int(word_ids.max().item()) + 1
-
-    # One-hot word assignment: [B, T, W]
     word_onehot = torch.zeros(B, T, W, device=device, dtype=torch.bool)
     valid = word_ids >= 0
     word_onehot[valid] = F.one_hot(word_ids[valid], num_classes=W).bool()
-
-    # OR aggregation (max over subwords)
-    word_pred = (sel.unsqueeze(-1) & word_onehot).any(dim=1)        # [B, W]
-    word_attn = (attn_mask.bool().unsqueeze(-1) & word_onehot).any(dim=1)  # [B, W]
-
-    # ---- labels: extracted once per word (Python, ordered) ----
+    word_pred = (sel.unsqueeze(-1) & word_onehot).any(dim=1)
+    word_attn = (attn_mask.bool().unsqueeze(-1) & word_onehot).any(dim=1)
     word_labels = []
 
     for b in range(B):
@@ -274,7 +251,6 @@ def tkns_to_words(
             if wid not in label_by_wid:
                 label_by_wid[wid] = labels[b][t]
 
-        # ensure left-to-right order
         wids_sorted = sorted(label_by_wid.keys())
         word_labels.append([label_by_wid[wid] for wid in wids_sorted])
 

@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 import argparse, json, torch, sys, torch.nn.functional as F
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, DictConfig
+from transformers import PreTrainedTokenizerBase
 from pathlib import Path
 from tqdm import tqdm
 from torch.utils.data import DataLoader
+from datasets import Dataset
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -19,7 +19,7 @@ FRACS = (0.1, 0.3, 0.5)
 ENCODERS = ("sbert", "e5", "bge", "llm")
 
 
-def build_data_cfg(args, family):
+def build_data_cfg(args: argparse.Namespace, family: str) -> tuple[DictConfig, DictConfig]:
     return OmegaConf.create({
         "dataset": args.dataset,
         "subset": 1.0,
@@ -40,7 +40,11 @@ def build_data_cfg(args, family):
     })
 
 
-def selectable_masks(ids, attn, tokenizer):
+def selectable_masks(
+    ids: torch.Tensor,
+    attn: torch.Tensor,
+    tokenizer: PreTrainedTokenizerBase,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     special_ids = [
         i for i in (
             tokenizer.cls_token_id,
@@ -59,7 +63,11 @@ def selectable_masks(ids, attn, tokenizer):
     return selectable, valid & is_special, selectable.sum(1)
 
 
-def build_dataloader(args, cfg, tokenizer):
+def build_dataloader(
+    args: argparse.Namespace,
+    cfg: DictConfig,
+    tokenizer: PreTrainedTokenizerBase,
+) -> tuple[DataLoader, Dataset]:
     name = canonical_name(cfg.dataset)
     text_field = TEXT_FIELD.get(name, "tokens")
     ds = resolve_dataset(name, text_field, config=cfg.get("config"))
@@ -86,12 +94,7 @@ def build_dataloader(args, cfg, tokenizer):
         pin_memory=(args.device == "cuda"),
     ), split
 
-
-# -------------------------
-# main
-# -------------------------
-
-def main():
+def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--dataset", default="mr")
     p.add_argument("--split", default="train")

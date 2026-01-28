@@ -1,33 +1,8 @@
-"""Run simple override sweeps defined in `grid.yaml`.
-
-The YAML file must expose two top-level keys:
-
-```
-baseline:
-  - data.train.subset=0.1
-  - train.epochs=5
-
-sweep:
-  - - model.loss.l_s=0.01
-    - model.loss.l_tv=5.0
-  - - model.loss.l_s=0.05
-    - model.loss.l_tv=2.0
-```
-
-Each list under `sweep` is appended to the baseline overrides and executed
-once via `dora run`. The script prints a compact summary of
-successes/failures and the run signatures for each sweep setting. You can
-also call `--combine-plots` to build a single grid PNG from existing
-`outputs/plots/<sig>/rates_cath.png` files using `.argv.json` as titles.
-"""
-
-
 import subprocess, yaml
 from datetime import datetime
 from pathlib import Path
 
 
-import yaml
 from tabulate import tabulate
 from tqdm import tqdm
 
@@ -36,7 +11,7 @@ CONFIG_PATH = Path("./utils/grid.yaml")
 RUNS_DIR = Path("../outputs/grids")
 
 
-def load_config(path: Path):
+def load_config(path: Path) -> tuple[list[str], list[list[str]]]:
     if not path.exists():
         raise FileNotFoundError(f"Config file not found: {path}")
     with path.open("r", encoding="utf-8") as fh:
@@ -48,7 +23,7 @@ def load_config(path: Path):
     return baseline, sweep
 
 
-def run_and_capture_signature(cmd, pbar):
+def run_and_capture_signature(cmd: list[str], pbar: tqdm) -> str:
     signature = None
     process = subprocess.Popen(
         cmd,
@@ -72,7 +47,7 @@ def run_and_capture_signature(cmd, pbar):
     return signature
 
 
-def main():
+def main() -> None:
     try:
         baseline, sweep = load_config(CONFIG_PATH)
     except (FileNotFoundError, ValueError) as exc:

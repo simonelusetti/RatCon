@@ -89,13 +89,6 @@ class Counts(dict):
         return result
     
     def confusion_with(self, pred: Counts, positive_label: str | None = None) -> tuple[int, int, int, int, str]:
-        """
-        Compute confusion matrix assuming:
-        - self = gold Counts
-        - pred = predicted Counts
-        - binary labels only
-        """
-
         if not isinstance(pred, Counts):
             raise ValueError("pred must be a Counts instance")
 
@@ -109,9 +102,7 @@ class Counts(dict):
 
         labels = list(labels)
 
-        # infer positive label if not provided
         if positive_label is None:
-            # common conventions
             for candidate in (1, "1", "True", "true", "POS", "pos", "positive"):
                 if candidate in labels:
                     positive_label = candidate
@@ -127,15 +118,12 @@ class Counts(dict):
 
         negative_label = labels[0] if labels[1] == positive_label else labels[1]
 
-        # gold counts
         gold_pos = self.data.get(positive_label, 0)
         gold_neg = self.data.get(negative_label, 0)
 
-        # predicted counts
         pred_pos = pred.data.get(positive_label, 0)
         pred_neg = pred.data.get(negative_label, 0)
 
-        # intersections (these are the key quantities)
         TP = min(gold_pos, pred_pos)
         TN = min(gold_neg, pred_neg)
 

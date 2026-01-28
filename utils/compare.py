@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse, json, math
 from collections import defaultdict
 from pathlib import Path
@@ -7,25 +5,16 @@ from typing import Tuple, List, Dict
 
 
 XPS_DIR = Path("./outputs/xps")
-#SIGNATURES = {"bb5979a9", "97d170e1", "0d489b81"}
 SIGNATURES = {"9c65a034","3f33fce7","e6376605"}
 REL_FILE = Path("selections/eval_epoch_001.json")
 
-
-# ----------------------------
-# Data loading
-# ----------------------------
 
 def load_selections(path: Path) -> Tuple[List[List[str]], List[List[float]]]:
     obj = json.loads(path.read_text(encoding="utf-8"))
     return obj["tokens"], obj["selected"]
 
 
-# ----------------------------
-# Statistics helpers
-# ----------------------------
-
-def aggregate_counts(all_tokens, all_selected):
+def aggregate_counts(all_tokens: List[List[str]], all_selected: List[List[float]]) -> tuple[dict[str, int], dict[str, float], int, float]:
     n, k, N, K = defaultdict(int), defaultdict(int), 0, 0
 
     for toks, sels in zip(all_tokens, all_selected):
@@ -38,7 +27,10 @@ def aggregate_counts(all_tokens, all_selected):
     return n, k, N, K
 
 
-def weighted_l1_rate_drift(statsA, statsB) -> float:
+def weighted_l1_rate_drift(
+    statsA: tuple[dict[str, int], dict[str, float], int, float],
+    statsB: tuple[dict[str, int], dict[str, float], int, float],
+) -> float:
     nA, kA, _, _ = statsA
     nB, kB, _, _ = statsB
 
@@ -60,7 +52,10 @@ def weighted_l1_rate_drift(statsA, statsB) -> float:
     return drift
 
 
-def js_distance_selected_mass(statsA, statsB) -> float:
+def js_distance_selected_mass(
+    statsA: tuple[dict[str, int], dict[str, float], int, float],
+    statsB: tuple[dict[str, int], dict[str, float], int, float],
+) -> float:
     _, kA, _, KA = statsA
     _, kB, _, KB = statsB
 
@@ -68,7 +63,7 @@ def js_distance_selected_mass(statsA, statsB) -> float:
     V = max(1, len(vocab))
     alpha = 1e-8
 
-    def q(counter, totalK):
+    def q(counter: dict[str, float], totalK: float) -> dict[str, float]:
         denom = totalK + alpha * V
         return {t: (counter.get(t, 0) + alpha) / denom for t in vocab}
 
@@ -76,18 +71,14 @@ def js_distance_selected_mass(statsA, statsB) -> float:
     qB = q(kB, KB)
     m = {t: 0.5 * (qA[t] + qB[t]) for t in vocab}
 
-    def kl(p, qd):
+    def kl(p: dict[str, float], qd: dict[str, float]) -> float:
         return sum(p[t] * math.log(p[t] / qd[t]) for t in vocab)
 
     js = 0.5 * kl(qA, m) + 0.5 * kl(qB, m)
     return math.sqrt(max(js, 0.0))
 
 
-# ----------------------------
-# Sentence-wise averaging
-# ----------------------------
-
-def average_sentence_metrics(pathA: Path, pathB: Path):
+def average_sentence_metrics(pathA: Path, pathB: Path) -> dict[str, float | int]:
     tokA, selA = load_selections(pathA)
     tokB, selB = load_selections(pathB)
 
@@ -100,7 +91,6 @@ def average_sentence_metrics(pathA: Path, pathB: Path):
     for tA, sA, tB, sB in zip(tokA, selA, tokB, selB):
         assert tA == tB, "mismatch in the base tokens"
         
-        # skip empty / degenerate samples
         if not tA or not tB:
             continue
 
@@ -110,17 +100,11 @@ def average_sentence_metrics(pathA: Path, pathB: Path):
         wl1 = weighted_l1_rate_drift(statsA, statsB)
         jsd = js_distance_selected_mass(statsA, statsB)
 
-        # sentence-length weighting (recommended)
         w = len(tA)
 
         wl1_sum += w * wl1
         jsd_sum += w * jsd
         weight_sum += w
-
-        # --- If you want UNWEIGHTED averaging, use instead:
-        # wl1_sum += wl1
-        # jsd_sum += jsd
-        # weight_sum += 1
 
     return {
         "avg_weighted_l1": wl1_sum / max(1.0, weight_sum),
@@ -128,10 +112,6 @@ def average_sentence_metrics(pathA: Path, pathB: Path):
         "num_samples": len(tokA),
     }
 
-
-# ----------------------------
-# Pairwise comparison
-# ----------------------------
 
 def compare_pair(pathA: Path, pathB: Path) -> str:
     avg = average_sentence_metrics(pathA, pathB)
@@ -143,11 +123,7 @@ def compare_pair(pathA: Path, pathB: Path) -> str:
     )
 
 
-# ----------------------------
-# Main
-# ----------------------------
-
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser(
         description="Sentence-wise averaged comparison of token selection behavior."
     )

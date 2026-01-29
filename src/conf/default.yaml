@@ -40,6 +40,7 @@ runtime:
   eval:
     short_log: false
     log_examples: 0
+    hard: true
 
 dora:
   exclude:

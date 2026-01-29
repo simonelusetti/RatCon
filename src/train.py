@@ -20,7 +20,6 @@ from .utils import (
     open_selection_writer,
     to_device,
     save_final_plots,
-    tkns_to_words,
     dict_to_table,
 )
 
@@ -32,28 +31,28 @@ from .utils import (
 def compute_losses(
     ids: torch.Tensor,
     attn: torch.Tensor,
-    g: torch.Tensor,
     z: torch.Tensor,
     sent_encoder: SentenceEncoder,
-    loss_cfg: DictConfig,
-) -> tuple[dict[str, float], torch.Tensor, torch.Tensor]:
-
-    assert not torch.isnan(ids).any(), "Input IDs contain NaNs"
-    assert not torch.isnan(attn).any(), "Attention mask contains NaNs"
-    assert not torch.isnan(g).any(), "Gates contain NaNs"
-    assert not torch.isnan(z).any(), "Soft selections contain NaNs"
-
-    gates = g if loss_cfg.hard else z
+    reg_term: torch.Tensor,
+) -> tuple[dict[str, float], torch.Tensor]:
 
     if isinstance(sent_encoder, FrozenLLMEncoder):
-        pred_rep = sent_encoder.encode(ids, attn * gates, original_attn=attn)
+        pred_rep = sent_encoder.encode(ids, attn * z, original_attn=attn)
     else:
-        pred_rep = sent_encoder.encode(ids, attn * gates)
+        pred_rep = sent_encoder.encode(ids, attn * z)
 
     full_rep = sent_encoder.encode(ids, attn)
-    loss = recon_loss(pred_rep, full_rep)
 
-    return {"loss": float(loss.detach())}, loss, gates
+    recon = recon_loss(pred_rep, full_rep)
+    total = recon + reg_term
+
+    logs = {
+        "recon": recon.item(),
+        "reg": reg_term.item(),
+        "total": total.item(),
+    }
+
+    return logs, total
 
 
 # --------------------------------------------------
@@ -72,7 +71,7 @@ class SelectorTrainer:
         xp: XP,
     ) -> None:
 
-        self.loss_cfg = cfg.model.loss
+        self.cfg = cfg
         self.logger = logger
         self.train_dl = train_dl
         self.test_dl = test_dl
@@ -95,11 +94,7 @@ class SelectorTrainer:
                 first["attn_mask"].to(self.device),
             ).shape[-1]
 
-        self.model = RationaleSelectorModel(
-            model_dim,
-            rho=cfg.model.loss.s_target,
-            tau=cfg.model.loss.tau,
-        ).to(self.device)
+        self.model = RationaleSelectorModel(model_dim).to(self.device)
 
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
@@ -134,22 +129,6 @@ class SelectorTrainer:
             _use_new_zipfile_serialization=False,
         )
 
-        if not self.short_log:
-            self.logger.info(
-                "Saved checkpoint to %s",
-                os.path.abspath(self.checkpoint_path),
-            )
-
-
-    def load_checkpoint(self) -> None:
-        state = torch.load(self.checkpoint_path, map_location=self.device)
-        self.model.load_state_dict(state["model"], strict=False)
-        self.optimizer.load_state_dict(state["optimizer"])
-        self.logger.info(
-            "Loaded checkpoint from %s",
-            os.path.abspath(self.checkpoint_path),
-        )
-
 
     # --------------------------------------------------
     # Evaluation
@@ -163,7 +142,7 @@ class SelectorTrainer:
         total_tokens = 0
         total_selected = 0
         examples_count = 0
-        total_losses = {"loss": 0.0}
+        total_losses = {"recon": 0.0, "reg": 0.0, "total": 0.0}
 
         all_tokens, all_selected, all_gates = [], [], []
         examples_str = []
@@ -187,17 +166,17 @@ class SelectorTrainer:
             bs = ids.size(0)
 
             tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
-            g, z = self.model(tkns_embd, attn, deterministic=True)
-
-            losses, _, gates = compute_losses(
-                ids, attn, g, z, self.sent_encoder, self.loss_cfg
+            z, g, reg_term = self.model(tkns_embd, attn)
+            logs, _ = compute_losses(
+                ids, attn, g, self.sent_encoder, reg_term
             )
 
             examples_count += bs
-            total_losses["loss"] += losses["loss"]
+            for k in total_losses:
+                total_losses[k] += logs[k]
 
             total_tokens += attn.sum().item()
-            total_selected += (gates * attn).sum().item()
+            total_selected += (g * attn).sum().item()
 
             if self.labels_present:
                 labels = batch[self.label_key]
@@ -228,7 +207,9 @@ class SelectorTrainer:
                     sel_tokens = [t for t, s in zip(toks, selected) if s]
                     examples_str.append((toks, sel_tokens))
 
-        total_losses["loss"] /= max(examples_count, 1)
+        for k in total_losses:
+            total_losses[k] /= max(examples_count, 1)
+
         self.loss_history.append(total_losses)
 
         return (
@@ -240,10 +221,7 @@ class SelectorTrainer:
             {"tokens": all_tokens, "selected": all_selected, "gates": all_gates},
             total_losses,
         )
-
-
-    # --------------------------------------------------
-
+        
     @torch.no_grad()
     def log_eval(self, epoch: int = -1) -> None:
         (
@@ -282,7 +260,6 @@ class SelectorTrainer:
         if self.labels_present:
             self.logger.info("Eval labels:\n%s", (counts_pred / counts_gold).to_table())
 
-
     # --------------------------------------------------
     # Training
     # --------------------------------------------------
@@ -300,7 +277,7 @@ class SelectorTrainer:
 
         for epoch in epoch_bar:
             self.model.train()
-            total_losses = {"loss": 0.0}
+            total_losses = {"recon": 0.0, "reg": 0.0, "total": 0.0}
             examples_count = 0
 
             for batch in tqdm(
@@ -318,20 +295,21 @@ class SelectorTrainer:
                 attn = batch["attn_mask"]
 
                 tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
-                g, z = self.model(tkns_embd, attn, deterministic=False)
-
-                losses, loss, _ = compute_losses(
-                    ids, attn, g, z, self.sent_encoder, self.loss_cfg
+                z, g, reg_term = self.model(tkns_embd, attn)
+                logs, loss = compute_losses(
+                    ids, attn, g, self.sent_encoder, reg_term
                 )
-
+                
                 loss.backward()
                 self.optimizer.step()
 
                 bs = ids.size(0)
                 examples_count += bs
-                total_losses["loss"] += losses["loss"]
+                for k in total_losses:
+                    total_losses[k] += logs[k]
 
-            total_losses["loss"] /= max(examples_count, 1)
+            for k in total_losses:
+                total_losses[k] /= max(examples_count, 1)
 
             if not self.short_log:
                 self.logger.info(f"Epoch {epoch + 1}/{self.epochs}")
@@ -348,7 +326,6 @@ class SelectorTrainer:
             self.logger,
             self.xp,
         )
-
 
 # --------------------------------------------------
 # Main
@@ -379,7 +356,6 @@ def main(cfg: DictConfig) -> None:
     )
 
     if cfg.train.no_train:
-        trainer.load_checkpoint()
         trainer.log_eval()
     else:
         trainer.train()

@@ -209,13 +209,13 @@ def build_sentence_encoder(
     tokenizer = resolve_tokenizer(family)
 
     if family == "sbert":
-        encoder = FrozenSBERT(encoder_name, normalize=True, device=device)
+        encoder = FrozenSBERT(encoder_name, normalize=False, device=device)
     elif family in {"e5", "retrieval", "gte"}:
-        encoder = FrozenE5(encoder_name, normalize=True)
+        encoder = FrozenE5(encoder_name, normalize=False)
     elif family in {"bge", "late"}:
-        encoder = FrozenBGE(encoder_name, normalize=True)
+        encoder = FrozenBGE(encoder_name, normalize=False)
     elif family == "llm":
-        encoder = FrozenLLMEncoder(encoder_name, normalize=True)
+        encoder = FrozenLLMEncoder(encoder_name, normalize=False)
     else:
         raise ValueError(f"Unknown encoder family: {family}")
 

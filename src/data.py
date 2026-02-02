@@ -184,7 +184,12 @@ def resolve_dataset(
         ds = build_twitter()
     elif name == "shape":
         assert config is not None and "shape" in config, "Shape dataset requires 'shape' config."
-        ds = build_shape(config["shape"])
+        original_name = canonical_name(config["shape"]["original"])
+        rate = config["shape"]["rate"]
+        if rate > 1.0:
+            rate = float(rate) / 100.0
+        original_ds = resolve_dataset(original_name, text_field=config["shape"].get("text_field", "tokens"))
+        ds = build_shape(original_ds, rate=rate)
     elif name == "ud":
         ds = build_ud()
     elif name in {"parasci", "parasci_concat"}:

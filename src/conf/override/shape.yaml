@@ -1,6 +1,8 @@
+# @package _global_
 data:
   dataset: "shape"
   config:
     shape:
-      original: "parasci"
+      original: "cnn"
+      text_field: "highlights"
       rate: 0.5

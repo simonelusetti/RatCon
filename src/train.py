@@ -1,10 +1,14 @@
 import os
+import sys
 import json
 import torch
+import logging
 
 from logging import Logger
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
+
 from dora import get_xp, hydra_main, XP
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
@@ -22,6 +26,50 @@ from .utils import (
     save_final_plots,
     dict_to_table,
 )
+
+
+# --------------------------------------------------
+# Multi-process safety (ONLY rank 0 prints bars/logs)
+# --------------------------------------------------
+
+def _env_rank() -> int | None:
+    """Try to infer process rank from common environment variables."""
+    keys = [
+        "RANK",
+        "LOCAL_RANK",
+        "SLURM_PROCID",
+        "PMI_RANK",
+        "OMPI_COMM_WORLD_RANK",
+        "MV2_COMM_WORLD_RANK",
+        "DORA_RANK",
+    ]
+    for k in keys:
+        v = os.environ.get(k)
+        if v is None:
+            continue
+        try:
+            return int(v)
+        except ValueError:
+            continue
+    return None
+
+
+def is_main_process() -> bool:
+    r = _env_rank()
+    return (r is None) or (r == 0)
+
+
+def should_disable_tqdm(short_log: bool) -> bool:
+    # If the user asked for short_log, follow it.
+    if short_log:
+        return True
+    # If we aren't the main process, NEVER print progress bars.
+    if not is_main_process():
+        return True
+    # If tqdm can't do cursor movement (not a TTY), don't spam lines.
+    if not sys.stderr.isatty():
+        return True
+    return False
 
 
 # --------------------------------------------------
@@ -81,6 +129,9 @@ class SelectorTrainer:
         self.examples = cfg.runtime.eval.log_examples
         self.device = cfg.runtime.device
 
+        # Robust tqdm enable/disable
+        self._tqdm_disabled = should_disable_tqdm(self.short_log)
+
         self.xp = xp
         self.checkpoint_path = "model.pth"
 
@@ -94,7 +145,7 @@ class SelectorTrainer:
                 first["attn_mask"].to(self.device),
             ).shape[-1]
 
-        self.model = RationaleSelectorModel(model_dim).to(self.device)
+        self.model = RationaleSelectorModel(model_dim, hard_type=cfg.model.selector.hard_type).to(self.device)
 
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
@@ -115,7 +166,6 @@ class SelectorTrainer:
         self.total_selected_history = []
         self.loss_history = []
 
-
     # --------------------------------------------------
 
     def save_checkpoint(self) -> None:
@@ -128,7 +178,6 @@ class SelectorTrainer:
             self.checkpoint_path,
             _use_new_zipfile_serialization=False,
         )
-
 
     # --------------------------------------------------
     # Evaluation
@@ -154,10 +203,10 @@ class SelectorTrainer:
         for batch in tqdm(
             self.test_dl,
             desc="Eval",
-            position=2,
             leave=False,
             dynamic_ncols=True,
-            disable=self.short_log,
+            disable=self._tqdm_disabled,
+            file=sys.stderr,
         ):
             batch = to_device(self.device, batch)
 
@@ -167,9 +216,7 @@ class SelectorTrainer:
 
             tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
             z, g, reg_term = self.model(tkns_embd, attn)
-            logs, _ = compute_losses(
-                ids, attn, g, self.sent_encoder, reg_term
-            )
+            logs, _ = compute_losses(ids, attn, g, self.sent_encoder, reg_term)
 
             examples_count += bs
             for k in total_losses:
@@ -221,7 +268,7 @@ class SelectorTrainer:
             {"tokens": all_tokens, "selected": all_selected, "gates": all_gates},
             total_losses,
         )
-        
+
     @torch.no_grad()
     def log_eval(self, epoch: int = -1) -> None:
         (
@@ -234,7 +281,8 @@ class SelectorTrainer:
             losses,
         ) = self.evaluate(self.examples)
 
-        if epoch >= 0:
+        # Only main process writes artifacts
+        if is_main_process() and epoch >= 0:
             writer = open_selection_writer(self.xp, epoch)
             writer.write(json.dumps(record) + "\n")
             writer.close()
@@ -246,7 +294,8 @@ class SelectorTrainer:
             self.counts_gold_history.append(counts_gold)
             self.counts_pred_history.append(counts_pred)
 
-        if self.short_log:
+        # Only main process logs info
+        if (not is_main_process()) or self.short_log:
             return
 
         self.logger.info(f"Selection rate: {total_selected / max(total_tokens, 1)}")
@@ -265,76 +314,97 @@ class SelectorTrainer:
     # --------------------------------------------------
 
     def train(self) -> None:
+        # If bars are disabled anyway, no need for redirect
+        ctx = logging_redirect_tqdm() if not self._tqdm_disabled else nullcontext()
 
-        epoch_bar = tqdm(
-            range(self.epochs),
-            desc="Training",
-            position=0,
-            leave=True,
-            dynamic_ncols=True,
-            disable=not self.short_log,
-        )
-
-        for epoch in epoch_bar:
-            self.model.train()
-            total_losses = {"recon": 0.0, "reg": 0.0, "total": 0.0}
-            examples_count = 0
-
-            for batch in tqdm(
-                self.train_dl,
-                desc=f"Training Epoch {epoch + 1}",
-                position=1,
-                leave=False,
+        with ctx:
+            epoch_bar = tqdm(
+                range(self.epochs),
+                desc="Training",
+                leave=True,
                 dynamic_ncols=True,
-                disable=self.short_log,
-            ):
-                self.optimizer.zero_grad(set_to_none=True)
+                disable=self._tqdm_disabled,
+                file=sys.stderr,
+            )
 
-                batch = to_device(self.device, batch)
-                ids = batch["ids"]
-                attn = batch["attn_mask"]
+            for epoch in epoch_bar:
+                self.model.train()
+                total_losses = {"recon": 0.0, "reg": 0.0, "total": 0.0}
+                examples_count = 0
 
-                tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
-                z, g, reg_term = self.model(tkns_embd, attn)
-                logs, loss = compute_losses(
-                    ids, attn, g, self.sent_encoder, reg_term
-                )
-                
-                loss.backward()
-                self.optimizer.step()
+                for batch in tqdm(
+                    self.train_dl,
+                    desc=f"Training Epoch {epoch + 1}",
+                    leave=False,
+                    dynamic_ncols=True,
+                    disable=self._tqdm_disabled,
+                    file=sys.stderr,
+                ):
+                    self.optimizer.zero_grad(set_to_none=True)
 
-                bs = ids.size(0)
-                examples_count += bs
+                    batch = to_device(self.device, batch)
+                    ids = batch["ids"]
+                    attn = batch["attn_mask"]
+
+                    tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
+                    z, g, reg_term = self.model(tkns_embd, attn)
+                    logs, loss = compute_losses(ids, attn, g, self.sent_encoder, reg_term)
+
+                    loss.backward()
+                    self.optimizer.step()
+
+                    bs = ids.size(0)
+                    examples_count += bs
+                    for k in total_losses:
+                        total_losses[k] += logs[k]
+
                 for k in total_losses:
-                    total_losses[k] += logs[k]
+                    total_losses[k] /= max(examples_count, 1)
 
-            for k in total_losses:
-                total_losses[k] /= max(examples_count, 1)
+                if is_main_process() and (not self.short_log):
+                    self.logger.info(f"Epoch {epoch + 1}/{self.epochs}")
+                    self.logger.info(f"\n{dict_to_table(total_losses)}")
 
-            if not self.short_log:
-                self.logger.info(f"Epoch {epoch + 1}/{self.epochs}")
-                self.logger.info(f"\n{dict_to_table(total_losses)}")
+                self.log_eval(epoch + 1)
 
-            self.log_eval(epoch + 1)
-            self.save_checkpoint()
+                # Only main process should checkpoint (avoid races / corruption)
+                if is_main_process():
+                    self.save_checkpoint()
 
-        save_final_plots(
-            self.counts_pred_history,
-            self.counts_gold_history,
-            self.loss_history,
-            self.labels_present,
-            self.logger,
-            self.xp,
-        )
+        # Only main process makes plots
+        if is_main_process():
+            save_final_plots(
+                self.counts_pred_history,
+                self.counts_gold_history,
+                self.loss_history,
+                self.labels_present,
+                self.logger,
+                self.xp,
+            )
+
 
 # --------------------------------------------------
 # Main
 # --------------------------------------------------
 
+# Python 3.7+ friendly nullcontext replacement if needed
+try:
+    from contextlib import nullcontext
+except ImportError:
+    class nullcontext:
+        def __enter__(self): return None
+        def __exit__(self, *args): return False
+
+
 @hydra_main(config_path="conf", config_name="default", version_base="1.1")
 def main(cfg: DictConfig) -> None:
     logger = get_logger()
     xp = get_xp()
+
+    # Silence non-main process logging (prevents clutter + tqdm corruption)
+    if not is_main_process():
+        logger.setLevel(logging.ERROR)
+        logger.propagate = False
 
     logger.info(f"Exp signature: {xp.sig}")
     logger.info(repr(cfg))
@@ -351,9 +421,7 @@ def main(cfg: DictConfig) -> None:
         device=cfg.runtime.device,
     )
 
-    trainer = SelectorTrainer(
-        cfg, train_dl, test_dl, encoder, tokenizer, logger, xp
-    )
+    trainer = SelectorTrainer(cfg, train_dl, test_dl, encoder, tokenizer, logger, xp)
 
     if cfg.train.no_train:
         trainer.log_eval()

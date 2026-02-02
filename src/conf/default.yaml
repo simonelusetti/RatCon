@@ -3,6 +3,8 @@ defaults:
   - override: default
 
 model:
+  selector:
+    hard_type: "probabilistic_top_k"
   loss:
     l_e: 1.0
     hard: false
@@ -29,6 +31,7 @@ train:
   no_train: false
 
 runtime:
+  grid: false
   threads: 32
   interop_threads: 8
   device: "cpu"

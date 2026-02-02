@@ -426,29 +426,13 @@ def _apply_shape(example: dict, rate: float) -> dict:
     example["labels"] = changed
     return example
 
-def build_shape(cfg: dict, tokenizer: AutoTokenizer | None = None) -> DatasetDict:
-    random.seed(cfg.get("seed", 42))
-
-    original = cfg["original"]
-    mask_rate = cfg["rate"]
-    if mask_rate > 1.0:
-        mask_rate = mask_rate = float(cfg["rate"]) / 100.0
-    
+def build_shape(original: DatasetDict, rate: float, tokenizer: AutoTokenizer | None = None) -> DatasetDict:    
     if tokenizer is None:
         tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
-    
-    ds = load_from_disk(to_absolute_path(f"./data/cache/{original}"))
-    ds = ds.map(
-        lambda x: {
-            "tokens": tokenizer.convert_tokens_to_string(x["tokens"])
-            .replace("[CLS] ", "")
-            .replace(" [SEP]", "")
-        }
-    )
-    ds = ds.map(lambda ex: _apply_shape(ex, mask_rate))
-    ds = ds["train"].train_test_split(test_size=0.2, seed=42)
+
+    original = original.map(lambda ex: _apply_shape(ex, rate))
                 
-    return ds
+    return original["train"].train_test_split(test_size=0.2, seed=42)
 
 def extract_spans(labels: List[str]) -> List[Tuple[int, int, str]]:
     spans, i, n = [], 0, len(labels)

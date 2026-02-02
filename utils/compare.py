@@ -5,8 +5,8 @@ from typing import Tuple, List, Dict
 
 
 XPS_DIR = Path("./outputs/xps")
-SIGNATURES = {"9c65a034","3f33fce7","e6376605"}
-REL_FILE = Path("selections/eval_epoch_001.json")
+SIGNATURES = {"17e9488d","db0ae496"}
+REL_FILE = Path("selections/eval_epoch_030.json")
 
 
 def load_selections(path: Path) -> Tuple[List[List[str]], List[List[float]]]:

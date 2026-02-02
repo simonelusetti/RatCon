@@ -1,4 +1,4 @@
-baseline: ["model.loss.s_target=0.1", "model.loss.hard=false"]
+baseline: ["runtime.grid=true"]
 sweep:
-  - []
-  - ["data.dataset=conll03"]
+  - ["data.dataset=conll00"]
+  - ["data.dataset=wikiann"]

@@ -20,11 +20,64 @@ class SelectorMLP(nn.Module):
         return self.fc2(x).squeeze(-1)
 
 
+# -----------------------------
+# HardKuma (previous behaviour)
+# -----------------------------
 def kuma_sample(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     u = torch.rand_like(a).clamp(min=eps, max=1 - eps)
     return (1.0 - (1.0 - u).pow(1.0 / b)).pow(1.0 / a)
 
 
+# -----------------------------
+# Deterministic Top-K (previous)
+# -----------------------------
+def top_k(z: torch.Tensor, attn: torch.Tensor, rho: float) -> torch.Tensor:
+    z = z * attn
+    T = attn.sum(dim=1).clamp(min=1).long()
+    z_hard = torch.zeros_like(z)
+
+    for i in range(z.size(0)):
+        k = max(1, int(rho * T[i].item()))
+        _, idx = z[i].topk(k)
+        z_hard[i, idx] = 1.0
+
+    return z_hard * attn
+
+
+# -----------------------------
+# Gumbel utilities
+# -----------------------------
+def sample_gumbel(shape, device, eps: float = 1e-6) -> torch.Tensor:
+    u = torch.rand(shape, device=device)
+    return -torch.log(-torch.log(u + eps) + eps)
+
+
+def probabilistic_top_k(
+    scores: torch.Tensor,
+    attn: torch.Tensor,
+    rho: float,
+) -> torch.Tensor:
+
+    scores = scores * attn
+    B, T = scores.shape
+
+    gumbel = sample_gumbel(scores.shape, scores.device)
+    perturbed = scores + gumbel
+
+    z_hard = torch.zeros_like(scores)
+    T_eff = attn.sum(dim=1).long()
+
+    for i in range(B):
+        k = round(rho * T_eff[i].item())
+        _, idx = perturbed[i].topk(k)
+        z_hard[i, idx] = 1.0
+
+    return z_hard * attn
+
+
+# -----------------------------
+# Selector model
+# -----------------------------
 class RationaleSelectorModel(nn.Module):
     def __init__(
         self,
@@ -36,6 +89,8 @@ class RationaleSelectorModel(nn.Module):
         r: float = 1.1,
         coupling_k: float = 2.0,
         eps: float = 1e-6,
+        rho: float = 0.30,
+        hard_type: str = "probabilistic_top_k",
     ) -> None:
         super().__init__()
         if hidden is None:
@@ -47,12 +102,14 @@ class RationaleSelectorModel(nn.Module):
         self.r = float(r)
         self.coupling_k = float(coupling_k)
         self.eps = float(eps)
+        self.rho = float(rho)
+        self.hard_type = hard_type
 
     def forward(
         self,
         embeddings: torch.Tensor,
         attn: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
         emb = embeddings * attn.unsqueeze(-1)
         scores = self.selector(emb)
@@ -60,15 +117,27 @@ class RationaleSelectorModel(nn.Module):
 
         z = entmax15(scores / self.tau, dim=1) * attn
 
-        eff = scores + self.coupling_k * (2.0 * z - 1.0)
-        a = F.softplus(eff) + self.eps
-        b = F.softplus(-eff) + self.eps
-
-        x = kuma_sample(a, b, self.eps)
-        y = self.l + (self.r - self.l) * x
-        h = (y.clamp(0.0, 1.0) > 0.5).float() * attn
+        if self.hard_type == "hard_kuma":
+            eff = scores + self.coupling_k * (2.0 * z - 1.0)
+            a = F.softplus(eff) + self.eps
+            b = F.softplus(-eff) + self.eps
+            x = kuma_sample(a, b, self.eps)
+            y = self.l + (self.r - self.l) * x
+            h = (y.clamp(0.0, 1.0) > 0.5).float() * attn
+        elif self.hard_type == "top_k":
+            h = top_k(z, attn, rho=self.rho)
+        elif self.hard_type == "probabilistic_top_k":
+            h = probabilistic_top_k(
+                scores=scores,   # NOTE: raw scores, not z
+                attn=attn,
+            rho=self.rho,
+        ) 
+        else:
+            raise ValueError(f"Unknown hard_type: {self.hard_type}")
 
         g = h.detach() - z.detach() + z
+
+        # No regularization for now
         reg = scores.new_zeros(())
 
         return z, g, reg

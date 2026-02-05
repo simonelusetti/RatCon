@@ -145,7 +145,9 @@ class SelectorTrainer:
                 first["attn_mask"].to(self.device),
             ).shape[-1]
 
-        self.model = RationaleSelectorModel(model_dim, hard_type=cfg.model.selector.hard_type).to(self.device)
+        self.model = RationaleSelectorModel(
+            model_dim, hard_type=cfg.model.selector.hard_type, tv_weight=cfg.model.loss.l_tv
+        ).to(self.device)
 
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),

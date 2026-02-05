@@ -10,6 +10,7 @@ model:
     hard: false
     s_target: 0.3
     tau: 1.0
+    l_tv: 0.0
   optim:
     lr: 1e-3
     weight_decay: 1e-2

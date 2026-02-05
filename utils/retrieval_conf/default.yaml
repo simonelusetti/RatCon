@@ -1,7 +1,7 @@
 eval:
   split: validation
   batch_size: 128
-  checkpoint: /home/simonelusetti/RatCon/outputs/xps/17e9488d/model.pth
+  checkpoint: /home/simonelusetti/RatCon/outputs/xps/4c8c4d6c/model.pth
   random_seeds: [0,1,2,3,4]
 
 model:

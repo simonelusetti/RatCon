@@ -20,17 +20,11 @@ class SelectorMLP(nn.Module):
         return self.fc2(x).squeeze(-1)
 
 
-# -----------------------------
-# HardKuma (previous behaviour)
-# -----------------------------
 def kuma_sample(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     u = torch.rand_like(a).clamp(min=eps, max=1 - eps)
     return (1.0 - (1.0 - u).pow(1.0 / b)).pow(1.0 / a)
 
 
-# -----------------------------
-# Deterministic Top-K (previous)
-# -----------------------------
 def top_k(z: torch.Tensor, attn: torch.Tensor, rho: float) -> torch.Tensor:
     z = z * attn
     T = attn.sum(dim=1).clamp(min=1).long()
@@ -44,9 +38,6 @@ def top_k(z: torch.Tensor, attn: torch.Tensor, rho: float) -> torch.Tensor:
     return z_hard * attn
 
 
-# -----------------------------
-# Gumbel utilities
-# -----------------------------
 def sample_gumbel(shape, device, eps: float = 1e-6) -> torch.Tensor:
     u = torch.rand(shape, device=device)
     return -torch.log(-torch.log(u + eps) + eps)
@@ -69,15 +60,23 @@ def probabilistic_top_k(
 
     for i in range(B):
         k = round(rho * T_eff[i].item())
+        k = max(1, min(int(k), int(T_eff[i].item())))
         _, idx = perturbed[i].topk(k)
         z_hard[i, idx] = 1.0
 
     return z_hard * attn
 
 
-# -----------------------------
-# Selector model
-# -----------------------------
+def total_variation_1d(z: torch.Tensor, attn: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    z = z * attn
+    dz = (z[:, 1:] - z[:, :-1]).abs()
+    valid = (attn[:, 1:] * attn[:, :-1]).to(dz.dtype)
+    tv_sum = (dz * valid).sum(dim=1)
+    denom = valid.sum(dim=1).clamp(min=1.0)
+    tv = (tv_sum / denom).mean()
+    return tv
+
+
 class RationaleSelectorModel(nn.Module):
     def __init__(
         self,
@@ -91,6 +90,7 @@ class RationaleSelectorModel(nn.Module):
         eps: float = 1e-6,
         rho: float = 0.30,
         hard_type: str = "probabilistic_top_k",
+        tv_weight: float = 0.0,
     ) -> None:
         super().__init__()
         if hidden is None:
@@ -104,6 +104,7 @@ class RationaleSelectorModel(nn.Module):
         self.eps = float(eps)
         self.rho = float(rho)
         self.hard_type = hard_type
+        self.tv_weight = float(tv_weight)
 
     def forward(
         self,
@@ -128,16 +129,15 @@ class RationaleSelectorModel(nn.Module):
             h = top_k(z, attn, rho=self.rho)
         elif self.hard_type == "probabilistic_top_k":
             h = probabilistic_top_k(
-                scores=scores,   # NOTE: raw scores, not z
+                scores=scores,
                 attn=attn,
-            rho=self.rho,
-        ) 
+                rho=self.rho,
+            )
         else:
             raise ValueError(f"Unknown hard_type: {self.hard_type}")
 
         g = h.detach() - z.detach() + z
 
-        # No regularization for now
-        reg = scores.new_zeros(())
+        reg = self.tv_weight * total_variation_1d(g, attn, eps=self.eps)
 
         return z, g, reg

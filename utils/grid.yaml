@@ -1,4 +1,7 @@
-baseline: ["runtime.grid=true"]
+baseline: ["runtime.data.rebuild=true"]
 sweep:
+  - ["data.dataset=twitter"]
+  - ["data.dataset=ud"]
+  - ["data.dataset=treebank"]
   - ["data.dataset=conll00"]
-  - ["data.dataset=wikiann"]
+  - ["data.dataset=ud_pos"]

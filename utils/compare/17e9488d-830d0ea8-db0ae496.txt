@@ -1,0 +1,48 @@
+
+==========================================================================================
+PAIR: 17e9488d  vs  830d0ea8
+==========================================================================================
+Avg sentence-wise weighted L1 drift: 0.060844
+Avg sentence-wise JS distance:       0.267731
+Num samples:                         6703
+
+==========================================================================================
+PAIR: 17e9488d  vs  db0ae496
+==========================================================================================
+Avg sentence-wise weighted L1 drift: 0.062051
+Avg sentence-wise JS distance:       0.262222
+Num samples:                         6703
+
+==========================================================================================
+PAIR: 830d0ea8  vs  db0ae496
+==========================================================================================
+Avg sentence-wise weighted L1 drift: 0.066430
+Avg sentence-wise JS distance:       0.283595
+Num samples:                         6703
+
+==========================================================================================
+BASELINE: 17e9488d  vs  COMMON-TOKENS@same-rate
+==========================================================================================
+Target selection rate (model):       0.198575
+Actual selection rate (baseline):    0.198575
+Avg sentence-wise weighted L1 drift: 0.388525
+Avg sentence-wise JS distance:       0.814189
+Num samples:                         6703
+
+==========================================================================================
+BASELINE: 830d0ea8  vs  COMMON-TOKENS@same-rate
+==========================================================================================
+Target selection rate (model):       0.183948
+Actual selection rate (baseline):    0.183948
+Avg sentence-wise weighted L1 drift: 0.359123
+Avg sentence-wise JS distance:       0.812166
+Num samples:                         6703
+
+==========================================================================================
+BASELINE: db0ae496  vs  COMMON-TOKENS@same-rate
+==========================================================================================
+Target selection rate (model):       0.209597
+Actual selection rate (baseline):    0.209597
+Avg sentence-wise weighted L1 drift: 0.405788
+Avg sentence-wise JS distance:       0.809716
+Num samples:                         6703

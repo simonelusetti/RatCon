@@ -2,9 +2,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from entmax import entmax15
-from src.losses import recon_loss
-from src.sentence import FrozenLLMEncoder, SentenceEncoder
 from numpy import linspace
+
+from src.losses import recon_loss
+from src.sentence import SentenceEncoder
+
 
 class SelectorMLP(nn.Module):
     def __init__(self, d_model: int, hidden: int, dropout: float) -> None:
@@ -22,64 +24,32 @@ class SelectorMLP(nn.Module):
         return self.fc2(x).squeeze(-1)
 
 
-def kuma_sample(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    u = torch.rand_like(a).clamp(min=eps, max=1 - eps)
-    return (1.0 - (1.0 - u).pow(1.0 / b)).pow(1.0 / a)
-
-
-def top_k(z: torch.Tensor, attn: torch.Tensor, rho: float) -> torch.Tensor:
-    z = z * attn
-    T = attn.sum(dim=1).clamp(min=1).long()
-    z_hard = torch.zeros_like(z)
-
-    for i in range(z.size(0)):
-        k = max(1, int(rho * T[i].item()))
-        _, idx = z[i].topk(k)
-        z_hard[i, idx] = 1.0
-
-    return z_hard * attn
-
-
-def sample_gumbel(shape, device, eps: float = 1e-6) -> torch.Tensor:
-    u = torch.rand(shape, device=device)
-    return -torch.log(-torch.log(u + eps) + eps)
-
-
-def probabilistic_top_k(
-    scores: torch.Tensor,
+def hard_top_k_from_sorted(
+    sorted_idx: torch.Tensor,
     attn: torch.Tensor,
     rho: float,
 ) -> torch.Tensor:
-
-    scores = scores * attn
-    B, T = scores.shape
-
-    gumbel = sample_gumbel(scores.shape, scores.device)
-    perturbed = scores + gumbel
-
-    z_hard = torch.zeros_like(scores)
+    B, T = attn.shape
     T_eff = attn.sum(dim=1).long()
+    h = torch.zeros_like(attn)
 
     for i in range(B):
-        k = round(rho * T_eff[i].item())
-        k = max(1, min(int(k), int(T_eff[i].item())))
-        _, idx = perturbed[i].topk(k)
-        z_hard[i, idx] = 1.0
+        k = max(1, int(rho * T_eff[i].item()))
+        idx = sorted_idx[i, :k]
+        h[i, idx] = 1.0
 
-    return z_hard * attn
-
-
-def total_variation_1d(z: torch.Tensor, attn: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    z = z * attn
-    dz = (z[:, 1:] - z[:, :-1]).abs()
-    valid = (attn[:, 1:] * attn[:, :-1]).to(dz.dtype)
-    tv_sum = (dz * valid).sum(dim=1)
-    denom = valid.sum(dim=1).clamp(min=1.0)
-    tv = (tv_sum / denom).mean()
-    return tv
+    return h * attn
 
 
 class RationaleSelectorModel(nn.Module):
+    """
+    OPTION 2 (strict, causal)
+    Uses the NEW SentenceEncoder API:
+      - token_embeddings(...)
+      - pool(...)
+    Recomputes embeddings for every g.
+    """
+
     def __init__(
         self,
         embedding_dim: int,
@@ -103,35 +73,60 @@ class RationaleSelectorModel(nn.Module):
         ids: torch.Tensor,
         embeddings: torch.Tensor,
         attn: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-
+    ):
+        # ─────────────────────────
+        # Selector (once)
+        # ─────────────────────────
         emb = embeddings * attn.unsqueeze(-1)
         scores = self.selector(emb)
         scores = scores.masked_fill(attn == 0, -1e9)
 
         z = entmax15(scores / self.tau, dim=1) * attn
-        
-        loss_sweep = []
+
+        sorted_idx = z.argsort(dim=1, descending=True)
+
+        # ─────────────────────────
+        # Full representation (baseline)
+        # ─────────────────────────
+        with torch.no_grad():
+            full_token_emb = self.sent_encoder.token_embeddings(ids, attn)
+            full_rep = self.sent_encoder.pool(full_token_emb, attn)
+
+        # ─────────────────────────
+        # Sweep (expensive but correct)
+        # ─────────────────────────
         g_sweep = []
-        full_rep = self.sent_encoder.encode(ids, attn)
+        loss_sweep = []
+
         recon_sum = torch.zeros((), device=full_rep.device)
         start, end, steps = self.loss_cfg.sweep_range
         rhos = linspace(start, end, steps)
+
         for rho in rhos:
-            h = top_k(z, attn, rho=float(rho))
+            h = hard_top_k_from_sorted(sorted_idx, attn, rho=float(rho))
+
+            # straight-through estimator
             g = h.detach() - z.detach() + z
             g_sweep.append(g.detach().cpu())
-            if isinstance(self.sent_encoder, FrozenLLMEncoder):
-                pred_rep = self.sent_encoder.encode(ids, attn * g, original_attn=attn)
-            else:
-                pred_rep = self.sent_encoder.encode(ids, attn * g)
+
+            effective_attn = attn * g
+
+            with torch.no_grad():
+                token_emb = self.sent_encoder.token_embeddings(ids, effective_attn)
+                pred_rep = self.sent_encoder.pool(token_emb, effective_attn)
+
             l_r = recon_loss(pred_rep, full_rep)
             recon_sum = recon_sum + l_r
             loss_sweep.append(l_r.item())
-            
+
         recon_avg = recon_sum / len(rhos)
 
-        return z, g_sweep, {
-            "recon": recon_avg.item(),
-            "total": recon_avg.item(),
-        }, loss_sweep
+        return (
+            z,
+            g_sweep,
+            {
+                "recon": recon_avg.item(),
+                "total": recon_avg.item(),
+            },
+            loss_sweep,
+        )

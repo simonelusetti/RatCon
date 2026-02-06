@@ -1,10 +1,11 @@
 import logging, os, sys, json, torch, matplotlib.pyplot as plt, torch.nn.functional as F
 
 from pathlib import Path
-from typing import Dict, Iterable, Mapping, Sequence, Tuple, TextIO, TYPE_CHECKING
+from typing import Dict, Iterable, Mapping, Optional, Sequence, Tuple, TextIO, TYPE_CHECKING
 from dora import XP
 from prettytable import PrettyTable
 from tqdm import tqdm
+import numpy as np
 
 if TYPE_CHECKING:
     from .metrics import Counts
@@ -255,3 +256,77 @@ def tkns_to_words(
         word_labels.append([label_by_wid[wid] for wid in wids_sorted])
 
     return word_pred, word_attn, word_labels
+
+def final_plots(
+    loss_history: Sequence[float],
+    counts: Optional[Sequence["Counts"]],
+    logger: logging.Logger,
+    xp,
+) -> None:
+    has_labels = counts is not None 
+
+    fig, axs = plt.subplots(
+        2 if has_labels else 1,
+        1,
+        figsize=(16, 16 if has_labels else 8),
+    )
+
+    if has_labels:
+        ax_loss, ax_err = axs
+    else:
+        ax_loss = axs
+
+    ax_loss.set_title("Losses Across Epochs")
+    ax_loss.set_xlabel("Epoch")
+    ax_loss.set_ylabel("Loss")
+
+    epochs = range(1, len(loss_history) + 1)
+
+    loss_keys = list(loss_history[0].keys())
+
+    for key in loss_keys:
+        ys = [loss[key] for loss in loss_history]
+        ax_loss.plot(epochs, ys, label=key)
+
+    ax_loss.legend(fontsize="small")
+
+    all_values = [
+        v
+        for loss in loss_history
+        for v in loss.values()
+    ]
+    ax_loss.set_ylim(min(all_values), max(all_values) * 1.2)
+    
+    if has_labels:
+        ax_err.set_title("Per-class mean across selection rates (± std)")
+        ax_err.set_xlabel("Class")
+        ax_err.set_ylabel("Value")
+
+        labels = list(counts[0].data.keys())
+        x = np.arange(len(labels))
+
+        means = []
+        stds = []
+
+        for label in labels:
+            ys = np.array([c.data[label] for c in counts], dtype=float)
+            means.append(ys.mean())
+            stds.append(ys.std(ddof=1))
+
+        means = np.array(means, dtype=float)
+        stds = np.array(stds, dtype=float)
+
+        ax_err.errorbar(x, means, yerr=stds, fmt="o", capsize=5)
+        ax_err.set_xticks(x)
+        ax_err.set_xticklabels(labels, rotation=45, ha="right")
+
+    fig.tight_layout()
+    out = "summary_plots.png"
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+
+    logger.info(
+        "Saved summary plots to %s for experiment %s",
+        out,
+        xp.sig,
+    )

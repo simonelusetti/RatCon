@@ -15,12 +15,17 @@ class Counts(dict):
         self.data = {}
         self.pad = pad
         
-        if labels is None:
-            return
+        if labels is None: 
+            return # Fully empty Counts
+        
         self.data = dict.fromkeys(set(labels) - {self.pad}, 0)
         
+        if mask is None:
+            return # Labels but all set to 0
+        
         if pred_mask is not None:
-            mask = mask.bool() & pred_mask.bool()
+            mask = mask.bool() & pred_mask.bool() # Pred counts
+            
         mask = mask.tolist()
         for c in self.data.keys():
             self.data[c] = sum([1 if yi and xi == c else 0 for xi, yi in zip(labels, mask)])

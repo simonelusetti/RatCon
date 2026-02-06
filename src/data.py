@@ -348,5 +348,8 @@ def initialize_data(
         shuffle=data_cfg.shuffle,
         pin_memory=(device == "cuda"),
     )
+    print(ds["train"].column_names)
+    if "labels" in ds["train"].column_names:
+        return ds_train, ds_test, encoder, tokenizer, set(label for sample in ds["train"]["labels"] for label in sample)
 
-    return ds_train, ds_test, encoder, tokenizer
+    return ds_train, ds_test, encoder, tokenizer, None

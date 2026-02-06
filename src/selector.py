@@ -2,7 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from entmax import entmax15
-
+from src.losses import recon_loss
+from src.sentence import FrozenLLMEncoder, SentenceEncoder
+from numpy import linspace
 
 class SelectorMLP(nn.Module):
     def __init__(self, d_model: int, hidden: int, dropout: float) -> None:
@@ -83,31 +85,22 @@ class RationaleSelectorModel(nn.Module):
         embedding_dim: int,
         hidden: int | None = None,
         dropout: float = 0.1,
+        sent_encoder: SentenceEncoder | None = None,
+        loss_cfg: dict | None = None,
         tau: float = 1.0,
-        l: float = -0.1,
-        r: float = 1.1,
-        coupling_k: float = 2.0,
-        eps: float = 1e-6,
-        rho: float = 0.30,
-        hard_type: str = "probabilistic_top_k",
-        tv_weight: float = 0.0,
     ) -> None:
         super().__init__()
         if hidden is None:
             hidden = 4 * embedding_dim // 3
 
         self.selector = SelectorMLP(embedding_dim, hidden, dropout)
+        self.sent_encoder = sent_encoder
+        self.loss_cfg = loss_cfg
         self.tau = float(tau)
-        self.l = float(l)
-        self.r = float(r)
-        self.coupling_k = float(coupling_k)
-        self.eps = float(eps)
-        self.rho = float(rho)
-        self.hard_type = hard_type
-        self.tv_weight = float(tv_weight)
 
     def forward(
         self,
+        ids: torch.Tensor,
         embeddings: torch.Tensor,
         attn: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -117,31 +110,28 @@ class RationaleSelectorModel(nn.Module):
         scores = scores.masked_fill(attn == 0, -1e9)
 
         z = entmax15(scores / self.tau, dim=1) * attn
+        
+        loss_sweep = []
+        g_sweep = []
+        full_rep = self.sent_encoder.encode(ids, attn)
+        recon_sum = torch.zeros((), device=full_rep.device)
+        start, end, steps = self.loss_cfg.sweep_range
+        rhos = linspace(start, end, steps)
+        for rho in rhos:
+            h = top_k(z, attn, rho=float(rho))
+            g = h.detach() - z.detach() + z
+            g_sweep.append(g.detach().cpu())
+            if isinstance(self.sent_encoder, FrozenLLMEncoder):
+                pred_rep = self.sent_encoder.encode(ids, attn * g, original_attn=attn)
+            else:
+                pred_rep = self.sent_encoder.encode(ids, attn * g)
+            l_r = recon_loss(pred_rep, full_rep)
+            recon_sum = recon_sum + l_r
+            loss_sweep.append(l_r.item())
+            
+        recon_avg = recon_sum / len(rhos)
 
-        if self.hard_type == "hard_kuma":
-            eff = scores + self.coupling_k * (2.0 * z - 1.0)
-            a = F.softplus(eff) + self.eps
-            b = F.softplus(-eff) + self.eps
-            x = kuma_sample(a, b, self.eps)
-            y = self.l + (self.r - self.l) * x
-            h = (y.clamp(0.0, 1.0) > 0.5).float() * attn
-        elif self.hard_type == "top_k":
-            h = top_k(z, attn, rho=self.rho)
-        elif self.hard_type == "sweep":
-            h = top_k(z, attn, rho=self.rho)
-        elif self.hard_type == "probabilistic_top_k":
-            h = probabilistic_top_k(
-                scores=scores,
-                attn=attn,
-                rho=self.rho,
-            )
-        elif self.hard_type == "sweep":
-            h = z
-        else:
-            raise ValueError(f"Unknown hard_type: {self.hard_type}")
-
-        g = h.detach() - z.detach() + z
-
-        reg = self.tv_weight * total_variation_1d(g, attn, eps=self.eps)
-
-        return z, g, reg
+        return z, g_sweep, {
+            "recon": recon_avg.item(),
+            "total": recon_avg.item(),
+        }, loss_sweep

@@ -11,6 +11,7 @@ model:
     s_target: 0.3
     tau: 1.0
     l_tv: 0.0
+    sweep_range: [0.1, 0.9, 10]
   optim:
     lr: 1e-3
     weight_decay: 1e-2

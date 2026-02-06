@@ -15,7 +15,7 @@ from transformers import AutoTokenizer
 
 from .metrics import Counts
 from .sentence import SentenceEncoder, FrozenLLMEncoder
-from .selector import RationaleSelectorModel
+from .selector import RationaleSelectorModel, top_k
 from .data import initialize_data
 from .losses import recon_loss
 from .utils import (
@@ -101,6 +101,50 @@ def compute_losses(
     }
 
     return logs, total
+
+def compute_losses_sweep(
+    ids: torch.Tensor,
+    attn: torch.Tensor,
+    z: torch.Tensor,
+    sent_encoder: SentenceEncoder,
+    reg_term: torch.Tensor,
+    sweep_range: list[float],
+) -> tuple[dict[str, float], torch.Tensor]:
+    full_rep = sent_encoder.encode(ids, attn)
+
+    if len(sweep_range) == 3:
+        start, end, steps = sweep_range
+        steps = max(int(steps), 1)
+        if steps == 1:
+            rhos = [float(start)]
+        else:
+            step = (float(end) - float(start)) / (steps - 1)
+            rhos = [float(start) + i * step for i in range(steps)]
+    else:
+        rhos = [float(rho) for rho in sweep_range]
+
+    recon_sum = torch.zeros((), device=full_rep.device)
+    for rho in rhos:
+        h = top_k(z, attn, rho=float(rho))
+        g = h.detach() - z.detach() + z
+        if isinstance(sent_encoder, FrozenLLMEncoder):
+            pred_rep = sent_encoder.encode(ids, attn * g, original_attn=attn)
+        else:
+            pred_rep = sent_encoder.encode(ids, attn * g)
+
+        recon_sum = recon_sum + recon_loss(pred_rep, full_rep)
+
+    denom = max(len(rhos), 1)
+    recon_avg = recon_sum / denom
+    total_avg = recon_avg + reg_term
+
+    logs = {
+        "recon": recon_avg.item(),
+        "reg": reg_term.item(),
+        "total": total_avg.item(),
+    }
+
+    return logs, total_avg
 
 
 # --------------------------------------------------
@@ -218,7 +262,17 @@ class SelectorTrainer:
 
             tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
             z, g, reg_term = self.model(tkns_embd, attn)
-            logs, _ = compute_losses(ids, attn, g, self.sent_encoder, reg_term)
+            if self.cfg.model.selector.hard_type != "sweep":
+                logs, _ = compute_losses(ids, attn, g, self.sent_encoder, reg_term)
+            else:
+                logs, _ = compute_losses_sweep(
+                    ids,
+                    attn,
+                    z,
+                    self.sent_encoder,
+                    reg_term,
+                    self.cfg.model.selector.sweep_range,
+                )
 
             examples_count += bs
             for k in total_losses:
@@ -350,7 +404,10 @@ class SelectorTrainer:
 
                     tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
                     z, g, reg_term = self.model(tkns_embd, attn)
-                    logs, loss = compute_losses(ids, attn, g, self.sent_encoder, reg_term)
+                    if self.cfg.model.selector.hard_type != "sweep":
+                        logs, loss = compute_losses(ids, attn, g, self.sent_encoder, reg_term)
+                    else:
+                        logs, loss = compute_losses_sweep(ids, attn, z, self.sent_encoder, reg_term, self.cfg.model.selector.sweep_range)
 
                     loss.backward()
                     self.optimizer.step()

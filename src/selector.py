@@ -127,12 +127,16 @@ class RationaleSelectorModel(nn.Module):
             h = (y.clamp(0.0, 1.0) > 0.5).float() * attn
         elif self.hard_type == "top_k":
             h = top_k(z, attn, rho=self.rho)
+        elif self.hard_type == "sweep":
+            h = top_k(z, attn, rho=self.rho)
         elif self.hard_type == "probabilistic_top_k":
             h = probabilistic_top_k(
                 scores=scores,
                 attn=attn,
                 rho=self.rho,
             )
+        elif self.hard_type == "sweep":
+            h = z
         else:
             raise ValueError(f"Unknown hard_type: {self.hard_type}")
 

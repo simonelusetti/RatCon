@@ -42,14 +42,6 @@ def hard_top_k_from_sorted(
 
 
 class RationaleSelectorModel(nn.Module):
-    """
-    OPTION 2 (strict, causal)
-    Uses the NEW SentenceEncoder API:
-      - token_embeddings(...)
-      - pool(...)
-    Recomputes embeddings for every g.
-    """
-
     def __init__(
         self,
         embedding_dim: int,
@@ -74,27 +66,17 @@ class RationaleSelectorModel(nn.Module):
         embeddings: torch.Tensor,
         attn: torch.Tensor,
     ):
-        # ─────────────────────────
-        # Selector (once)
-        # ─────────────────────────
         emb = embeddings * attn.unsqueeze(-1)
         scores = self.selector(emb)
         scores = scores.masked_fill(attn == 0, -1e9)
 
         z = entmax15(scores / self.tau, dim=1) * attn
-
         sorted_idx = z.argsort(dim=1, descending=True)
 
-        # ─────────────────────────
-        # Full representation (baseline)
-        # ─────────────────────────
         with torch.no_grad():
             full_token_emb = self.sent_encoder.token_embeddings(ids, attn)
             full_rep = self.sent_encoder.pool(full_token_emb, attn)
 
-        # ─────────────────────────
-        # Sweep (expensive but correct)
-        # ─────────────────────────
         g_sweep = []
         loss_sweep = []
 
@@ -104,29 +86,23 @@ class RationaleSelectorModel(nn.Module):
 
         for rho in rhos:
             h = hard_top_k_from_sorted(sorted_idx, attn, rho=float(rho))
-
-            # straight-through estimator
             g = h.detach() - z.detach() + z
             g_sweep.append(g.detach().cpu())
 
             effective_attn = attn * g
 
-            with torch.no_grad():
-                token_emb = self.sent_encoder.token_embeddings(ids, effective_attn)
-                pred_rep = self.sent_encoder.pool(token_emb, effective_attn)
+            token_emb = self.sent_encoder.token_embeddings(ids, effective_attn)
+            pred_rep = self.sent_encoder.pool(token_emb, effective_attn)
 
             l_r = recon_loss(pred_rep, full_rep)
             recon_sum = recon_sum + l_r
-            loss_sweep.append(l_r.item())
+            loss_sweep.append(float(l_r.detach().item()))
 
         recon_avg = recon_sum / len(rhos)
 
-        return (
-            z,
-            g_sweep,
-            {
-                "recon": recon_avg.item(),
-                "total": recon_avg.item(),
-            },
-            loss_sweep,
-        )
+        losses_log = {
+            "recon": float(recon_avg.detach().item()),
+            "total": float(recon_avg.detach().item()),
+        }
+
+        return z, g_sweep, recon_avg, losses_log, loss_sweep

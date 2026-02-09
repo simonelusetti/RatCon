@@ -1,6 +1,5 @@
 import os
 import sys
-import json
 import torch
 
 from logging import Logger
@@ -62,7 +61,11 @@ class SelectorTrainer:
         self.tokenizer = tokenizer
         self.labels_set = labels_set
 
-        self.sent_encoder = sent_encoder
+        self.sent_encoder = sent_encoder.to(self.device)
+        self.sent_encoder.eval()
+        for p in self.sent_encoder.parameters():
+            p.requires_grad_(False)
+
         with torch.no_grad():
             first = next(iter(self.train_dl))
             model_dim = self.sent_encoder.token_embeddings(
@@ -71,7 +74,7 @@ class SelectorTrainer:
             ).shape[-1]
 
         self.model = RationaleSelectorModel(
-            model_dim, loss_cfg=cfg.model.loss, sent_encoder=sent_encoder
+            model_dim, loss_cfg=cfg.model.loss, sent_encoder=self.sent_encoder
         ).to(self.device)
 
         self.optimizer = torch.optim.AdamW(
@@ -94,17 +97,22 @@ class SelectorTrainer:
             _use_new_zipfile_serialization=False,
         )
 
-    def forward_pass(self, batch: dict, examples_count: int, total_losses: dict | None) -> tuple[int, int, dict]:
+    def forward_pass(self, batch: dict, examples_count: int, total_losses: dict | None):
         ids = batch["ids"]
         attn = batch["attn_mask"]
         bs = ids.size(0)
-        tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
-        z, g_sweep, losses, loss_sweep = self.model(ids, tkns_embd, attn)
+
+        with torch.no_grad():
+            tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
+
+        z, g_sweep, loss_tensor, losses_log, loss_sweep = self.model(ids, tkns_embd, attn)
+
         if total_losses is None:
-            total_losses = {k: 0.0 for k in losses}
+            total_losses = {k: 0.0 for k in losses_log}
         for k in total_losses:
-            total_losses[k] += losses[k]
-        return attn, z, g_sweep, losses, loss_sweep, examples_count + bs, total_losses
+            total_losses[k] += losses_log[k]
+
+        return attn, z, g_sweep, loss_tensor, losses_log, loss_sweep, examples_count + bs, total_losses
 
     @torch.no_grad()
     def evaluate(self, short: bool = False):
@@ -112,7 +120,7 @@ class SelectorTrainer:
         examples_count = 0
         total_losses = None
         counts_pred, counts_gold = None, None
-        
+
         if not short:
             start, end, steps = self.cfg.model.loss.sweep_range
             sweep_range = len(linspace(start, end, steps))
@@ -128,9 +136,8 @@ class SelectorTrainer:
             file=sys.stderr,
         ):
             batch = to_device(self.device, batch)
-            bs = batch["ids"].size(0)
 
-            attn, z, g_sweep, losses, loss_sweep, examples_count, total_losses = \
+            attn, z, g_sweep, loss_tensor, losses_log, loss_sweep, examples_count, total_losses = \
                 self.forward_pass(batch, examples_count, total_losses)
 
             if not short and self.labels_set is not None:
@@ -144,9 +151,9 @@ class SelectorTrainer:
 
         for k in total_losses:
             total_losses[k] /= max(examples_count, 1)
-        
+
         if self.labels_set is not None:
-            return total_losses, [cp/cg for cp, cg in zip(counts_pred, counts_gold)]
+            return total_losses, [cp / cg for cp, cg in zip(counts_pred, counts_gold)]
         return total_losses, None
 
     @torch.no_grad()
@@ -179,11 +186,15 @@ class SelectorTrainer:
                 disable=self._tqdm_disabled,
                 file=sys.stderr,
             ):
+                batch = to_device(self.device, batch)
                 self.optimizer.zero_grad(set_to_none=True)
 
-                attn, z, g_sweep, losses, loss_sweep, examples_count, total_losses = \
+                attn, z, g_sweep, loss_tensor, losses_log, loss_sweep, examples_count, total_losses = \
                     self.forward_pass(batch, examples_count, total_losses)
-                
+
+                loss_tensor.backward()
+                self.optimizer.step()
+
             for k in total_losses:
                 total_losses[k] /= max(examples_count, 1)
 
@@ -196,7 +207,7 @@ class SelectorTrainer:
             self.save_checkpoint()
 
         self.final_eval()
-        
+
 
 @hydra_main(config_path="conf", config_name="default", version_base="1.1")
 def main(cfg: DictConfig) -> None:

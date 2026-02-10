@@ -24,18 +24,29 @@ class SelectorMLP(nn.Module):
         return self.fc2(x).squeeze(-1)
 
 
-def hard_top_k_from_sorted(
-    sorted_idx: torch.Tensor,
+def sample_gumbel(shape, device, eps: float = 1e-6) -> torch.Tensor:
+    u = torch.rand(shape, device=device)
+    return -torch.log(-torch.log(u + eps) + eps)
+
+
+def probabilistic_top_k(
+    scores: torch.Tensor,
     attn: torch.Tensor,
     rho: float,
+    tau: float,
 ) -> torch.Tensor:
-    B, T = attn.shape
+    scores = scores * attn
+    B, T = scores.shape
+
+    gumbel = sample_gumbel(scores.shape, scores.device)
+    perturbed = scores / tau + gumbel
+
+    h = torch.zeros_like(scores)
     T_eff = attn.sum(dim=1).long()
-    h = torch.zeros_like(attn)
 
     for i in range(B):
         k = max(1, int(rho * T_eff[i].item()))
-        idx = sorted_idx[i, :k]
+        _, idx = perturbed[i].topk(k)
         h[i, idx] = 1.0
 
     return h * attn
@@ -71,7 +82,6 @@ class RationaleSelectorModel(nn.Module):
         scores = scores.masked_fill(attn == 0, -1e9)
 
         z = entmax15(scores / self.tau, dim=1) * attn
-        sorted_idx = z.argsort(dim=1, descending=True)
 
         with torch.no_grad():
             full_token_emb = self.sent_encoder.token_embeddings(ids, attn)
@@ -85,7 +95,13 @@ class RationaleSelectorModel(nn.Module):
         rhos = linspace(start, end, steps)
 
         for rho in rhos:
-            h = hard_top_k_from_sorted(sorted_idx, attn, rho=float(rho))
+            h = probabilistic_top_k(
+                scores=scores,
+                attn=attn,
+                rho=float(rho),
+                tau=self.tau,
+            )
+
             g = h.detach() - z.detach() + z
             g_sweep.append(g.detach().cpu())
 

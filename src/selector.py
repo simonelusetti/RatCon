@@ -1,11 +1,11 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from entmax import entmax15
 from numpy import linspace
 
 from src.losses import recon_loss
 from src.sentence import SentenceEncoder
+from entmax import entmax15
 
 
 class SelectorMLP(nn.Module):
@@ -29,27 +29,38 @@ def sample_gumbel(shape, device, eps: float = 1e-6) -> torch.Tensor:
     return -torch.log(-torch.log(u + eps) + eps)
 
 
-def probabilistic_top_k(
+def stochastic_topk(
     scores: torch.Tensor,
     attn: torch.Tensor,
-    rho: float,
+    k: torch.Tensor,
     tau: float,
-) -> torch.Tensor:
-    scores = scores * attn
+    n_samples: int,
+):
     B, T = scores.shape
+    device = scores.device
 
-    gumbel = sample_gumbel(scores.shape, scores.device)
-    perturbed = scores / tau + gumbel
+    probs = torch.zeros_like(scores)
 
-    h = torch.zeros_like(scores)
-    T_eff = attn.sum(dim=1).long()
+    for _ in range(n_samples):
+        noise = sample_gumbel(scores.shape, device)
+        perturbed = (scores + noise * tau).masked_fill(attn == 0, -1e9)
 
-    for i in range(B):
-        k = max(1, int(rho * T_eff[i].item()))
-        _, idx = perturbed[i].topk(k)
-        h[i, idx] = 1.0
+        h = torch.zeros_like(scores)
 
-    return h * attn
+        for i in range(B):
+            ki = int(k[i].item())
+            _, idx = perturbed[i].topk(ki)
+            h[i, idx] = 1.0
+
+        probs += h
+
+    probs = probs / n_samples
+    return probs
+
+
+def _normalize_over_valid(x: torch.Tensor, attn: torch.Tensor) -> torch.Tensor:
+    x = x * attn
+    return x / x.sum(dim=1, keepdim=True).clamp(min=1e-12)
 
 
 class RationaleSelectorModel(nn.Module):
@@ -61,6 +72,7 @@ class RationaleSelectorModel(nn.Module):
         sent_encoder: SentenceEncoder | None = None,
         loss_cfg: dict | None = None,
         tau: float = 1.0,
+        n_samples: int = 5,
     ) -> None:
         super().__init__()
         if hidden is None:
@@ -70,6 +82,7 @@ class RationaleSelectorModel(nn.Module):
         self.sent_encoder = sent_encoder
         self.loss_cfg = loss_cfg
         self.tau = float(tau)
+        self.n_samples = n_samples
 
     def forward(
         self,
@@ -81,32 +94,58 @@ class RationaleSelectorModel(nn.Module):
         scores = self.selector(emb)
         scores = scores.masked_fill(attn == 0, -1e9)
 
-        z = entmax15(scores / self.tau, dim=1) * attn
-
         with torch.no_grad():
             full_token_emb = self.sent_encoder.token_embeddings(ids, attn)
             full_rep = self.sent_encoder.pool(full_token_emb, attn)
 
         g_sweep = []
         loss_sweep = []
+        rho_eff_sweep = []
 
-        recon_sum = torch.zeros((), device=full_rep.device)
+        recon_sum = torch.zeros((), device=embeddings.device)
         start, end, steps = self.loss_cfg.sweep_range
         rhos = linspace(start, end, steps)
 
+        T_eff = attn.sum(dim=1).float()
+
         for rho in rhos:
-            h = probabilistic_top_k(
+            k = torch.clamp((rho * T_eff).long(), min=1)
+
+            g_hard = stochastic_topk(
                 scores=scores,
                 attn=attn,
-                rho=float(rho),
+                k=k,
                 tau=self.tau,
+                n_samples=self.n_samples,
             )
 
-            g = h.detach() - z.detach() + z
+            g_soft = entmax15(scores / self.tau, dim=1) * attn
+            g_soft = g_soft / g_soft.sum(dim=1, keepdim=True).clamp(min=1e-6)
+
+            g = g_hard.detach() - g_soft.detach() + g_soft
+
+            # -------------------------
+            # Alignment diagnostics
+            # -------------------------
+
+            hard_mask = (g_hard > 0)
+            soft_mask = (g_soft > 0)
+
+            support_overlap = (hard_mask & soft_mask).sum(dim=1).float()
+            support_overlap_mean = support_overlap.mean()
+
+            mass_on_hard = (g_soft * hard_mask.float()).sum(dim=1)
+            mass_on_hard_mean = mass_on_hard.mean()
+
+            # -------------------------
+
+            k_eff = g.sum(dim=1)
+            rho_eff = k_eff / T_eff
+
             g_sweep.append(g.detach().cpu())
+            rho_eff_sweep.append(rho_eff.detach())
 
             effective_attn = attn * g
-
             token_emb = self.sent_encoder.token_embeddings(ids, effective_attn)
             pred_rep = self.sent_encoder.pool(token_emb, effective_attn)
 
@@ -121,4 +160,4 @@ class RationaleSelectorModel(nn.Module):
             "total": float(recon_avg.detach().item()),
         }
 
-        return z, g_sweep, recon_avg, losses_log, loss_sweep
+        return g, g_sweep, recon_avg, losses_log, loss_sweep, rho_eff_sweep

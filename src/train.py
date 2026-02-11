@@ -105,14 +105,14 @@ class SelectorTrainer:
         with torch.no_grad():
             tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
 
-        z, g_sweep, loss_tensor, losses_log, loss_sweep = self.model(ids, tkns_embd, attn)
+        z, g_sweep, loss_tensor, losses_log, loss_sweep, rho_eff_sweep = self.model(ids, tkns_embd, attn)
 
         if total_losses is None:
             total_losses = {k: 0.0 for k in losses_log}
         for k in total_losses:
             total_losses[k] += losses_log[k]
 
-        return attn, z, g_sweep, loss_tensor, losses_log, loss_sweep, examples_count + bs, total_losses
+        return attn, z, g_sweep, loss_tensor, losses_log, loss_sweep, rho_eff_sweep, examples_count + bs, total_losses
 
     @torch.no_grad()
     def evaluate(self, short: bool = False):
@@ -137,7 +137,7 @@ class SelectorTrainer:
         ):
             batch = to_device(self.device, batch)
 
-            attn, z, g_sweep, loss_tensor, losses_log, loss_sweep, examples_count, total_losses = \
+            attn, z, g_sweep, loss_tensor, losses_log, loss_sweep, rho_eff_sweep, examples_count, total_losses = \
                 self.forward_pass(batch, examples_count, total_losses)
 
             if not short and self.labels_set is not None:
@@ -148,6 +148,15 @@ class SelectorTrainer:
                     flat_preds = g.view(-1)
                     counts_pred[i] += Counts(flat_labels, flat_attn, flat_preds)
                     counts_gold[i] += Counts(flat_labels, flat_attn)
+              
+        # checking last batch only      
+        if not short:
+            rho_eff_mean = [
+                r.mean().item() for r in rho_eff_sweep
+            ]
+            self.logger.info("Target ρ → effective ρ:")
+            for rho_t, rho_e in zip(linspace(*self.cfg.model.loss.sweep_range), rho_eff_mean):
+                self.logger.info(f"{rho_t:.3f} → {rho_e:.3f}")
 
         for k in total_losses:
             total_losses[k] /= max(examples_count, 1)
@@ -189,7 +198,7 @@ class SelectorTrainer:
                 batch = to_device(self.device, batch)
                 self.optimizer.zero_grad(set_to_none=True)
 
-                attn, z, g_sweep, loss_tensor, losses_log, loss_sweep, examples_count, total_losses = \
+                attn, z, g_sweep, loss_tensor, losses_log, loss_sweep, rho_eff_sweep, examples_count, total_losses = \
                     self.forward_pass(batch, examples_count, total_losses)
 
                 loss_tensor.backward()
@@ -232,7 +241,7 @@ def main(cfg: DictConfig) -> None:
     trainer = SelectorTrainer(cfg, train_dl, test_dl, encoder, tokenizer, labels_set, logger, xp)
 
     if cfg.train.no_train:
-        trainer.log_eval()
+        trainer.final_eval()
     else:
         trainer.train()
 

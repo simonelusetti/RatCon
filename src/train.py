@@ -149,14 +149,15 @@ class SelectorTrainer:
                     counts_pred[i] += Counts(flat_labels, flat_attn, flat_preds)
                     counts_gold[i] += Counts(flat_labels, flat_attn)
               
-        # checking last batch only      
+        # checking last batch only
+        """
         if not short:
             rho_eff_mean = [
                 r.mean().item() for r in rho_eff_sweep
             ]
             self.logger.info("Target ρ → effective ρ:")
             for rho_t, rho_e in zip(linspace(*self.cfg.model.loss.sweep_range), rho_eff_mean):
-                self.logger.info(f"{rho_t:.3f} → {rho_e:.3f}")
+                self.logger.info(f"{rho_t:.3f} → {rho_e:.3f}")"""
 
         for k in total_losses:
             total_losses[k] /= max(examples_count, 1)

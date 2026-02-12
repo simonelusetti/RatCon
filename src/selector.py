@@ -137,6 +137,9 @@ class RationaleSelectorModel(nn.Module):
             )
         elif self.hard_type == "sweep":
             h = z
+        elif self.hard_type == "none":
+            gumbel = sample_gumbel(scores.shape, scores.device)
+            h = (z > 0.0).float() * attn + (gumbel / self.tau).sigmoid() * attn
         else:
             raise ValueError(f"Unknown hard_type: {self.hard_type}")
 

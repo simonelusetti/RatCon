@@ -23,12 +23,14 @@ from .utils import (
     dict_to_table,
 )
 
+
 def should_disable_tqdm(short_log: bool) -> bool:
     if short_log:
         return True
     if not sys.stderr.isatty():
         return True
     return False
+
 
 class SelectorTrainer:
     def __init__(
@@ -105,14 +107,25 @@ class SelectorTrainer:
         with torch.no_grad():
             tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
 
-        z, g_sweep, loss_tensor, losses_log, loss_sweep, rho_eff_sweep = self.model(ids, tkns_embd, attn)
+        z, g_sweep, loss_tensor, losses_log, loss_sweep, rho_eff_sweep = \
+            self.model(ids, tkns_embd, attn)
 
         if total_losses is None:
             total_losses = {k: 0.0 for k in losses_log}
         for k in total_losses:
             total_losses[k] += losses_log[k]
 
-        return attn, z, g_sweep, loss_tensor, losses_log, loss_sweep, rho_eff_sweep, examples_count + bs, total_losses
+        return (
+            attn,
+            z,
+            g_sweep,
+            loss_tensor,
+            losses_log,
+            loss_sweep,
+            rho_eff_sweep,
+            examples_count + bs,
+            total_losses,
+        )
 
     @torch.no_grad()
     def evaluate(self, short: bool = False):
@@ -120,6 +133,9 @@ class SelectorTrainer:
         examples_count = 0
         total_losses = None
         counts_pred, counts_gold = None, None
+
+        rho_eff_accum = None
+        rho_eff_batches = 0
 
         if not short:
             start, end, steps = self.cfg.model.loss.sweep_range
@@ -137,33 +153,76 @@ class SelectorTrainer:
         ):
             batch = to_device(self.device, batch)
 
-            attn, z, g_sweep, loss_tensor, losses_log, loss_sweep, rho_eff_sweep, examples_count, total_losses = \
-                self.forward_pass(batch, examples_count, total_losses)
+            (
+                attn,
+                z,
+                g_sweep,
+                loss_tensor,
+                losses_log,
+                loss_sweep,
+                rho_eff_sweep,
+                examples_count,
+                total_losses,
+            ) = self.forward_pass(batch, examples_count, total_losses)
 
+            # ---- accumulate rho_eff across batches ----
+            if not short:
+                if rho_eff_accum is None:
+                    rho_eff_accum = [0.0 for _ in rho_eff_sweep]
+
+                for i, r in enumerate(rho_eff_sweep):
+                    rho_eff_accum[i] += r.mean().item()
+
+                rho_eff_batches += 1
+
+            # ---- accumulate counts ----
             if not short and self.labels_set is not None:
                 labels = batch["labels"]
                 flat_labels = [x for seq in labels for x in seq]
-                flat_attn = attn.bool().view(-1)
+
+                flat_attn = attn.bool().view(-1).cpu()
+
                 for i, g in enumerate(g_sweep):
-                    flat_preds = g.view(-1)
+                    flat_preds = g.view(-1)  # already CPU
                     counts_pred[i] += Counts(flat_labels, flat_attn, flat_preds)
                     counts_gold[i] += Counts(flat_labels, flat_attn)
-              
-        # checking last batch only
-        """
-        if not short:
-            rho_eff_mean = [
-                r.mean().item() for r in rho_eff_sweep
-            ]
-            self.logger.info("Target ρ → effective ρ:")
-            for rho_t, rho_e in zip(linspace(*self.cfg.model.loss.sweep_range), rho_eff_mean):
-                self.logger.info(f"{rho_t:.3f} → {rho_e:.3f}")"""
 
+        # ---- log effective rho (properly averaged) ----
+        if not short and rho_eff_accum is not None:
+            rho_eff_mean = [
+                x / max(rho_eff_batches, 1)
+                for x in rho_eff_accum
+            ]
+
+            self.logger.info("Target ρ → effective ρ:")
+            for rho_t, rho_e in zip(
+                linspace(*self.cfg.model.loss.sweep_range),
+                rho_eff_mean,
+            ):
+                self.logger.info(f"{rho_t:.3f} → {rho_e:.3f}")
+
+        # ---- average losses ----
         for k in total_losses:
             total_losses[k] /= max(examples_count, 1)
 
-        if self.labels_set is not None:
+        # ---- print metrics ----
+        if self.labels_set is not None and not short:
+            self.logger.info("\nLabels:\n")
+
+            total_tokens = 0
+            for batch in self.test_dl:
+                total_tokens += batch["attn_mask"].sum().item()
+
+            for i in range(len(counts_pred)):
+                # Correct batch-level selection rate
+                selected_mass = sum(g.sum().item() for g in g_sweep)
+                rate = selected_mass / total_tokens
+
+                print(f"rate {rate:.3f} → ", end="")
+                self.logger.info(f"{(counts_pred[i] / counts_gold[i]).to_table()}")
+
             return total_losses, [cp / cg for cp, cg in zip(counts_pred, counts_gold)]
+
         return total_losses, None
 
     @torch.no_grad()
@@ -199,8 +258,17 @@ class SelectorTrainer:
                 batch = to_device(self.device, batch)
                 self.optimizer.zero_grad(set_to_none=True)
 
-                attn, z, g_sweep, loss_tensor, losses_log, loss_sweep, rho_eff_sweep, examples_count, total_losses = \
-                    self.forward_pass(batch, examples_count, total_losses)
+                (
+                    attn,
+                    z,
+                    g_sweep,
+                    loss_tensor,
+                    losses_log,
+                    loss_sweep,
+                    rho_eff_sweep,
+                    examples_count,
+                    total_losses,
+                ) = self.forward_pass(batch, examples_count, total_losses)
 
                 loss_tensor.backward()
                 self.optimizer.step()
@@ -239,7 +307,9 @@ def main(cfg: DictConfig) -> None:
         device=cfg.runtime.device,
     )
 
-    trainer = SelectorTrainer(cfg, train_dl, test_dl, encoder, tokenizer, labels_set, logger, xp)
+    trainer = SelectorTrainer(
+        cfg, train_dl, test_dl, encoder, tokenizer, labels_set, logger, xp
+    )
 
     if cfg.train.no_train:
         trainer.final_eval()

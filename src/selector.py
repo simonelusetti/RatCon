@@ -5,8 +5,11 @@ from numpy import linspace
 
 from src.losses import recon_loss
 from src.sentence import SentenceEncoder
-from entmax import entmax15
 
+
+# ------------------------------------------------------------
+# Selector MLP
+# ------------------------------------------------------------
 
 class SelectorMLP(nn.Module):
     def __init__(self, d_model: int, hidden: int, dropout: float) -> None:
@@ -24,44 +27,44 @@ class SelectorMLP(nn.Module):
         return self.fc2(x).squeeze(-1)
 
 
-def sample_gumbel(shape, device, eps: float = 1e-6) -> torch.Tensor:
-    u = torch.rand(shape, device=device)
-    return -torch.log(-torch.log(u + eps) + eps)
+# ------------------------------------------------------------
+# Differentiable Soft Ranking
+# ------------------------------------------------------------
 
-
-def stochastic_topk(
+def soft_rank(
     scores: torch.Tensor,
     attn: torch.Tensor,
-    k: torch.Tensor,
     tau: float,
-    n_samples: int,
-):
-    B, T = scores.shape
-    device = scores.device
+    gamma: float = 1.0,
+) -> torch.Tensor:
 
-    probs = torch.zeros_like(scores)
+    scores = scores.masked_fill(attn == 0, 0.0)
 
-    for _ in range(n_samples):
-        noise = sample_gumbel(scores.shape, device)
-        perturbed = (scores + noise * tau).masked_fill(attn == 0, -1e9)
+    mean = (scores * attn).sum(dim=1, keepdim=True) / \
+           attn.sum(dim=1, keepdim=True).clamp(min=1.0)
 
-        h = torch.zeros_like(scores)
+    var = ((scores - mean) ** 2 * attn).sum(dim=1, keepdim=True) / \
+          attn.sum(dim=1, keepdim=True).clamp(min=1.0)
 
-        for i in range(B):
-            ki = int(k[i].item())
-            _, idx = perturbed[i].topk(ki)
-            h[i, idx] = 1.0
+    std = torch.sqrt(var + 1e-6)
+    scores = (scores - mean) / std
 
-        probs += h
+    diff = scores.unsqueeze(1) - scores.unsqueeze(2)
+    p = torch.sigmoid(diff / tau)
 
-    probs = probs / n_samples
-    return probs
+    p = p ** gamma
+
+    p = p * attn.unsqueeze(1)
+
+    r = 1.0 + p.sum(dim=1)
+    r = r.masked_fill(attn == 0, 1e9)
+
+    return r
 
 
-def _normalize_over_valid(x: torch.Tensor, attn: torch.Tensor) -> torch.Tensor:
-    x = x * attn
-    return x / x.sum(dim=1, keepdim=True).clamp(min=1e-12)
-
+# ------------------------------------------------------------
+# Rationale Selector Model
+# ------------------------------------------------------------
 
 class RationaleSelectorModel(nn.Module):
     def __init__(
@@ -71,18 +74,19 @@ class RationaleSelectorModel(nn.Module):
         dropout: float = 0.1,
         sent_encoder: SentenceEncoder | None = None,
         loss_cfg: dict | None = None,
-        tau: float = 1.0,
-        n_samples: int = 5,
     ) -> None:
         super().__init__()
+
         if hidden is None:
             hidden = 4 * embedding_dim // 3
 
         self.selector = SelectorMLP(embedding_dim, hidden, dropout)
         self.sent_encoder = sent_encoder
         self.loss_cfg = loss_cfg
-        self.tau = float(tau)
-        self.n_samples = n_samples
+
+        self.tau_rank = 0.05
+        self.gamma_rank = 2.0
+        self.tau_gate = 0.2
 
     def forward(
         self,
@@ -90,62 +94,83 @@ class RationaleSelectorModel(nn.Module):
         embeddings: torch.Tensor,
         attn: torch.Tensor,
     ):
+        device = embeddings.device
+
         emb = embeddings * attn.unsqueeze(-1)
         scores = self.selector(emb)
-        scores = scores.masked_fill(attn == 0, -1e9)
+        scores = scores.masked_fill(attn == 0, 0.0)
 
         with torch.no_grad():
             full_token_emb = self.sent_encoder.token_embeddings(ids, attn)
             full_rep = self.sent_encoder.pool(full_token_emb, attn)
 
-        g_sweep = []
+        g_sweep = []           # 🔥 now HARD masks
         loss_sweep = []
         rho_eff_sweep = []
 
-        recon_sum = torch.zeros((), device=embeddings.device)
+        recon_sum = torch.zeros((), device=device)
+
         start, end, steps = self.loss_cfg.sweep_range
         rhos = linspace(start, end, steps)
 
-        T_eff = attn.sum(dim=1).float()
+        attn_f = attn.float()
+        T_eff = attn_f.sum(dim=1).float()
+
+        ranks = soft_rank(
+            scores,
+            attn_f,
+            tau=self.tau_rank,
+            gamma=self.gamma_rank,
+        )
 
         for rho in rhos:
-            k = torch.clamp((rho * T_eff).long(), min=1)
 
-            g_hard = stochastic_topk(
-                scores=scores,
-                attn=attn,
-                k=k,
-                tau=self.tau,
-                n_samples=self.n_samples,
-            )
+            k = torch.clamp((float(rho) * T_eff).round().long(), min=1)
 
-            g_soft = entmax15(scores / self.tau, dim=1) * attn
-            g_soft = g_soft / g_soft.sum(dim=1, keepdim=True).clamp(min=1e-6)
+            # ------------------------------------------------------------
+            # SOFT GATE (for training / reconstruction)
+            # ------------------------------------------------------------
 
-            g = g_hard.detach() - g_soft.detach() + g_soft
+            gate_raw = torch.sigmoid(
+                (k.float().unsqueeze(1) - ranks) / self.tau_gate
+            ) * attn_f
 
-            # -------------------------
-            # Alignment diagnostics
-            # -------------------------
+            g_soft = gate_raw / gate_raw.sum(dim=1, keepdim=True).clamp(min=1e-8)
+            g_soft = g_soft * k.unsqueeze(1)
 
-            hard_mask = (g_hard > 0)
-            soft_mask = (g_soft > 0)
+            # ------------------------------------------------------------
+            # HARD TOP-K (for evaluation only)
+            # ------------------------------------------------------------
 
-            support_overlap = (hard_mask & soft_mask).sum(dim=1).float()
-            support_overlap_mean = support_overlap.mean()
+            # Use ranks directly for stable top-k
+            hard_mask = torch.zeros_like(g_soft)
 
-            mass_on_hard = (g_soft * hard_mask.float()).sum(dim=1)
-            mass_on_hard_mean = mass_on_hard.mean()
+            # smaller rank = better
+            for b in range(ranks.size(0)):
+                kb = int(k[b].item())
+                valid_idx = attn[b].nonzero(as_tuple=False).squeeze(1)
 
-            # -------------------------
+                if valid_idx.numel() == 0:
+                    continue
 
-            k_eff = g.sum(dim=1)
-            rho_eff = k_eff / T_eff
+                # select top-k lowest ranks
+                ranks_b = ranks[b, valid_idx]
+                topk = torch.topk(-ranks_b, kb).indices  # negative for lowest
+                selected = valid_idx[topk]
 
-            g_sweep.append(g.detach().cpu())
+                hard_mask[b, selected] = 1.0
+
+            # ------------------------------------------------------------
+
+            k_eff = g_soft.sum(dim=1)
+            rho_eff = k_eff / T_eff.clamp(min=1.0)
+
+            g_sweep.append(hard_mask.detach().cpu())  # 🔥 HARD mask now
             rho_eff_sweep.append(rho_eff.detach())
 
-            effective_attn = attn * g
+            # reconstruction still uses SOFT gate
+            effective_attn = attn_f * g_soft
+
             token_emb = self.sent_encoder.token_embeddings(ids, effective_attn)
             pred_rep = self.sent_encoder.pool(token_emb, effective_attn)
 
@@ -160,4 +185,4 @@ class RationaleSelectorModel(nn.Module):
             "total": float(recon_avg.detach().item()),
         }
 
-        return g, g_sweep, recon_avg, losses_log, loss_sweep, rho_eff_sweep
+        return g_soft, g_sweep, recon_avg, losses_log, loss_sweep, rho_eff_sweep

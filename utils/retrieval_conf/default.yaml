@@ -17,8 +17,8 @@ eval:
   batch_size: 64
   max_length: 128
   rho_sweep:
-    start: 0.2
-    end: 0.8
+    start: 0.1
+    end: 1.0
     steps: 10
   random_selector:
     runs: 5

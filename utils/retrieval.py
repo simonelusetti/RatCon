@@ -18,9 +18,12 @@ DEFAULT_CFG_PATH = os.path.join(
 )
 
 from src.sentence import build_sentence_encoder
-from src.selector import RationaleSelectorModel, probabilistic_top_k
-from src.utils import configure_runtime
+from src.selector import RationaleSelectorModel
 
+
+# ------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------
 
 def batch_tokenize(tokenizer, sentences, device, max_length):
     out = tokenizer(
@@ -41,6 +44,10 @@ def get_rhos(cfg):
     ))
 
 
+# ------------------------------------------------------------
+# Baseline (no selection)
+# ------------------------------------------------------------
+
 @torch.no_grad()
 def eval_baseline(encoder, tokenizer, cfg, device):
     ds = load_dataset("glue", "stsb", split=cfg.eval.split)
@@ -49,7 +56,7 @@ def eval_baseline(encoder, tokenizer, cfg, device):
     bs = cfg.eval.batch_size
     max_len = cfg.eval.max_length
 
-    for i in tqdm(range(0, len(ds), bs), desc="STS-B eval (baseline)"):
+    for i in tqdm(range(0, len(ds), bs), desc="STS-B baseline"):
         batch = ds[i:i + bs]
 
         t1 = batch_tokenize(tokenizer, batch["sentence1"], device, max_len)
@@ -58,49 +65,57 @@ def eval_baseline(encoder, tokenizer, cfg, device):
         e1 = encoder.token_embeddings(t1["input_ids"], t1["attention_mask"])
         e2 = encoder.token_embeddings(t2["input_ids"], t2["attention_mask"])
 
-        s1 = encoder.pool(e1, t1["attention_mask"])
-        s2 = encoder.pool(e2, t2["attention_mask"])
+        z1 = encoder.pool(e1, t1["attention_mask"])
+        z2 = encoder.pool(e2, t2["attention_mask"])
 
-        sims.extend(F.cosine_similarity(s1, s2).cpu().tolist())
+        sims.extend(F.cosine_similarity(z1, z2).cpu().tolist())
         labels.extend(batch["label"])
 
     return float(spearmanr(sims, labels)[0])
 
 
+# ------------------------------------------------------------
+# Selector Sweep (HARD top-k masks)
+# ------------------------------------------------------------
+
 @torch.no_grad()
 def eval_selector_sweep(encoder, tokenizer, selector, cfg, device):
     ds = load_dataset("glue", "stsb", split=cfg.eval.split)
 
-
     rhos = get_rhos(cfg)
     bs = cfg.eval.batch_size
     max_len = cfg.eval.max_length
-    tau = cfg.selector.tau
 
     sims = {rho: [] for rho in rhos}
     labels = []
 
-    for i in tqdm(range(0, len(ds), bs), desc="STS-B eval (selector sweep)"):
+    for i in tqdm(range(0, len(ds), bs), desc="STS-B selector"):
         batch = ds[i:i + bs]
 
         t1 = batch_tokenize(tokenizer, batch["sentence1"], device, max_len)
         t2 = batch_tokenize(tokenizer, batch["sentence2"], device, max_len)
 
-        a1 = t1["attention_mask"].float()
-        a2 = t2["attention_mask"].float()
+        a1 = t1["attention_mask"]
+        a2 = t2["attention_mask"]
 
+        # heavy forward once
         e1 = encoder.token_embeddings(t1["input_ids"], a1)
         e2 = encoder.token_embeddings(t2["input_ids"], a2)
 
-        s1 = selector.selector(e1 * a1.unsqueeze(-1))
-        s2 = selector.selector(e2 * a2.unsqueeze(-1))
+        # selector returns hard masks in g_sweep (on CPU)
+        _, g1_sweep, *_ = selector(t1["input_ids"], e1, a1)
+        _, g2_sweep, *_ = selector(t2["input_ids"], e2, a2)
 
-        for rho in rhos:
-            g1 = probabilistic_top_k(s1, a1, rho, tau)
-            g2 = probabilistic_top_k(s2, a2, rho, tau)
+        # move hard masks back to device
+        g1_sweep = [g.to(device) for g in g1_sweep]
+        g2_sweep = [g.to(device) for g in g2_sweep]
 
-            z1 = encoder.pool(e1, a1 * g1)
-            z2 = encoder.pool(e2, a2 * g2)
+        for i_rho, rho in enumerate(rhos):
+            hard1 = g1_sweep[i_rho]
+            hard2 = g2_sweep[i_rho]
+
+            z1 = encoder.pool(e1, hard1)
+            z2 = encoder.pool(e2, hard2)
 
             sims[rho].extend(F.cosine_similarity(z1, z2).cpu().tolist())
 
@@ -108,6 +123,10 @@ def eval_selector_sweep(encoder, tokenizer, selector, cfg, device):
 
     return {rho: float(spearmanr(sims[rho], labels)[0]) for rho in rhos}
 
+
+# ------------------------------------------------------------
+# Random Sweep (HARD top-k masks)
+# ------------------------------------------------------------
 
 @torch.no_grad()
 def eval_random_sweep(encoder, tokenizer, cfg, device):
@@ -126,24 +145,50 @@ def eval_random_sweep(encoder, tokenizer, cfg, device):
         sims = {rho: [] for rho in rhos}
         labels = []
 
-        for i in tqdm(range(0, len(ds), bs), leave=False):
+        for i in tqdm(range(0, len(ds), bs), leave=False, desc=f"STS-B random run {run+1}/{runs}"):
             batch = ds[i:i + bs]
 
             t1 = batch_tokenize(tokenizer, batch["sentence1"], device, max_len)
             t2 = batch_tokenize(tokenizer, batch["sentence2"], device, max_len)
 
-            a1 = t1["attention_mask"].float()
-            a2 = t2["attention_mask"].float()
+            a1 = t1["attention_mask"]
+            a2 = t2["attention_mask"]
 
             e1 = encoder.token_embeddings(t1["input_ids"], a1)
             e2 = encoder.token_embeddings(t2["input_ids"], a2)
 
-            for rho in rhos:
-                g1 = (torch.rand_like(a1) < rho).float() * a1
-                g2 = (torch.rand_like(a2) < rho).float() * a2
+            T1 = a1.sum(1)
+            T2 = a2.sum(1)
 
-                z1 = encoder.pool(e1, a1 * g1)
-                z2 = encoder.pool(e2, a2 * g2)
+            for rho in rhos:
+                k1 = torch.clamp((T1.float() * rho).round().long(), min=1)
+                k2 = torch.clamp((T2.float() * rho).round().long(), min=1)
+
+                rand1 = torch.rand_like(a1.float())
+                rand2 = torch.rand_like(a2.float())
+
+                # IMPORTANT: make masks float to match pool usage and avoid dtype mismatch
+                hard1 = torch.zeros_like(a1, dtype=torch.float)
+                hard2 = torch.zeros_like(a2, dtype=torch.float)
+
+                maxk1 = int(k1.max().item())
+                maxk2 = int(k2.max().item())
+
+                idx1 = torch.topk(rand1, maxk1, dim=1).indices
+                idx2 = torch.topk(rand2, maxk2, dim=1).indices
+
+                r = torch.arange(a1.size(0), device=device)[:, None]
+
+                hard1[r, idx1] = (
+                    torch.arange(maxk1, device=device)[None, :] < k1[:, None]
+                ).float()
+
+                hard2[r, idx2] = (
+                    torch.arange(maxk2, device=device)[None, :] < k2[:, None]
+                ).float()
+
+                z1 = encoder.pool(e1, hard1)
+                z2 = encoder.pool(e2, hard2)
 
                 sims[rho].extend(F.cosine_similarity(z1, z2).cpu().tolist())
 
@@ -155,19 +200,35 @@ def eval_random_sweep(encoder, tokenizer, cfg, device):
     return {rho: sum(v) / len(v) for rho, v in acc.items()}
 
 
-def load_selector(signature, encoder, tokenizer, device):
+# ------------------------------------------------------------
+# Selector Loader
+# ------------------------------------------------------------
+
+def load_selector(signature, encoder, cfg, device):
     ckpt = os.path.join(PROJECT_ROOT, "outputs", "xps", signature, "model.pth")
 
-    sample = tokenizer("test", return_tensors="pt")
-    sample = {k: v.to(device) for k, v in sample.items()}
-    emb = encoder.token_embeddings(sample["input_ids"], sample["attention_mask"])
+    sweep_cfg = OmegaConf.create({
+        "sweep_range": [
+            cfg.eval.rho_sweep.start,
+            cfg.eval.rho_sweep.end,
+            cfg.eval.rho_sweep.steps,
+        ]
+    })
 
-    selector = RationaleSelectorModel(emb.size(-1)).to(device)
+    # infer embedding dim robustly
+    sample_ids = torch.randint(0, 100, (1, 8), device=device)
+    sample_attn = torch.ones_like(sample_ids, device=device)
+    emb = encoder.token_embeddings(sample_ids, sample_attn)
+
+    selector = RationaleSelectorModel(
+        embedding_dim=emb.size(-1),
+        sent_encoder=encoder,
+        loss_cfg=sweep_cfg,
+    ).to(device)
+
     state = torch.load(ckpt, map_location=device)
     selector.load_state_dict(state["model"], strict=False)
     selector.eval()
-    selector.sent_encoder = None
-    selector.loss_cfg = None
 
     for p in selector.parameters():
         p.requires_grad_(False)
@@ -175,8 +236,12 @@ def load_selector(signature, encoder, tokenizer, device):
     return selector
 
 
+# ------------------------------------------------------------
+# Output
+# ------------------------------------------------------------
+
 def print_results(base, ours, rand):
-    print(f"\nSBERT baseline Spearman ρ: {base:.4f}\n")
+    print(f"\nBaseline Spearman ρ: {base:.4f}\n")
     print("rho\tours\tΔ(base)\trandom\tΔ(base)\tΔ(ours-rand)")
     for rho in ours:
         o, r = ours[rho], rand[rho]
@@ -191,7 +256,7 @@ def plot(base, ours, rand, path):
     rhos = list(ours.keys())
 
     plt.figure(figsize=(7, 5))
-    plt.plot(rhos, [base]*len(rhos), "--", label="SBERT baseline")
+    plt.plot(rhos, [base] * len(rhos), "--", label="Baseline")
     plt.plot(rhos, [ours[r] for r in rhos], "o-", label="Trained selector")
     plt.plot(rhos, [rand[r] for r in rhos], "x-", label="Random selector")
     plt.xlabel("Selection rate (ρ)")
@@ -205,11 +270,14 @@ def plot(base, ours, rand, path):
     plt.close()
 
 
+# ------------------------------------------------------------
+# Main
+# ------------------------------------------------------------
+
 def main(cfg_path):
     cfg = OmegaConf.load(cfg_path)
     xp_dir = os.path.join(PROJECT_ROOT, "outputs", "xps", cfg.selector.signature)
 
-    cfg.runtime, _ = configure_runtime(cfg.runtime)
     device = cfg.runtime.device
 
     encoder, tokenizer = build_sentence_encoder(
@@ -219,16 +287,13 @@ def main(cfg_path):
     )
 
     base = eval_baseline(encoder, tokenizer, cfg, device)
-
-    selector = load_selector(cfg.selector.signature, encoder, tokenizer, device)
+    selector = load_selector(cfg.selector.signature, encoder, cfg, device)
 
     ours = eval_selector_sweep(encoder, tokenizer, selector, cfg, device)
     rand = eval_random_sweep(encoder, tokenizer, cfg, device)
 
     print_results(base, ours, rand)
-
     plot(base, ours, rand, os.path.join(xp_dir, "spearman_vs_rho.png"))
-
     print("\nSaved plot to:", os.path.join(xp_dir, "spearman_vs_rho.png"))
 
 

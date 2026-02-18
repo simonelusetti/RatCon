@@ -298,32 +298,19 @@ def final_plots(
     ax_loss.set_ylim(min(all_values), max(all_values) * 1.2)
     
     if has_labels:
-        ax_err.set_title("Per-class distribution across selection rates")
-        ax_err.set_xlabel("Class")
+        ax_err.set_title("Class rates across selection rates")
+        ax_err.set_xlabel("Selection rate index")
         ax_err.set_ylabel("Value")
 
         labels = list(counts[0].data.keys())
-        x = np.arange(len(labels))
+        rhos = np.arange(len(counts))
 
-        # Collect per-class distributions
-        data = [
-            np.array([c.data[label] for c in counts], dtype=float)
-            for label in labels
-        ]
+        for label in labels:
+            ys = [c.data[label] for c in counts]
+            ax_err.plot(rhos, ys, marker="o", label=str(label))
 
-        parts = ax_err.violinplot(
-            data,
-            positions=x,
-            showmeans=True,
-            showextrema=True,
-            showmedians=False,
-        )
+        ax_err.legend(fontsize="small")
 
-        for pc in parts["bodies"]:
-            pc.set_alpha(0.6)
-
-        ax_err.set_xticks(x)
-        ax_err.set_xticklabels(labels, rotation=45, ha="right")
 
     fig.tight_layout()
     out = "summary_plots.png"

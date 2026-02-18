@@ -8,7 +8,7 @@ model:
     name: sentence-transformers/all-MiniLM-L6-v2
 
 selector:
-  signature: "17e9488d"
+  signature: "0ef51ad2"
   tau: 1.0
   
 eval:
@@ -19,7 +19,7 @@ eval:
   rho_sweep:
     start: 0.1
     end: 1.0
-    steps: 10
+    steps: 100
   random_selector:
     runs: 5
     seed: 0

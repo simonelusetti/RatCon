@@ -98,6 +98,12 @@ class SelectorTrainer:
             self.checkpoint_path,
             _use_new_zipfile_serialization=False,
         )
+        
+    def load_checkpoint(self) -> None:
+        checkpoint = torch.load(self.checkpoint_path, map_location=self.device)
+        self.model.load_state_dict(checkpoint["model"])
+        self.optimizer.load_state_dict(checkpoint["optimizer"])
+        self.logger.info(f"Loaded checkpoint from {self.checkpoint_path} with signature {checkpoint['meta']['sig']}")
 
     def forward_pass(self, batch: dict, examples_count: int, total_losses: dict | None):
         ids = batch["ids"]
@@ -218,7 +224,7 @@ class SelectorTrainer:
                 selected_mass = sum(g.sum().item() for g in g_sweep)
                 rate = selected_mass / total_tokens
 
-                print(f"rate {rate:.3f} → ", end="")
+                self.logger.info(f"rate {rate:.3f}\n")
                 self.logger.info(f"{(counts_pred[i] / counts_gold[i]).to_table()}")
 
             return total_losses, [cp / cg for cp, cg in zip(counts_pred, counts_gold)]
@@ -312,6 +318,7 @@ def main(cfg: DictConfig) -> None:
     )
 
     if cfg.train.no_train:
+        trainer.load_checkpoint()
         trainer.final_eval()
     else:
         trainer.train()

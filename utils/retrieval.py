@@ -44,14 +44,36 @@ def get_rhos(cfg):
     ))
 
 
+def mask_special_tokens(input_ids, tokenizer):
+    """
+    Returns a float mask [B,T] that is 0 for special tokens
+    (CLS/SEP/PAD/BOS/EOS if defined), 1 otherwise.
+    """
+    special_ids = [
+        i for i in (
+            tokenizer.cls_token_id,
+            tokenizer.sep_token_id,
+            tokenizer.pad_token_id,
+            tokenizer.bos_token_id,
+            tokenizer.eos_token_id,
+        ) if i is not None
+    ]
+
+    if not special_ids:
+        return torch.ones_like(input_ids, dtype=torch.float)
+
+    mask = torch.ones_like(input_ids, dtype=torch.float)
+    for sid in special_ids:
+        mask = mask * (input_ids != sid).float()
+    return mask
+
+
 # ------------------------------------------------------------
 # Baseline (no selection)
 # ------------------------------------------------------------
 
 @torch.no_grad()
-def eval_baseline(encoder, tokenizer, cfg, device):
-    ds = load_dataset("glue", "stsb", split=cfg.eval.split)
-
+def eval_baseline(ds, encoder, tokenizer, cfg, device):
     sims, labels = [], []
     bs = cfg.eval.batch_size
     max_len = cfg.eval.max_length
@@ -75,13 +97,13 @@ def eval_baseline(encoder, tokenizer, cfg, device):
 
 
 # ------------------------------------------------------------
-# Selector Sweep (HARD top-k masks)
+# Selector Sweep
+# Selection applied:
+#   1) at embedding level (zeroing token embeddings)
+#   2) at pooling level (mask)
 # ------------------------------------------------------------
-
 @torch.no_grad()
-def eval_selector_sweep(encoder, tokenizer, selector, cfg, device):
-    ds = load_dataset("glue", "stsb", split=cfg.eval.split)
-
+def eval_selector_sweep(ds, encoder, tokenizer, selector, cfg, device):
     rhos = get_rhos(cfg)
     bs = cfg.eval.batch_size
     max_len = cfg.eval.max_length
@@ -98,24 +120,37 @@ def eval_selector_sweep(encoder, tokenizer, selector, cfg, device):
         a1 = t1["attention_mask"]
         a2 = t2["attention_mask"]
 
-        # heavy forward once
-        e1 = encoder.token_embeddings(t1["input_ids"], a1)
-        e2 = encoder.token_embeddings(t2["input_ids"], a2)
+        # 1) FULL embeddings for selector scoring (unmasked attention)
+        e1_full = encoder.token_embeddings(t1["input_ids"], a1)
+        e2_full = encoder.token_embeddings(t2["input_ids"], a2)
 
-        # selector returns hard masks in g_sweep (on CPU)
-        _, g1_sweep, *_ = selector(t1["input_ids"], e1, a1)
-        _, g2_sweep, *_ = selector(t2["input_ids"], e2, a2)
+        # selector returns hard masks (CPU)
+        _, g1_sweep, *_ = selector(t1["input_ids"], e1_full, a1)
+        _, g2_sweep, *_ = selector(t2["input_ids"], e2_full, a2)
 
-        # move hard masks back to device
-        g1_sweep = [g.to(device) for g in g1_sweep]
-        g2_sweep = [g.to(device) for g in g2_sweep]
+        g1_sweep = [g.to(device).float() for g in g1_sweep]
+        g2_sweep = [g.to(device).float() for g in g2_sweep]
 
         for i_rho, rho in enumerate(rhos):
-            hard1 = g1_sweep[i_rho]
-            hard2 = g2_sweep[i_rho]
+            if rho >= 1.0 - 1e-12:
+                # MUST match baseline exactly
+                new_a1 = a1
+                new_a2 = a2
+            else:
+                # Treat special tokens like any other: just apply selector mask over valid tokens
+                hard1 = g1_sweep[i_rho]
+                hard2 = g2_sweep[i_rho]
 
-            z1 = encoder.pool(e1, hard1)
-            z2 = encoder.pool(e2, hard2)
+                new_a1 = hard1 * a1
+                new_a2 = hard2 * a2
+
+            # 2) Recompute embeddings under the masked attention graph
+            e1_masked = encoder.token_embeddings(t1["input_ids"], new_a1)
+            e2_masked = encoder.token_embeddings(t2["input_ids"], new_a2)
+
+            # 3) Pool using the same mask used in attention
+            z1 = encoder.pool(e1_masked, new_a1)
+            z2 = encoder.pool(e2_masked, new_a2)
 
             sims[rho].extend(F.cosine_similarity(z1, z2).cpu().tolist())
 
@@ -123,15 +158,12 @@ def eval_selector_sweep(encoder, tokenizer, selector, cfg, device):
 
     return {rho: float(spearmanr(sims[rho], labels)[0]) for rho in rhos}
 
-
 # ------------------------------------------------------------
-# Random Sweep (HARD top-k masks)
+# Random Sweep
+# Same embedding-level masking as selector
 # ------------------------------------------------------------
-
 @torch.no_grad()
-def eval_random_sweep(encoder, tokenizer, cfg, device):
-    ds = load_dataset("glue", "stsb", split=cfg.eval.split)
-
+def eval_random_sweep(ds, encoder, tokenizer, cfg, device):
     rhos = get_rhos(cfg)
     runs = cfg.eval.random_selector.runs
     bs = cfg.eval.batch_size
@@ -145,7 +177,9 @@ def eval_random_sweep(encoder, tokenizer, cfg, device):
         sims = {rho: [] for rho in rhos}
         labels = []
 
-        for i in tqdm(range(0, len(ds), bs), leave=False, desc=f"STS-B random run {run+1}/{runs}"):
+        for i in tqdm(range(0, len(ds), bs), leave=False,
+                      desc=f"STS-B random {run+1}/{runs}"):
+
             batch = ds[i:i + bs]
 
             t1 = batch_tokenize(tokenizer, batch["sentence1"], device, max_len)
@@ -154,41 +188,46 @@ def eval_random_sweep(encoder, tokenizer, cfg, device):
             a1 = t1["attention_mask"]
             a2 = t2["attention_mask"]
 
-            e1 = encoder.token_embeddings(t1["input_ids"], a1)
-            e2 = encoder.token_embeddings(t2["input_ids"], a2)
-
             T1 = a1.sum(1)
             T2 = a2.sum(1)
 
             for rho in rhos:
-                k1 = torch.clamp((T1.float() * rho).round().long(), min=1)
-                k2 = torch.clamp((T2.float() * rho).round().long(), min=1)
+                if rho >= 1.0 - 1e-12:
+                    # MUST match baseline exactly
+                    new_a1 = a1
+                    new_a2 = a2
+                else:
+                    k1 = torch.clamp((T1.float() * rho).round().long(), min=1)
+                    k2 = torch.clamp((T2.float() * rho).round().long(), min=1)
 
-                rand1 = torch.rand_like(a1.float())
-                rand2 = torch.rand_like(a2.float())
+                    hard1 = torch.zeros_like(a1, dtype=torch.float, device=device)
+                    hard2 = torch.zeros_like(a2, dtype=torch.float, device=device)
 
-                # IMPORTANT: make masks float to match pool usage and avoid dtype mismatch
-                hard1 = torch.zeros_like(a1, dtype=torch.float)
-                hard2 = torch.zeros_like(a2, dtype=torch.float)
+                    for b in range(a1.size(0)):
+                        valid1 = (a1[b] == 1).nonzero(as_tuple=False).squeeze(1)
+                        valid2 = (a2[b] == 1).nonzero(as_tuple=False).squeeze(1)
 
-                maxk1 = int(k1.max().item())
-                maxk2 = int(k2.max().item())
+                        if valid1.numel() > 0:
+                            kb = min(int(k1[b].item()), valid1.numel())
+                            rvals = torch.rand(valid1.numel(), device=device)
+                            topk = torch.topk(rvals, kb).indices
+                            hard1[b, valid1[topk]] = 1.0
 
-                idx1 = torch.topk(rand1, maxk1, dim=1).indices
-                idx2 = torch.topk(rand2, maxk2, dim=1).indices
+                        if valid2.numel() > 0:
+                            kb = min(int(k2[b].item()), valid2.numel())
+                            rvals = torch.rand(valid2.numel(), device=device)
+                            topk = torch.topk(rvals, kb).indices
+                            hard2[b, valid2[topk]] = 1.0
 
-                r = torch.arange(a1.size(0), device=device)[:, None]
+                    new_a1 = hard1 * a1
+                    new_a2 = hard2 * a2
 
-                hard1[r, idx1] = (
-                    torch.arange(maxk1, device=device)[None, :] < k1[:, None]
-                ).float()
+                # Recompute embeddings under masked attention
+                e1_masked = encoder.token_embeddings(t1["input_ids"], new_a1)
+                e2_masked = encoder.token_embeddings(t2["input_ids"], new_a2)
 
-                hard2[r, idx2] = (
-                    torch.arange(maxk2, device=device)[None, :] < k2[:, None]
-                ).float()
-
-                z1 = encoder.pool(e1, hard1)
-                z2 = encoder.pool(e2, hard2)
+                z1 = encoder.pool(e1_masked, new_a1)
+                z2 = encoder.pool(e2_masked, new_a2)
 
                 sims[rho].extend(F.cosine_similarity(z1, z2).cpu().tolist())
 
@@ -198,7 +237,6 @@ def eval_random_sweep(encoder, tokenizer, cfg, device):
             acc[rho].append(float(spearmanr(sims[rho], labels)[0]))
 
     return {rho: sum(v) / len(v) for rho, v in acc.items()}
-
 
 # ------------------------------------------------------------
 # Selector Loader
@@ -215,7 +253,6 @@ def load_selector(signature, encoder, cfg, device):
         ]
     })
 
-    # infer embedding dim robustly
     sample_ids = torch.randint(0, 100, (1, 8), device=device)
     sample_attn = torch.ones_like(sample_ids, device=device)
     emb = encoder.token_embeddings(sample_ids, sample_attn)
@@ -286,11 +323,13 @@ def main(cfg_path):
         device,
     )
 
-    base = eval_baseline(encoder, tokenizer, cfg, device)
+    ds = load_dataset("glue", "stsb", split=cfg.eval.split)
+
+    base = eval_baseline(ds, encoder, tokenizer, cfg, device)
     selector = load_selector(cfg.selector.signature, encoder, cfg, device)
 
-    ours = eval_selector_sweep(encoder, tokenizer, selector, cfg, device)
-    rand = eval_random_sweep(encoder, tokenizer, cfg, device)
+    ours = eval_selector_sweep(ds, encoder, tokenizer, selector, cfg, device)
+    rand = eval_random_sweep(ds, encoder, tokenizer, cfg, device)
 
     print_results(base, ours, rand)
     plot(base, ours, rand, os.path.join(xp_dir, "spearman_vs_rho.png"))

@@ -54,6 +54,7 @@ class SelectorTrainer:
         self.short_log = cfg.runtime.eval.short_log
         self.examples = cfg.runtime.eval.log_examples
         self.device = cfg.runtime.device
+        self.rhos = linspace(cfg.model.loss.sweep_range[0], cfg.model.loss.sweep_range[1], cfg.model.loss.sweep_range[2])
 
         self._tqdm_disabled = should_disable_tqdm(self.short_log)
 
@@ -76,7 +77,7 @@ class SelectorTrainer:
             ).shape[-1]
 
         self.model = RationaleSelectorModel(
-            model_dim, loss_cfg=cfg.model.loss, sent_encoder=self.sent_encoder
+            model_dim, loss_cfg=cfg.model.loss, sent_encoder=self.sent_encoder, rhos=self.rhos
         ).to(self.device)
 
         self.optimizer = torch.optim.AdamW(
@@ -193,20 +194,6 @@ class SelectorTrainer:
                     counts_pred[i] += Counts(flat_labels, flat_attn, flat_preds)
                     counts_gold[i] += Counts(flat_labels, flat_attn)
 
-        # ---- log effective rho (properly averaged) ----
-        if not short and rho_eff_accum is not None:
-            rho_eff_mean = [
-                x / max(rho_eff_batches, 1)
-                for x in rho_eff_accum
-            ]
-
-            self.logger.info("Target ρ → effective ρ:")
-            for rho_t, rho_e in zip(
-                linspace(*self.cfg.model.loss.sweep_range),
-                rho_eff_mean,
-            ):
-                self.logger.info(f"{rho_t:.3f} → {rho_e:.3f}")
-
         # ---- average losses ----
         for k in total_losses:
             total_losses[k] /= max(examples_count, 1)
@@ -225,18 +212,18 @@ class SelectorTrainer:
                 rate = selected_mass / total_tokens
 
                 self.logger.info(f"rate {rate:.3f}\n")
-                self.logger.info(f"{(counts_pred[i] / counts_gold[i]).to_table()}")
+                self.logger.info(f"\n{(counts_pred[i] / counts_gold[i]).to_table()}")
 
-            return total_losses, [cp / cg for cp, cg in zip(counts_pred, counts_gold)]
+            return total_losses, counts_pred, counts_gold
 
         return total_losses, None
 
     @torch.no_grad()
     def final_eval(self) -> None:
-        eval_losses, counts = self.evaluate()
+        eval_losses, counts_pred, counts_gold = self.evaluate()
         self.loss_history.append(eval_losses)
         self.logger.info(f"\nFinal evaluation:\n{dict_to_table(eval_losses)}")
-        final_plots(self.loss_history, counts, self.logger, self.xp)
+        final_plots(self.loss_history, counts_pred, counts_gold, self.rhos, self.logger, self.xp)
 
     def train(self) -> None:
         epoch_bar = tqdm(
@@ -286,7 +273,7 @@ class SelectorTrainer:
                 self.logger.info(f"Epoch {epoch + 1}/{self.epochs}")
                 self.logger.info(f"\n{dict_to_table(total_losses)}")
 
-            eval_losses, _ = self.evaluate()
+            eval_losses, _, _ = self.evaluate()
             self.loss_history.append(eval_losses)
             self.save_checkpoint()
 

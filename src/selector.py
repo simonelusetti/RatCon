@@ -1,3 +1,4 @@
+from typing import Sequence
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -72,6 +73,7 @@ class RationaleSelectorModel(nn.Module):
         embedding_dim: int,
         hidden: int | None = None,
         dropout: float = 0.1,
+        rhos: Sequence[float] | None = None,
         sent_encoder: SentenceEncoder | None = None,
         loss_cfg: dict | None = None,
     ) -> None:
@@ -83,6 +85,7 @@ class RationaleSelectorModel(nn.Module):
         self.selector = SelectorMLP(embedding_dim, hidden, dropout)
         self.sent_encoder = sent_encoder
         self.loss_cfg = loss_cfg
+        self.rhos = rhos
 
         self.tau_rank = 0.05
         self.gamma_rank = 2.0
@@ -111,7 +114,6 @@ class RationaleSelectorModel(nn.Module):
         recon_sum = torch.zeros((), device=device)
 
         start, end, steps = self.loss_cfg.sweep_range
-        rhos = linspace(start, end, steps)
 
         attn_f = attn.float()
         T_eff = attn_f.sum(dim=1).float()
@@ -123,7 +125,7 @@ class RationaleSelectorModel(nn.Module):
             gamma=self.gamma_rank,
         )
 
-        for rho in rhos:
+        for rho in self.rhos:
 
             k = torch.clamp((float(rho) * T_eff).round().long(), min=1)
 
@@ -178,7 +180,7 @@ class RationaleSelectorModel(nn.Module):
             recon_sum = recon_sum + l_r
             loss_sweep.append(float(l_r.detach().item()))
 
-        recon_avg = recon_sum / len(rhos)
+        recon_avg = recon_sum / len(self.rhos)
 
         losses_log = {
             "recon": float(recon_avg.detach().item()),

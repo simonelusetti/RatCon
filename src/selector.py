@@ -1,8 +1,16 @@
+from typing import Sequence
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from entmax import entmax15
+from numpy import linspace
 
+from src.losses import recon_loss
+from src.sentence import SentenceEncoder
+
+
+# ------------------------------------------------------------
+# Selector MLP
+# ------------------------------------------------------------
 
 class SelectorMLP(nn.Module):
     def __init__(self, d_model: int, hidden: int, dropout: float) -> None:
@@ -20,62 +28,44 @@ class SelectorMLP(nn.Module):
         return self.fc2(x).squeeze(-1)
 
 
-def kuma_sample(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    u = torch.rand_like(a).clamp(min=eps, max=1 - eps)
-    return (1.0 - (1.0 - u).pow(1.0 / b)).pow(1.0 / a)
+# ------------------------------------------------------------
+# Differentiable Soft Ranking
+# ------------------------------------------------------------
 
-
-def top_k(z: torch.Tensor, attn: torch.Tensor, rho: float) -> torch.Tensor:
-    z = z * attn
-    T = attn.sum(dim=1).clamp(min=1).long()
-    z_hard = torch.zeros_like(z)
-
-    for i in range(z.size(0)):
-        k = max(1, int(rho * T[i].item()))
-        _, idx = z[i].topk(k)
-        z_hard[i, idx] = 1.0
-
-    return z_hard * attn
-
-
-def sample_gumbel(shape, device, eps: float = 1e-6) -> torch.Tensor:
-    u = torch.rand(shape, device=device)
-    return -torch.log(-torch.log(u + eps) + eps)
-
-
-def probabilistic_top_k(
+def soft_rank(
     scores: torch.Tensor,
     attn: torch.Tensor,
-    rho: float,
+    tau: float,
+    gamma: float = 1.0,
 ) -> torch.Tensor:
 
-    scores = scores * attn
-    B, T = scores.shape
+    scores = scores.masked_fill(attn == 0, 0.0)
 
-    gumbel = sample_gumbel(scores.shape, scores.device)
-    perturbed = scores + gumbel
+    mean = (scores * attn).sum(dim=1, keepdim=True) / \
+           attn.sum(dim=1, keepdim=True).clamp(min=1.0)
 
-    z_hard = torch.zeros_like(scores)
-    T_eff = attn.sum(dim=1).long()
+    var = ((scores - mean) ** 2 * attn).sum(dim=1, keepdim=True) / \
+          attn.sum(dim=1, keepdim=True).clamp(min=1.0)
 
-    for i in range(B):
-        k = round(rho * T_eff[i].item())
-        k = max(1, min(int(k), int(T_eff[i].item())))
-        _, idx = perturbed[i].topk(k)
-        z_hard[i, idx] = 1.0
+    std = torch.sqrt(var + 1e-6)
+    scores = (scores - mean) / std
 
-    return z_hard * attn
+    diff = scores.unsqueeze(1) - scores.unsqueeze(2)
+    p = torch.sigmoid(diff / tau)
+
+    p = p ** gamma
+
+    p = p * attn.unsqueeze(1)
+
+    r = 1.0 + p.sum(dim=1)
+    r = r.masked_fill(attn == 0, 1e9)
+
+    return r
 
 
-def total_variation_1d(z: torch.Tensor, attn: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    z = z * attn
-    dz = (z[:, 1:] - z[:, :-1]).abs()
-    valid = (attn[:, 1:] * attn[:, :-1]).to(dz.dtype)
-    tv_sum = (dz * valid).sum(dim=1)
-    denom = valid.sum(dim=1).clamp(min=1.0)
-    tv = (tv_sum / denom).mean()
-    return tv
-
+# ------------------------------------------------------------
+# Rationale Selector Model
+# ------------------------------------------------------------
 
 class RationaleSelectorModel(nn.Module):
     def __init__(
@@ -83,68 +73,118 @@ class RationaleSelectorModel(nn.Module):
         embedding_dim: int,
         hidden: int | None = None,
         dropout: float = 0.1,
-        tau: float = 1.0,
-        l: float = -0.1,
-        r: float = 1.1,
-        coupling_k: float = 2.0,
-        eps: float = 1e-6,
-        rho: float = 0.30,
-        hard_type: str = "probabilistic_top_k",
-        tv_weight: float = 0.0,
+        rhos: Sequence[float] | None = None,
+        sent_encoder: SentenceEncoder | None = None,
+        loss_cfg: dict | None = None,
     ) -> None:
         super().__init__()
+
         if hidden is None:
             hidden = 4 * embedding_dim // 3
 
         self.selector = SelectorMLP(embedding_dim, hidden, dropout)
-        self.tau = float(tau)
-        self.l = float(l)
-        self.r = float(r)
-        self.coupling_k = float(coupling_k)
-        self.eps = float(eps)
-        self.rho = float(rho)
-        self.hard_type = hard_type
-        self.tv_weight = float(tv_weight)
+        self.sent_encoder = sent_encoder
+        self.loss_cfg = loss_cfg
+        self.rhos = rhos
+
+        self.tau_rank = 0.05
+        self.gamma_rank = 2.0
+        self.tau_gate = 0.2
 
     def forward(
         self,
+        ids: torch.Tensor,
         embeddings: torch.Tensor,
         attn: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ):
+        device = embeddings.device
 
         emb = embeddings * attn.unsqueeze(-1)
         scores = self.selector(emb)
-        scores = scores.masked_fill(attn == 0, -1e9)
+        scores = scores.masked_fill(attn == 0, 0.0)
 
-        z = entmax15(scores / self.tau, dim=1) * attn
+        with torch.no_grad():
+            full_token_emb = self.sent_encoder.token_embeddings(ids, attn)
+            full_rep = self.sent_encoder.pool(full_token_emb, attn)
 
-        if self.hard_type == "hard_kuma":
-            eff = scores + self.coupling_k * (2.0 * z - 1.0)
-            a = F.softplus(eff) + self.eps
-            b = F.softplus(-eff) + self.eps
-            x = kuma_sample(a, b, self.eps)
-            y = self.l + (self.r - self.l) * x
-            h = (y.clamp(0.0, 1.0) > 0.5).float() * attn
-        elif self.hard_type == "top_k":
-            h = top_k(z, attn, rho=self.rho)
-        elif self.hard_type == "sweep":
-            h = top_k(z, attn, rho=self.rho)
-        elif self.hard_type == "probabilistic_top_k":
-            h = probabilistic_top_k(
-                scores=scores,
-                attn=attn,
-                rho=self.rho,
-            )
-        elif self.hard_type == "sweep":
-            h = z
-        elif self.hard_type == "none":
-            gumbel = sample_gumbel(scores.shape, scores.device)
-            h = (z > 0.0).float() * attn + (gumbel / self.tau).sigmoid() * attn
-        else:
-            raise ValueError(f"Unknown hard_type: {self.hard_type}")
+        g_sweep = []           # 🔥 now HARD masks
+        loss_sweep = []
+        rho_eff_sweep = []
 
-        g = h.detach() - z.detach() + z
+        recon_sum = torch.zeros((), device=device)
 
-        reg = self.tv_weight * total_variation_1d(g, attn, eps=self.eps)
+        start, end, steps = self.loss_cfg.sweep_range
 
-        return z, g, reg
+        attn_f = attn.float()
+        T_eff = attn_f.sum(dim=1).float()
+
+        ranks = soft_rank(
+            scores,
+            attn_f,
+            tau=self.tau_rank,
+            gamma=self.gamma_rank,
+        )
+
+        for rho in self.rhos:
+
+            k = torch.clamp((float(rho) * T_eff).round().long(), min=1)
+
+            # ------------------------------------------------------------
+            # SOFT GATE (for training / reconstruction)
+            # ------------------------------------------------------------
+
+            gate_raw = torch.sigmoid(
+                (k.float().unsqueeze(1) - ranks) / self.tau_gate
+            ) * attn_f
+
+            g_soft = gate_raw / gate_raw.sum(dim=1, keepdim=True).clamp(min=1e-8)
+            g_soft = g_soft * k.unsqueeze(1)
+
+            # ------------------------------------------------------------
+            # HARD TOP-K (for evaluation only)
+            # ------------------------------------------------------------
+
+            # Use ranks directly for stable top-k
+            hard_mask = torch.zeros_like(g_soft)
+
+            # smaller rank = better
+            for b in range(ranks.size(0)):
+                kb = int(k[b].item())
+                valid_idx = attn[b].nonzero(as_tuple=False).squeeze(1)
+
+                if valid_idx.numel() == 0:
+                    continue
+
+                # select top-k lowest ranks
+                ranks_b = ranks[b, valid_idx]
+                topk = torch.topk(-ranks_b, kb).indices  # negative for lowest
+                selected = valid_idx[topk]
+
+                hard_mask[b, selected] = 1.0
+
+            # ------------------------------------------------------------
+
+            k_eff = g_soft.sum(dim=1)
+            rho_eff = k_eff / T_eff.clamp(min=1.0)
+
+            g_sweep.append(hard_mask.detach().cpu())  # 🔥 HARD mask now
+            rho_eff_sweep.append(rho_eff.detach())
+
+            # reconstruction still uses SOFT gate
+            effective_attn = attn_f * g_soft
+
+            token_emb = self.sent_encoder.token_embeddings(ids, effective_attn)
+            pred_rep = self.sent_encoder.pool(token_emb, effective_attn)
+
+            l_r = recon_loss(pred_rep, full_rep)
+            recon_sum = recon_sum + l_r
+            loss_sweep.append(float(l_r.detach().item()))
+
+        recon_avg = recon_sum / len(self.rhos)
+
+        losses_log = {
+            "recon": float(recon_avg.detach().item()),
+            "total": float(recon_avg.detach().item()),
+        }
+
+        return g_soft, g_sweep, recon_avg, losses_log, loss_sweep, rho_eff_sweep

@@ -1,16 +1,24 @@
-eval:
-  split: validation
-  batch_size: 128
-  checkpoint: /home/simonelusetti/RatCon/outputs/xps/4c8c4d6c/model.pth
-  random_seeds: [0,1,2,3,4]
+runtime:
+  device: cpu
+  num_threads: 8
 
 model:
-  selector:
-    rho: 0.3
-    tau: 1.0
   encoder:
     family: sbert
     name: sentence-transformers/all-MiniLM-L6-v2
+  loss:
+    sweep_range: [0.1, 1.0, 100]
 
-runtime:
-  device: cpu
+selector:
+  signature: "bd694009"
+  tau: 1.0
+  
+eval:
+  dataset: glue/stsb
+  split: validation
+  batch_size: 64
+  max_length: 128
+  random_selector:
+    runs: 5
+    seed: 0
+

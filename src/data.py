@@ -349,4 +349,7 @@ def initialize_data(
         pin_memory=(device == "cuda"),
     )
 
-    return ds_train, ds_test, encoder, tokenizer
+    if "labels" in ds["train"].column_names:
+        return ds_train, ds_test, encoder, tokenizer, set(label for sample in ds["train"]["labels"] for label in sample)
+
+    return ds_train, ds_test, encoder, tokenizer, None

@@ -22,6 +22,7 @@ from .utils import (
     final_plots,
     dict_to_table,
 )
+from .retrival_fun import run_stsb_sweep
 
 
 def should_disable_tqdm(short_log: bool) -> bool:
@@ -224,6 +225,22 @@ class SelectorTrainer:
         self.loss_history.append(eval_losses)
         self.logger.info(f"\nFinal evaluation:\n{dict_to_table(eval_losses)}")
         final_plots(self.loss_history, counts_pred, counts_gold, self.rhos, self.logger, self.xp)
+        
+    @torch.no_grad()
+    def final_eval(self) -> None:
+        eval_losses, counts_pred, counts_gold = self.evaluate()
+        self.loss_history.append(eval_losses)
+        self.logger.info(f"\nFinal evaluation:\n{dict_to_table(eval_losses)}")
+        final_plots(self.loss_history, counts_pred, counts_gold, self.rhos, self.logger, self.xp)
+        out_dir = os.getcwd()
+        _, _, _ = run_stsb_sweep(
+            cfg=self.cfg,
+            device=self.device,
+            encoder=self.sent_encoder,
+            tokenizer=self.tokenizer,
+            selector=self.model,
+        )
+        self.logger.info(f"Saved STS-B plot to: {os.path.join(out_dir, 'spearman_vs_rho.png')}")
 
     def train(self) -> None:
         epoch_bar = tqdm(

@@ -23,7 +23,7 @@ data:
   dataset: "mr"
   config: null
   subset: 1.0
-  encoder: 
+  encoder:
     family: "sbert"
     name: null
 
@@ -45,6 +45,19 @@ runtime:
     short_log: false
     log_examples: 0
     hard: true
+
+# ------------------------------------------------------------
+# STS-B evaluation (matches metric script EXACTLY)
+# ------------------------------------------------------------
+
+eval:
+  split: "validation"      # glue/stsb split
+  batch_size: 256
+  max_length: 128
+
+  random_selector:
+    runs: 5
+    seed: 1234
 
 dora:
   exclude:

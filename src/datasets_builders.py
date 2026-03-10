@@ -87,7 +87,7 @@ def build_treebank() -> DatasetDict:
     return load_nltk_pos_corpus("treebank", treebank.tagged_sents)
 
 def build_conll2003() -> DatasetDict:
-    ds = load_dataset("conll2003").rename_column("ner_tags", "labels")\
+    ds = load_dataset("conll2003", trust_remote_code=True).rename_column("ner_tags", "labels")\
         .remove_columns(["id", "pos_tags", "chunk_tags"])
     train_ds = ds["train"]
     test_ds = concatenate_datasets([ds["validation"], ds["test"]])
@@ -100,7 +100,7 @@ def map_conll2003_secondary_labels(labels: list[str]) -> list[str]:
     return ["0" if lbl == "0" else "1" for lbl in labels]
 
 def build_wikiann() -> DatasetDict:
-    ds = load_dataset("wikiann","en").rename_column("ner_tags", "labels")\
+    ds = load_dataset("wikiann","en", trust_remote_code=True).rename_column("ner_tags", "labels")\
         .remove_columns(["spans", "langs"])
     train_ds = ds["train"]
     test_ds = concatenate_datasets([ds["validation"], ds["test"]])
@@ -189,7 +189,7 @@ def _parse_conll2000(path: Path) -> Dataset:
 
 def build_conll2000() -> DatasetDict:
     try:
-        dataset = load_dataset("conll2000").rename_column("chunk_tags", "labels")\
+        dataset = load_dataset("conll2000", trust_remote_code=True).rename_column("chunk_tags", "labels")\
             .remove_columns(["id", "pos_tags", "ner_tags"])
         train_ds = dataset["train"]
         test_ds = dataset["test"]
@@ -525,7 +525,7 @@ def swap_entities(example: dict, bank: Dict[str, List[List[str]]], rng: random.R
 def build_wikiann_swap(seed: int = 67) -> DatasetDict:
     rng = random.Random(seed)
     
-    ds = load_dataset("wikiann", "en") \
+    ds = load_dataset("wikiann", "en", trust_remote_code=True) \
         .rename_column("ner_tags", "labels") \
         .remove_columns(["spans", "langs"])
     train_ds = ds["train"]

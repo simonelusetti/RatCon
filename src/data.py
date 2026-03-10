@@ -201,7 +201,7 @@ def resolve_dataset(
     elif name == "fever":
         ds = load_from_disk(to_absolute_path("./data/raw/fever"))
     elif name == "glue":
-        ds = load_dataset("glue", "stsb")
+        ds = load_dataset("glue", "stsb", trust_remote_code=True)
     elif name == "conll2003":
         ds = build_conll2003()
     elif name == "wikiann":
@@ -209,7 +209,7 @@ def resolve_dataset(
     elif name == "wikiann_swap":
         ds = build_wikiann_swap()
     elif name == "cnn_dailymail":
-        ds = load_dataset("cnn_dailymail", "3.0.0")
+        ds = load_dataset("cnn_dailymail", "3.0.0", trust_remote_code=True)
     elif name == "ud_pos":
         ds = build_ud_pos()
     elif name == "emails_pwc":

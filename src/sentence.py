@@ -110,7 +110,7 @@ def gpt_token_embeddings(
 
     num_heads = model.config.num_attention_heads
     head_dim = model.config.hidden_size // num_heads
-    key_mask = attention_mask[:, None, None, :].clamp(min=0.0)  # [B,1,1,T]
+    key_mask = attention_mask[:, None, None, :].to(dtype=hidden_states.dtype).clamp(min=0.0)
 
     for block in model.layers:
         ln_out = block.input_layernorm(hidden_states)
@@ -120,7 +120,7 @@ def gpt_token_embeddings(
         q, k, v = torch.split(qkv, head_dim, dim=-1)
 
         scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(head_dim)
-        scores = scores + torch.log(key_mask.clamp(min=1e-9))  # mask padding
+        scores = scores + torch.log(key_mask.clamp(min=1e-9))
 
         probs = torch.softmax(scores, dim=-1)
         context = torch.matmul(probs, v)

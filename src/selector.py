@@ -96,6 +96,9 @@ class RationaleSelectorModel(nn.Module):
         attn: torch.Tensor,
         rhos: Sequence[float],
     ):
+        param_dtype = next(self.parameters()).dtype
+        if embeddings.dtype != param_dtype:
+            embeddings = embeddings.to(param_dtype)
         device = embeddings.device
 
         emb = embeddings * attn.unsqueeze(-1)

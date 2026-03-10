@@ -41,7 +41,8 @@ ALIASES = {
     "mpqa": {"mpqa"},
     "fever": {"fever"},
     "glue": {"glue", "stsb"},
-    "wikiann_swap": {"wikiann_swap"}
+    "wikiann_swap": {"wikiann_swap"},
+    "emails_pwc": {"emails_pwc", "emails", "enron", "pwc"},
 }
 
 TEXT_FIELD = {
@@ -211,6 +212,8 @@ def resolve_dataset(
         ds = load_dataset("cnn_dailymail", "3.0.0")
     elif name == "ud_pos":
         ds = build_ud_pos()
+    elif name == "emails_pwc":
+        ds = load_from_disk(to_absolute_path("./data/raw/emails_pwc"))
     else:
         raise ValueError(f"Unsupported dataset: {name}")
 

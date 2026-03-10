@@ -78,7 +78,7 @@ class SelectorTrainer:
             ).shape[-1]
 
         self.model = RationaleSelectorModel(
-            model_dim, loss_cfg=cfg.model.loss, sent_encoder=self.sent_encoder, rhos=self.rhos
+            model_dim, loss_cfg=cfg.model.loss, sent_encoder=self.sent_encoder
         ).to(self.device)
 
         self.optimizer = torch.optim.AdamW(
@@ -107,16 +107,19 @@ class SelectorTrainer:
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         self.logger.info(f"Loaded checkpoint from {self.checkpoint_path} with signature {checkpoint['meta']['sig']}")
 
-    def forward_pass(self, batch: dict, examples_count: int, total_losses: dict | None):
+    def forward_pass(self, batch: dict, examples_count: int, total_losses: dict | None, rhos: list | None = None):
         ids = batch["ids"]
         attn = batch["attn_mask"]
         bs = ids.size(0)
+        
+        if rhos is None:
+            rhos = self.rhos
 
         with torch.no_grad():
             tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
 
         z, g_sweep, loss_tensor, losses_log, loss_sweep, rho_eff_sweep = \
-            self.model(ids, tkns_embd, attn)
+            self.model(ids, tkns_embd, attn, rhos=rhos)
 
         if total_losses is None:
             total_losses = {k: 0.0 for k in losses_log}
@@ -136,7 +139,7 @@ class SelectorTrainer:
         )
 
     @torch.no_grad()
-    def evaluate(self, short: bool = False):
+    def evaluate(self, short: bool = False, rhos: list | None = None) -> tuple[dict, list | None, list | None]:
         self.model.eval()
         examples_count = 0
         total_losses = None
@@ -144,6 +147,9 @@ class SelectorTrainer:
 
         rho_eff_accum = None
         rho_eff_batches = 0
+        
+        if rhos is None:
+            rhos = self.rhos
 
         if not short:
             start, end, steps = self.cfg.model.loss.sweep_range
@@ -171,9 +177,8 @@ class SelectorTrainer:
                 rho_eff_sweep,
                 examples_count,
                 total_losses,
-            ) = self.forward_pass(batch, examples_count, total_losses)
+            ) = self.forward_pass(batch, examples_count, total_losses, rhos=rhos)
 
-            # ---- accumulate rho_eff across batches ----
             if not short:
                 if rho_eff_accum is None:
                     rho_eff_accum = [0.0 for _ in rho_eff_sweep]
@@ -183,7 +188,6 @@ class SelectorTrainer:
 
                 rho_eff_batches += 1
 
-            # ---- accumulate counts ----
             if not short and self.labels_set is not None:
                 labels = batch["labels"]
                 flat_labels = [x for seq in labels for x in seq]
@@ -195,11 +199,9 @@ class SelectorTrainer:
                     counts_pred[i] += Counts(flat_labels, flat_attn, flat_preds)
                     counts_gold[i] += Counts(flat_labels, flat_attn)
 
-        # ---- average losses ----
         for k in total_losses:
             total_losses[k] /= max(examples_count, 1)
 
-        # ---- print metrics ----
         if self.labels_set is not None and not short:
             self.logger.info("\nLabels:\n")
 
@@ -208,7 +210,6 @@ class SelectorTrainer:
                 total_tokens += batch["attn_mask"].sum().item()
 
             for i in range(len(counts_pred)):
-                # Correct batch-level selection rate
                 selected_mass = sum(g.sum().item() for g in g_sweep)
                 rate = selected_mass / total_tokens
 
@@ -217,11 +218,16 @@ class SelectorTrainer:
 
             return total_losses, counts_pred, counts_gold
 
-        return total_losses, None
+        return total_losses, None, None
 
     @torch.no_grad()
     def final_eval(self) -> None:
-        eval_losses, counts_pred, counts_gold = self.evaluate()
+        rhos = linspace(
+            self.cfg.runtime.eval.sweep_range[0],
+            self.cfg.runtime.eval.sweep_range[1],
+            self.cfg.runtime.eval.sweep_range[2]
+        )
+        eval_losses, counts_pred, counts_gold = self.evaluate(rhos=rhos)
         self.loss_history.append(eval_losses)
         self.logger.info(f"\nFinal evaluation:\n{dict_to_table(eval_losses)}")
         final_plots(self.loss_history, counts_pred, counts_gold, self.rhos, self.logger, self.xp)

@@ -1,8 +1,6 @@
-# src/metrics_stsb.py
-import os
-from pathlib import Path
 import torch
 import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
 from datasets import load_dataset
 from scipy.stats import spearmanr
 from tqdm import tqdm
@@ -11,34 +9,65 @@ from numpy import linspace
 
 def get_rhos(cfg):
     return list(linspace(
-        cfg.model.loss.sweep_range[0],
-        cfg.model.loss.sweep_range[1],
-        cfg.model.loss.sweep_range[2],
+        cfg.sweep_range[0],
+        cfg.sweep_range[1],
+        cfg.sweep_range[2],
     ))
 
 
-def batch_tokenize(tokenizer, sentences, device, max_length):
-    out = tokenizer(
-        sentences,
-        padding=True,
-        truncation=True,
-        max_length=max_length,
-        return_tensors="pt",
-    )
-    return {k: v.to(device) for k, v in out.items()}
+class STSBDataset(Dataset):
+    def __init__(self, hf_dataset):
+        self.ds = hf_dataset
+
+    def __len__(self):
+        return len(self.ds)
+
+    def __getitem__(self, idx):
+        item = self.ds[idx]
+        return {
+            "sentence1": item["sentence1"],
+            "sentence2": item["sentence2"],
+            "label": float(item["label"]),
+        }
+
+
+def build_stsb_collate(tokenizer, device, max_length):
+    def collate_fn(batch):
+        s1 = [x["sentence1"] for x in batch]
+        s2 = [x["sentence2"] for x in batch]
+        labels = torch.tensor([x["label"] for x in batch], dtype=torch.float)
+
+        t1 = tokenizer(
+            s1,
+            padding=True,
+            truncation=True,
+            max_length=max_length,
+            return_tensors="pt",
+        )
+
+        t2 = tokenizer(
+            s2,
+            padding=True,
+            truncation=True,
+            max_length=max_length,
+            return_tensors="pt",
+        )
+
+        return {
+            "t1": {k: v.to(device) for k, v in t1.items()},
+            "t2": {k: v.to(device) for k, v in t2.items()},
+            "labels": labels,
+        }
+
+    return collate_fn
 
 
 @torch.no_grad()
-def eval_baseline(ds, encoder, tokenizer, cfg, device):
+def eval_baseline(loader, encoder):
     sims, labels = [], []
-    bs = cfg.eval.batch_size
-    max_len = cfg.eval.max_length
 
-    for i in tqdm(range(0, len(ds), bs), desc="STS-B baseline"):
-        batch = ds[i:i + bs]
-
-        t1 = batch_tokenize(tokenizer, batch["sentence1"], device, max_len)
-        t2 = batch_tokenize(tokenizer, batch["sentence2"], device, max_len)
+    for batch in tqdm(loader, desc="STS-B baseline"):
+        t1, t2 = batch["t1"], batch["t2"]
 
         e1 = encoder.token_embeddings(t1["input_ids"], t1["attention_mask"])
         e2 = encoder.token_embeddings(t2["input_ids"], t2["attention_mask"])
@@ -47,34 +76,27 @@ def eval_baseline(ds, encoder, tokenizer, cfg, device):
         z2 = encoder.pool(e2, t2["attention_mask"])
 
         sims.extend(F.cosine_similarity(z1, z2).cpu().tolist())
-        labels.extend(batch["label"])
+        labels.extend(batch["labels"].tolist())
 
     return float(spearmanr(sims, labels)[0])
 
 
 @torch.no_grad()
-def eval_sweep(ds, encoder, tokenizer, cfg, device, mask_generator, desc: str):
-    rhos = get_rhos(cfg)
-    bs = cfg.eval.batch_size
-    max_len = cfg.eval.max_length
+def eval_sweep(loader, encoder, mask_generator, eval_cfg):
+    rhos = get_rhos(eval_cfg)
 
     sims = {rho: [] for rho in rhos}
     labels = []
 
-    for i in tqdm(range(0, len(ds), bs), desc=desc):
-        batch = ds[i:i + bs]
-
-        t1 = batch_tokenize(tokenizer, batch["sentence1"], device, max_len)  # query
-        t2 = batch_tokenize(tokenizer, batch["sentence2"], device, max_len)  # target
+    for batch in tqdm(loader, desc="STS-B selector"):
+        t1, t2 = batch["t1"], batch["t2"]
 
         a1 = t1["attention_mask"]
         a2 = t2["attention_mask"]
 
-        # target once
         e2_full = encoder.token_embeddings(t2["input_ids"], a2)
         z2 = encoder.pool(e2_full, a2)
 
-        # query masks once per batch
         new_a1_sweep = mask_generator(t1, a1, rhos)
 
         for rho, new_a1 in zip(rhos, new_a1_sweep):
@@ -82,7 +104,7 @@ def eval_sweep(ds, encoder, tokenizer, cfg, device, mask_generator, desc: str):
             z1 = encoder.pool(e1_masked, new_a1)
             sims[rho].extend(F.cosine_similarity(z1, z2).cpu().tolist())
 
-        labels.extend(batch["label"])
+        labels.extend(batch["labels"].tolist())
 
     return {rho: float(spearmanr(sims[rho], labels)[0]) for rho in rhos}
 
@@ -91,12 +113,13 @@ def build_selector_mask_generator(selector, encoder, device):
     @torch.no_grad()
     def mask_generator(t1, a1, rhos):
         e1_full = encoder.token_embeddings(t1["input_ids"], a1)
-        _, g_sweep, *_ = selector(t1["input_ids"], e1_full, a1)
+        _, g_sweep, *_ = selector(t1["input_ids"], e1_full, a1, rhos=rhos)
 
         new_a1_sweep = []
         for g in g_sweep:
             g = g.detach().to(device).float()
             new_a1_sweep.append(g * a1)
+
         return new_a1_sweep
 
     return mask_generator
@@ -130,20 +153,23 @@ def build_random_mask_generator(cfg, device):
 
 
 @torch.no_grad()
-def eval_random_sweep(ds, encoder, tokenizer, cfg, device):
-    rhos = get_rhos(cfg)
-    runs = cfg.eval.random_selector.runs
+def eval_random_sweep(loader, encoder, tokenizer, eval_cfg, device):
+    rhos = get_rhos(eval_cfg)
+    runs = eval_cfg.random_selector.runs
+
     acc = {rho: [] for rho in rhos}
 
     for run in range(runs):
-        torch.manual_seed(cfg.eval.random_selector.seed + run)
-        rand_mask_gen = build_random_mask_generator(cfg, device)
+        torch.manual_seed(eval_cfg.random_selector.seed + run)
+        rand_mask_gen = build_random_mask_generator(eval_cfg, device)
 
         out = eval_sweep(
-            ds, encoder, tokenizer, cfg, device,
+            loader,
+            encoder,
             rand_mask_gen,
-            desc=f"STS-B random {run+1}/{runs}",
+            eval_cfg,
         )
+
         for rho in rhos:
             acc[rho].append(out[rho])
 
@@ -166,20 +192,35 @@ def plot(base, ours, rand):
     plt.grid(True, linestyle=":")
     plt.legend()
     plt.tight_layout()
-
     plt.savefig("spearman_vs_rho.png", dpi=300)
     plt.close()
 
 
 @torch.no_grad()
 def run_stsb_sweep(cfg, device, encoder, tokenizer, selector):
-    ds = load_dataset("glue", "stsb", split=cfg.eval.split)
+    hf_ds = load_dataset("glue", "stsb", split=cfg.runtime.eval.split)
+    ds = STSBDataset(hf_ds)
 
-    base = eval_baseline(ds, encoder, tokenizer, cfg, device)
+    collate_fn = build_stsb_collate(
+        tokenizer,
+        device,
+        cfg.data.max_length,
+    )
+
+    loader = DataLoader(
+        ds,
+        batch_size=cfg.runtime.data.batch_size,
+        shuffle=False,
+        num_workers=0,
+        collate_fn=collate_fn,
+    )
+
+    base = eval_baseline(loader, encoder)
 
     selector_mask_gen = build_selector_mask_generator(selector, encoder, device)
-    ours = eval_sweep(ds, encoder, tokenizer, cfg, device, selector_mask_gen, desc="STS-B selector")
-    rand = eval_random_sweep(ds, encoder, tokenizer, cfg, device)
+    
+    ours = eval_sweep(loader, encoder, selector_mask_gen, cfg.runtime.eval)
+    rand = eval_random_sweep(loader, encoder, tokenizer, cfg.runtime.eval, device)
 
     plot(base, ours, rand)
 

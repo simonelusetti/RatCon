@@ -432,9 +432,6 @@ def save_cramers_v_plot_from_pred_gold(
     plt.close(fig)
 
 
-# ---------------------------------------------------------------------
-# Single entrypoint: orchestrates the plots (saves individually)
-# ---------------------------------------------------------------------
 def final_plots(
     loss_history: Sequence[Mapping[str, float]],
     counts_pred: Optional[Sequence[Any]],

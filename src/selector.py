@@ -150,13 +150,15 @@ class RationaleSelectorModel(nn.Module):
 
                 hard_mask[b, selected] = 1.0
 
-            k_eff = g_soft.sum(dim=1)
+            g_st = hard_mask + (g_soft - g_soft.detach())
+
+            k_eff = hard_mask.sum(dim=1)
             rho_eff = k_eff / T_eff.clamp(min=1.0)
 
             g_sweep.append(hard_mask.detach().cpu())
             rho_eff_sweep.append(rho_eff.detach())
 
-            effective_attn = attn_f * g_soft
+            effective_attn = attn_f * g_st
 
             token_emb = self.sent_encoder.token_embeddings(ids, effective_attn)
             pred_rep = self.sent_encoder.pool(token_emb, effective_attn)
@@ -172,4 +174,4 @@ class RationaleSelectorModel(nn.Module):
             "total": float(recon_avg.detach().item()),
         }
 
-        return g_soft, g_sweep, recon_avg, losses_log, loss_sweep, rho_eff_sweep
+        return g_st, g_sweep, recon_avg, losses_log, loss_sweep, rho_eff_sweep

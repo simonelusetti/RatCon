@@ -1,8 +1,10 @@
 import os
+import re
 import sys
 import torch
 
 from logging import Logger
+from pathlib import Path
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -60,7 +62,9 @@ class SelectorTrainer:
         self._tqdm_disabled = should_disable_tqdm(self.short_log)
 
         self.xp = xp
-        self.checkpoint_path = "model.pth"
+        self.resume_training = bool(cfg.train.get("continue", False))
+        self.checkpoint_dir = Path(os.getcwd())
+        self.legacy_checkpoint_path = self.checkpoint_dir / "model.pth"
 
         self.tokenizer = tokenizer
         self.labels_set = labels_set
@@ -90,22 +94,68 @@ class SelectorTrainer:
 
         self.loss_history = []
 
-    def save_checkpoint(self) -> None:
+    def checkpoint_path(self, epoch: int) -> Path:
+        return self.checkpoint_dir / f"model_{epoch}.pth"
+
+    def checkpoint_epoch(self, checkpoint_path: Path) -> int | None:
+        match = re.fullmatch(r"model_(\d+)\.pth", checkpoint_path.name)
+        if match is None:
+            return None
+        return int(match.group(1))
+
+    def latest_checkpoint(self) -> tuple[int, Path] | None:
+        candidates: list[tuple[int, Path]] = []
+
+        for checkpoint_path in self.checkpoint_dir.glob("model_*.pth"):
+            epoch = self.checkpoint_epoch(checkpoint_path)
+            if epoch is not None:
+                candidates.append((epoch, checkpoint_path))
+
+        if candidates:
+            return max(candidates, key=lambda item: item[0])
+
+        if self.legacy_checkpoint_path.exists():
+            return 0, self.legacy_checkpoint_path
+
+        return None
+
+    def save_checkpoint(self, epoch: int) -> None:
+        checkpoint_path = self.checkpoint_path(epoch)
         torch.save(
             {
                 "model": self.model.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
-                "meta": {"sig": self.xp.sig},
+                "meta": {"sig": self.xp.sig, "epoch": epoch},
             },
-            self.checkpoint_path,
+            checkpoint_path,
             _use_new_zipfile_serialization=False,
         )
+        self.logger.info("Saved checkpoint to %s", checkpoint_path)
         
-    def load_checkpoint(self) -> None:
-        checkpoint = torch.load(self.checkpoint_path, map_location=self.device)
+    def load_checkpoint(self, checkpoint_path: Path | None = None) -> int:
+        resolved_path = checkpoint_path
+        resolved_epoch = None
+
+        if resolved_path is None:
+            latest = self.latest_checkpoint()
+            if latest is None:
+                raise FileNotFoundError("No checkpoint found in the current experiment folder.")
+            resolved_epoch, resolved_path = latest
+        else:
+            resolved_epoch = self.checkpoint_epoch(resolved_path)
+
+        checkpoint = torch.load(resolved_path, map_location=self.device)
         self.model.load_state_dict(checkpoint["model"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
-        self.logger.info(f"Loaded checkpoint from {self.checkpoint_path} with signature {checkpoint['meta']['sig']}")
+        meta = checkpoint.get("meta", {})
+        loaded_epoch = int(meta.get("epoch", resolved_epoch or 0))
+        self.logger.info(
+            "Loaded checkpoint from %s with signature %s at epoch %d",
+            resolved_path,
+            meta.get("sig", "unknown"),
+            loaded_epoch,
+        )
+        return loaded_epoch
 
     def forward_pass(self, batch: dict, examples_count: int, total_losses: dict | None, rhos: list | None = None):
         ids = batch["ids"]
@@ -249,8 +299,31 @@ class SelectorTrainer:
         self.logger.info(f"Saved STS-B plot to: {os.path.join(out_dir, 'spearman_vs_rho.png')}")
 
     def train(self) -> None:
+        start_epoch = 0
+
+        if self.resume_training:
+            latest = self.latest_checkpoint()
+            if latest is None:
+                self.logger.info("No checkpoint found to resume from. Starting from epoch 1.")
+            else:
+                _, checkpoint_path = latest
+                start_epoch = self.load_checkpoint(checkpoint_path)
+                if start_epoch >= self.epochs:
+                    self.logger.info(
+                        "Checkpoint epoch %d already reaches the target of %d epochs. Running final evaluation only.",
+                        start_epoch,
+                        self.epochs,
+                    )
+                    self.final_eval()
+                    return
+                self.logger.info(
+                    "Resuming training from epoch %d of %d.",
+                    start_epoch + 1,
+                    self.epochs,
+                )
+
         epoch_bar = tqdm(
-            range(self.epochs),
+            range(start_epoch, self.epochs),
             desc="Training",
             leave=True,
             dynamic_ncols=True,
@@ -298,7 +371,7 @@ class SelectorTrainer:
 
             eval_losses, _, _ = self.evaluate()
             self.loss_history.append(eval_losses)
-            self.save_checkpoint()
+            self.save_checkpoint(epoch + 1)
 
         self.final_eval()
 

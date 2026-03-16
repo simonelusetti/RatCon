@@ -30,6 +30,7 @@ data:
 train:
   epochs: 30
   no_train: false
+  continue: false
 
 runtime:
   grid: false
@@ -56,6 +57,7 @@ dora:
     - "slurm.*"
     - "runtime.*"
     - "train.no_train"
+    - "train.continue"
 
 array: 0
 

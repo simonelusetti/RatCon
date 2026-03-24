@@ -3,6 +3,7 @@ import re
 import sys
 import torch
 
+from datasets import DatasetDict
 from logging import Logger
 from pathlib import Path
 from torch.utils.data import DataLoader
@@ -14,21 +15,28 @@ from transformers import AutoTokenizer
 from numpy import linspace
 
 from .metrics import Counts
+from .dynamic_batch import DynamicBatchController
 from .sentence import SentenceEncoder
 from .selector import RationaleSelectorModel
-from .data import initialize_data
+from .data import PAD_TAG, SPECIAL_TAG, initialize_data
 from .utils import (
     get_logger,
     configure_runtime,
     to_device,
-    final_plots,
     dict_to_table,
+    load_loss_history,
+    save_label_plots,
+    save_loss_history,
+    save_loss_plot,
+    selection_rate_matrix_to_table,
 )
 from .retrival_fun import run_stsb_sweep
 
 
-def should_disable_tqdm(short_log: bool) -> bool:
+def should_disable_tqdm(short_log: bool, grid_mode: bool = False) -> bool:
     if short_log:
+        return True
+    if grid_mode:
         return True
     if not sys.stderr.isatty():
         return True
@@ -39,6 +47,7 @@ class SelectorTrainer:
     def __init__(
         self,
         cfg: DictConfig,
+        ds: DatasetDict,
         train_dl: DataLoader,
         test_dl: DataLoader,
         sent_encoder: SentenceEncoder,
@@ -55,19 +64,26 @@ class SelectorTrainer:
 
         self.epochs = cfg.train.epochs
         self.short_log = cfg.runtime.eval.short_log
+        self.grid_mode = bool(cfg.runtime.grid)
         self.examples = cfg.runtime.eval.log_examples
         self.device = cfg.runtime.device
         self.rhos = linspace(cfg.model.loss.sweep_range[0], cfg.model.loss.sweep_range[1], cfg.model.loss.sweep_range[2])
 
-        self._tqdm_disabled = should_disable_tqdm(self.short_log)
+        self._tqdm_disabled = should_disable_tqdm(self.short_log, self.grid_mode)
 
         self.xp = xp
         self.resume_training = bool(cfg.train.get("continue", False))
         self.checkpoint_dir = Path(os.getcwd())
+        self.state_dir = self.checkpoint_dir / "state"
+        self.models_dir = self.state_dir / "models"
+        self.plots_dir = self.checkpoint_dir / "plots"
+        self.loss_history_path = self.state_dir / "loss_history.json"
         self.legacy_checkpoint_path = self.checkpoint_dir / "model.pth"
+        self.legacy_models_glob = "model_*.pth"
 
         self.tokenizer = tokenizer
-        self.labels_set = labels_set
+        self.labels_set = None if labels_set is None else set(labels_set) | {SPECIAL_TAG}
+        self.suppress_special_tokens = bool(cfg.model.selector.get("suppress_special_tokens", False))
 
         self.sent_encoder = sent_encoder.to(self.device)
         self.sent_encoder.eval()
@@ -92,10 +108,19 @@ class SelectorTrainer:
             betas=tuple(cfg.model.optim.betas),
         )
 
-        self.loss_history = []
+        self.models_dir.mkdir(parents=True, exist_ok=True)
+        self.plots_dir.mkdir(parents=True, exist_ok=True)
+        self.loss_history = load_loss_history(self.loss_history_path)
+        self.batch_controller = DynamicBatchController(
+            cfg.runtime.data,
+            ds=ds,
+            logger=logger,
+            device=self.device,
+            shuffle=bool(cfg.data.shuffle),
+        )
 
     def checkpoint_path(self, epoch: int) -> Path:
-        return self.checkpoint_dir / f"model_{epoch}.pth"
+        return self.models_dir / f"model_{epoch}.pth"
 
     def checkpoint_epoch(self, checkpoint_path: Path) -> int | None:
         match = re.fullmatch(r"model_(\d+)\.pth", checkpoint_path.name)
@@ -106,7 +131,12 @@ class SelectorTrainer:
     def latest_checkpoint(self) -> tuple[int, Path] | None:
         candidates: list[tuple[int, Path]] = []
 
-        for checkpoint_path in self.checkpoint_dir.glob("model_*.pth"):
+        for checkpoint_path in self.models_dir.glob("model_*.pth"):
+            epoch = self.checkpoint_epoch(checkpoint_path)
+            if epoch is not None:
+                candidates.append((epoch, checkpoint_path))
+
+        for checkpoint_path in self.checkpoint_dir.glob(self.legacy_models_glob):
             epoch = self.checkpoint_epoch(checkpoint_path)
             if epoch is not None:
                 candidates.append((epoch, checkpoint_path))
@@ -125,11 +155,17 @@ class SelectorTrainer:
             {
                 "model": self.model.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
-                "meta": {"sig": self.xp.sig, "epoch": epoch},
+                "meta": {
+                    "sig": self.xp.sig,
+                    "epoch": epoch,
+                    **self.batch_controller.checkpoint_meta(),
+                },
+                "loss_history": self.loss_history,
             },
             checkpoint_path,
             _use_new_zipfile_serialization=False,
         )
+        save_loss_history(self.loss_history, self.loss_history_path)
         self.logger.info("Saved checkpoint to %s", checkpoint_path)
         
     def load_checkpoint(self, checkpoint_path: Path | None = None) -> int:
@@ -148,14 +184,68 @@ class SelectorTrainer:
         self.model.load_state_dict(checkpoint["model"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         meta = checkpoint.get("meta", {})
+        if self.loss_history_path.exists():
+            self.loss_history = load_loss_history(self.loss_history_path)
+        else:
+            self.loss_history = [
+                {str(k): float(v) for k, v in item.items()}
+                for item in checkpoint.get("loss_history", [])
+            ]
+        restored_loaders = self.batch_controller.load_checkpoint_meta(meta)
+        if restored_loaders is not None:
+            self.train_dl, self.test_dl = restored_loaders
         loaded_epoch = int(meta.get("epoch", resolved_epoch or 0))
         self.logger.info(
-            "Loaded checkpoint from %s with signature %s at epoch %d",
+            "Loaded checkpoint from %s with signature %s at epoch %d (batch size %d)",
             resolved_path,
             meta.get("sig", "unknown"),
             loaded_epoch,
+            self.batch_controller.batch_size,
         )
         return loaded_epoch
+
+    def record_eval_losses(self, eval_losses: dict) -> None:
+        self.loss_history.append({str(k): float(v) for k, v in eval_losses.items()})
+        save_loss_history(self.loss_history, self.loss_history_path)
+
+    def write_loss_plot(self) -> None:
+        if not self.loss_history:
+            self.logger.info("Skipping loss plot because no loss history is available.")
+            return
+
+        loss_path = self.plots_dir / "loss.png"
+        save_loss_plot(self.loss_history, str(loss_path))
+        self.logger.info("Saved loss plot to %s", loss_path)
+
+    def selection_candidate_mask(self, batch: dict) -> torch.Tensor:
+        attn = batch["attn_mask"]
+        if not self.suppress_special_tokens:
+            return attn
+
+        word_ids = batch.get("word_ids")
+        if word_ids is None:
+            return attn
+
+        return attn * word_ids.ge(0).to(dtype=attn.dtype)
+
+    def flatten_eval_labels(self, batch: dict, attn: torch.Tensor) -> list[str]:
+        labels = batch["labels"]
+        flat_labels = [label for seq in labels for label in seq]
+        word_ids = batch.get("word_ids")
+        if word_ids is None:
+            return flat_labels
+
+        flat_attn = attn.bool().view(-1).cpu()
+        flat_word_ids = word_ids.view(-1).cpu().tolist()
+
+        adjusted_labels: list[str] = []
+        for label, is_attended, word_id in zip(flat_labels, flat_attn.tolist(), flat_word_ids):
+            if is_attended and word_id < 0 and label == PAD_TAG:
+                adjusted_labels.append(SPECIAL_TAG)
+            else:
+                adjusted_labels.append(label)
+
+        return adjusted_labels
 
     def forward_pass(self, batch: dict, examples_count: int, total_losses: dict | None, rhos: list | None = None):
         ids = batch["ids"]
@@ -167,9 +257,10 @@ class SelectorTrainer:
 
         with torch.no_grad():
             tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
+        selection_mask = self.selection_candidate_mask(batch)
 
         z, g_sweep, loss_tensor, losses_log, loss_sweep, rho_eff_sweep = \
-            self.model(ids, tkns_embd, attn, rhos=rhos)
+            self.model(ids, tkns_embd, attn, rhos=rhos, selection_mask=selection_mask)
 
         if total_losses is None:
             total_losses = {k: 0.0 for k in losses_log}
@@ -189,7 +280,11 @@ class SelectorTrainer:
         )
 
     @torch.no_grad()
-    def evaluate(self, short: bool = False, rhos: list | None = None) -> tuple[dict, list | None, list | None]:
+    def evaluate(
+        self,
+        short: bool = False,
+        rhos: list | None = None,
+    ) -> tuple[dict, list | None, list | None, list[float] | None]:
         self.model.eval()
         examples_count = 0
         total_losses = None
@@ -239,9 +334,7 @@ class SelectorTrainer:
                 rho_eff_batches += 1
 
             if not short and self.labels_set is not None:
-                labels = batch["labels"]
-                flat_labels = [x for seq in labels for x in seq]
-
+                flat_labels = self.flatten_eval_labels(batch, attn)
                 flat_attn = attn.bool().view(-1).cpu()
 
                 for i, g in enumerate(g_sweep):
@@ -253,50 +346,42 @@ class SelectorTrainer:
             total_losses[k] /= max(examples_count, 1)
 
         if self.labels_set is not None and not short:
-            self.logger.info("\nLabels:\n")
+            selection_rates: list[float] = list(rhos)
+            if rho_eff_accum is not None and rho_eff_batches > 0:
+                selection_rates = [value / rho_eff_batches for value in rho_eff_accum]
 
-            total_tokens = 0
-            for batch in self.test_dl:
-                total_tokens += batch["attn_mask"].sum().item()
+            self.logger.info(
+                "\nLabel selection matrix (columns = mean effective selection rate):\n%s",
+                selection_rate_matrix_to_table(counts_pred, counts_gold, selection_rates),
+            )
 
-            for i in range(len(counts_pred)):
-                selected_mass = sum(g.sum().item() for g in g_sweep)
-                rate = selected_mass / total_tokens
+            return total_losses, counts_pred, counts_gold, selection_rates
 
-                self.logger.info(f"rate {rate:.3f}\n")
-                self.logger.info(f"\n{(counts_pred[i] / counts_gold[i]).to_table()}")
-
-            return total_losses, counts_pred, counts_gold
-
-        return total_losses, None, None
+        return total_losses, None, None, None
 
     @torch.no_grad()
     def final_eval(self) -> None:
-        rhos = linspace(
-            self.cfg.runtime.eval.sweep_range[0],
-            self.cfg.runtime.eval.sweep_range[1],
-            self.cfg.runtime.eval.sweep_range[2]
+        eval_losses, counts_pred, counts_gold, selection_rates = self.evaluate()
+        self.record_eval_losses(eval_losses)
+        self.logger.info(f"\nFinal evaluation:\n{dict_to_table(eval_losses)}")
+        self.write_loss_plot()
+        save_label_plots(
+            counts_pred,
+            counts_gold,
+            selection_rates if selection_rates is not None else self.rhos,
+            self.plots_dir,
+            self.logger,
         )
-        eval_losses, counts_pred, counts_gold = self.evaluate(rhos=rhos)
-        self.loss_history.append(eval_losses)
-        self.logger.info(f"\nFinal evaluation:\n{dict_to_table(eval_losses)}")
-        final_plots(self.loss_history, counts_pred, counts_gold, self.rhos, self.logger, self.xp)
-        
-    @torch.no_grad()
-    def final_eval(self) -> None:
-        eval_losses, counts_pred, counts_gold = self.evaluate()
-        self.loss_history.append(eval_losses)
-        self.logger.info(f"\nFinal evaluation:\n{dict_to_table(eval_losses)}")
-        final_plots(self.loss_history, counts_pred, counts_gold, self.rhos, self.logger, self.xp)
-        out_dir = os.getcwd()
+        stsb_plot_path = self.plots_dir / "spearman_vs_rho.png"
         _, _, _ = run_stsb_sweep(
             cfg=self.cfg,
             device=self.device,
             encoder=self.sent_encoder,
             tokenizer=self.tokenizer,
             selector=self.model,
+            out_path=str(stsb_plot_path),
         )
-        self.logger.info(f"Saved STS-B plot to: {os.path.join(out_dir, 'spearman_vs_rho.png')}")
+        self.logger.info("Saved STS-B plot to: %s", stsb_plot_path)
 
     def train(self) -> None:
         start_epoch = 0
@@ -332,6 +417,7 @@ class SelectorTrainer:
         )
 
         for epoch in epoch_bar:
+            epoch_start_stats = self.batch_controller.sample_memory()
             self.model.train()
             total_losses = None
             examples_count = 0
@@ -365,12 +451,26 @@ class SelectorTrainer:
             for k in total_losses:
                 total_losses[k] /= max(examples_count, 1)
 
-            if not self.short_log:
-                self.logger.info(f"Epoch {epoch + 1}/{self.epochs}")
+            if self.grid_mode:
+                self.logger.info("GRID_EPOCH %d/%d", epoch + 1, self.epochs)
+            elif not self.short_log:
+                self.logger.info(
+                    "Epoch %d/%d (batch size %d)",
+                    epoch + 1,
+                    self.epochs,
+                    self.batch_controller.batch_size,
+                )
                 self.logger.info(f"\n{dict_to_table(total_losses)}")
 
-            eval_losses, _, _ = self.evaluate()
-            self.loss_history.append(eval_losses)
+            eval_losses, _, _, _ = self.evaluate()
+            self.record_eval_losses(eval_losses)
+            epoch_end_stats = self.batch_controller.sample_memory()
+            new_loaders = self.batch_controller.maybe_reduce_after_epoch(
+                epoch_start_stats,
+                epoch_end_stats,
+            )
+            if new_loaders is not None:
+                self.train_dl, self.test_dl = new_loaders
             self.save_checkpoint(epoch + 1)
 
         self.final_eval()
@@ -389,7 +489,7 @@ def main(cfg: DictConfig) -> None:
     if changed_device:
         logger.warning("CUDA requested but unavailable, using CPU.")
 
-    train_dl, test_dl, encoder, tokenizer, labels_set = initialize_data(
+    train_dl, test_dl, encoder, tokenizer, labels_set, ds = initialize_data(
         cfg.data,
         cfg.runtime.data,
         logger,
@@ -397,7 +497,7 @@ def main(cfg: DictConfig) -> None:
     )
 
     trainer = SelectorTrainer(
-        cfg, train_dl, test_dl, encoder, tokenizer, labels_set, logger, xp
+        cfg, ds, train_dl, test_dl, encoder, tokenizer, labels_set, logger, xp
     )
 
     if cfg.train.no_train:

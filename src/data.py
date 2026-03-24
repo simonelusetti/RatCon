@@ -63,6 +63,7 @@ TEXT_FIELD = {
 }
 
 PAD_TAG = "-100"
+SPECIAL_TAG = "special"
 
 SECONDARY_LABELS_DS = {
     "conll2003": map_conll2003_secondary_labels,
@@ -324,7 +325,7 @@ def initialize_data(
     runtime_cfg: dict,
     logger: logging.Logger | None = None,
     device: str = "cpu",
-) -> tuple[DataLoader, DataLoader, SentenceEncoder, PreTrainedTokenizerBase]:
+) -> tuple[DataLoader, DataLoader, SentenceEncoder, PreTrainedTokenizerBase, set[str] | None, DatasetDict]:
     encoder, tokenizer = build_sentence_encoder(
         family=data_cfg.encoder.family,
         encoder_name=data_cfg.encoder.name,
@@ -334,25 +335,46 @@ def initialize_data(
     ds = get_dataset(data_cfg, runtime_cfg, tokenizer, logger)
     ds = shuffle_and_subset(ds, data_cfg.subset, data_cfg.shuffle)
 
+    ds_train, ds_test = build_dataloaders(
+        ds,
+        batch_size=int(runtime_cfg.batch_size),
+        num_workers=int(runtime_cfg.num_workers),
+        shuffle=bool(data_cfg.shuffle),
+        device=device,
+    )
+
+    labels_set = None
+    if "labels" in ds["train"].column_names:
+        labels_set = set(label for sample in ds["train"]["labels"] for label in sample)
+
+    return ds_train, ds_test, encoder, tokenizer, labels_set, ds
+
+
+def build_dataloaders(
+    ds: DatasetDict,
+    batch_size: int,
+    num_workers: int,
+    shuffle: bool,
+    device: str = "cpu",
+) -> tuple[DataLoader, DataLoader]:
+    batch_size = max(1, int(batch_size))
+
     ds_train = DataLoader(
         ds["train"],
-        batch_size=runtime_cfg.batch_size,
-        num_workers=runtime_cfg.num_workers,
+        batch_size=batch_size,
+        num_workers=num_workers,
         collate_fn=collate,
-        shuffle=data_cfg.shuffle,
+        shuffle=shuffle,
         pin_memory=(device == "cuda"),
     )
 
     ds_test = DataLoader(
         ds["test"],
-        batch_size=runtime_cfg.batch_size,
-        num_workers=runtime_cfg.num_workers,
+        batch_size=batch_size,
+        num_workers=num_workers,
         collate_fn=collate,
-        shuffle=data_cfg.shuffle,
+        shuffle=shuffle,
         pin_memory=(device == "cuda"),
     )
 
-    if "labels" in ds["train"].column_names:
-        return ds_train, ds_test, encoder, tokenizer, set(label for sample in ds["train"]["labels"] for label in sample)
-
-    return ds_train, ds_test, encoder, tokenizer, None
+    return ds_train, ds_test

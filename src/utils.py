@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import sys
@@ -146,6 +147,22 @@ def format_dict(d: Mapping[str, int | float | str], new_liners: set[str] | None 
     return "\n".join(lines)
 
 
+def _label_sort_key(label: Any) -> tuple[int, Any]:
+    if isinstance(label, (int, np.integer)):
+        return 0, int(label)
+    if isinstance(label, float):
+        return 1, float(label)
+    if isinstance(label, str):
+        try:
+            return 0, int(label)
+        except ValueError:
+            try:
+                return 1, float(label)
+            except ValueError:
+                return 2, label
+    return 3, str(label)
+
+
 def tkns_to_words(
     gates: torch.Tensor,
     attn_mask: torch.Tensor,
@@ -233,6 +250,31 @@ def _get_count(count_obj: Any, label: Any) -> int:
     )
 
 
+def selection_rate_matrix_to_table(
+    counts_pred: Sequence[Any],
+    counts_gold: Sequence[Any],
+    selection_rates: Sequence[float],
+) -> PrettyTable:
+    labels = sorted(
+        {label for counts in counts_gold for label in counts.data.keys()},
+        key=_label_sort_key,
+    )
+
+    headers = ["label"] + [f"{rate:.3f}" for rate in selection_rates]
+    rows: list[list[str]] = []
+
+    for label in labels:
+        row = [str(label)]
+        for pred, gold in zip(counts_pred, counts_gold):
+            total = _get_count(gold, label) if label in gold.data else 0
+            kept = _get_count(pred, label) if label in pred.data else 0
+            value = (kept / total) if total > 0 else 0.0
+            row.append(f"{value:.2f}")
+        rows.append(row)
+
+    return make_table(headers, rows)
+
+
 def _contingency_2x2_from_pred_gold(
     pred: Any,
     gold: Any,
@@ -281,6 +323,9 @@ def _chi_square_stats(table_2x2: np.ndarray) -> Tuple[float, float, float]:
 # Individual Plotters (square figures, saved individually)
 # ---------------------------------------------------------------------
 def save_loss_plot(loss_history: Sequence[Mapping[str, float]], out_path: str) -> None:
+    if not loss_history:
+        return
+
     fig, ax = plt.subplots(figsize=(8, 8))
     ax.set_title("Losses Across Epochs")
     ax.set_xlabel("Epoch")
@@ -307,20 +352,20 @@ def save_loss_plot(loss_history: Sequence[Mapping[str, float]], out_path: str) -
 def save_selection_rates_plot_from_pred_gold(
     counts_pred: Sequence[Any],
     counts_gold: Sequence[Any],
-    rhos: Sequence[float],
+    selection_rates: Sequence[float],
     out_path: str,
 ) -> None:
     fig, ax = plt.subplots(figsize=(8, 8))
 
-    ax.set_title("Selection Rates vs Rho")
-    ax.set_xlabel("Selection rate (rho)")
+    ax.set_title("Selection Rates vs Mean Effective Rate")
+    ax.set_xlabel("Mean effective selection rate")
     ax.set_ylabel("Selection rate (kept / total)")
 
-    labels = list(counts_gold[0].data.keys())
-    rhos_arr = np.array(rhos, dtype=float)
+    labels = sorted(counts_gold[0].data.keys(), key=_label_sort_key)
+    rates_arr = np.array(selection_rates, dtype=float)
 
-    # Random baseline: y = rho
-    ax.plot(rhos_arr, rhos_arr, linestyle="--", linewidth=2, label="Random baseline")
+    # Random baseline: under uniform selection, label-wise keep rate matches overall keep rate.
+    ax.plot(rates_arr, rates_arr, linestyle="--", linewidth=2, label="Random baseline")
 
     for label in labels:
         ys: List[float] = []
@@ -329,11 +374,11 @@ def save_selection_rates_plot_from_pred_gold(
             tot = _get_count(gold, label)
             ys.append((kept / tot) if tot > 0 else 0.0)
 
-        ax.plot(rhos_arr, ys, marker="o", label=str(label))
+        ax.plot(rates_arr, ys, marker="o", label=str(label))
 
     ax.legend(fontsize="small")
-    if len(rhos_arr):
-        ax.set_xlim(float(rhos_arr.min()), float(rhos_arr.max()))
+    if len(rates_arr):
+        ax.set_xlim(float(rates_arr.min()), float(rates_arr.max()))
     ax.set_ylim(0.0, 1.0)
 
     fig.tight_layout()
@@ -344,41 +389,73 @@ def save_selection_rates_plot_from_pred_gold(
 def save_chi_square_plot_from_pred_gold(
     counts_pred: Sequence[Any],
     counts_gold: Sequence[Any],
-    rhos: Sequence[float],
+    selection_rates: Sequence[float],
     out_path: str,
     non_entity_label: Optional[Any] = None,
     alpha: float = 0.05,
 ) -> None:
-    fig, ax = plt.subplots(figsize=(8, 8))
+    fig, ax = plt.subplots(figsize=(10, 8))
 
-    labels = list(counts_gold[0].data.keys())
+    labels = sorted(counts_gold[0].data.keys(), key=_label_sort_key)
     if non_entity_label is None:
         non_entity_label = _infer_non_entity_label(labels)
 
     test_labels = [lab for lab in labels if lab != non_entity_label]
-    rhos_arr = np.array(rhos, dtype=float)
+    rates_arr = np.array(selection_rates, dtype=float)
 
-    ax.set_title(f"Chi-square vs {non_entity_label!r} (one-vs-non-entity)")
-    ax.set_xlabel("Selection rate (rho)")
-    ax.set_ylabel(r"$-\log_{10}(p)$")
+    ax.set_title("Chi-square Heatmap")
+    ax.set_xlabel("Mean effective selection rate")
+    ax.set_ylabel("Label")
 
-    # significance threshold
-    thresh = -np.log10(alpha)
-    ax.axhline(thresh, linestyle="--", linewidth=1.5)
-    if len(rhos_arr):
-        ax.text(float(rhos_arr.min()), thresh, f"  alpha={alpha}", va="bottom", fontsize="small")
-
-    for lab in test_labels:
-        pvals: List[float] = []
-        for pred, gold in zip(counts_pred, counts_gold):
+    values = np.zeros((len(test_labels), len(rates_arr)), dtype=float)
+    for row, lab in enumerate(test_labels):
+        for col, (pred, gold) in enumerate(zip(counts_pred, counts_gold)):
             table = _contingency_2x2_from_pred_gold(pred, gold, lab, non_entity_label)
             _, p, _ = _chi_square_stats(table)
-            pvals.append(p)
+            values[row, col] = -np.log10(np.clip(float(p), 1e-300, 1.0))
 
-        pvals_arr = np.clip(np.array(pvals, dtype=float), 1e-300, 1.0)
-        ax.plot(rhos_arr, -np.log10(pvals_arr), marker="o", label=str(lab))
+    finite_values = values[np.isfinite(values)]
+    if finite_values.size == 0:
+        vmin, vmax = 0.0, 1.0
+    else:
+        vmin = float(np.min(finite_values))
+        vmax = float(np.max(finite_values))
+        if vmax <= vmin:
+            vmax = vmin + 1.0
+        else:
+            lo = float(np.percentile(finite_values, 5))
+            hi = float(np.percentile(finite_values, 95))
+            if hi > lo:
+                vmin, vmax = lo, hi
 
-    ax.legend(fontsize="small")
+    image = ax.imshow(
+        values,
+        aspect="auto",
+        cmap="viridis",
+        interpolation="nearest",
+        vmin=vmin,
+        vmax=vmax,
+    )
+
+    ax.set_yticks(np.arange(len(test_labels)))
+    ax.set_yticklabels([str(lab) for lab in test_labels])
+    ax.set_xticks(np.arange(len(rates_arr)))
+    ax.set_xticklabels([f"{rate:.2f}" for rate in rates_arr], rotation=45, ha="right")
+
+    thresh = -np.log10(alpha)
+    cbar = fig.colorbar(image, ax=ax)
+    cbar.set_label(r"$-\log_{10}(p)$")
+    cbar.ax.axhline(thresh, color="white", linestyle="--", linewidth=1.5)
+    cbar.ax.text(
+        0.5,
+        thresh,
+        f" alpha={alpha}",
+        color="white",
+        ha="left",
+        va="bottom",
+        fontsize="small",
+        transform=cbar.ax.get_yaxis_transform(),
+    )
 
     fig.tight_layout()
     fig.savefig(out_path, bbox_inches="tight")
@@ -388,7 +465,7 @@ def save_chi_square_plot_from_pred_gold(
 def save_cramers_v_plot_from_pred_gold(
     counts_pred: Sequence[Any],
     counts_gold: Sequence[Any],
-    rhos: Sequence[float],
+    selection_rates: Sequence[float],
     out_path: str,
     non_entity_label: Optional[Any] = None,
 ) -> None:
@@ -402,15 +479,15 @@ def save_cramers_v_plot_from_pred_gold(
     """
     fig, ax = plt.subplots(figsize=(8, 8))
 
-    labels = list(counts_gold[0].data.keys())
+    labels = sorted(counts_gold[0].data.keys(), key=_label_sort_key)
     if non_entity_label is None:
         non_entity_label = _infer_non_entity_label(labels)
 
     test_labels = [lab for lab in labels if lab != non_entity_label]
-    rhos_arr = np.array(rhos, dtype=float)
+    rates_arr = np.array(selection_rates, dtype=float)
 
     ax.set_title(f"Cramér's V vs {non_entity_label!r} (one-vs-non-entity)")
-    ax.set_xlabel("Selection rate (rho)")
+    ax.set_xlabel("Mean effective selection rate")
     ax.set_ylabel("Cramér's V")
 
     for lab in test_labels:
@@ -420,11 +497,11 @@ def save_cramers_v_plot_from_pred_gold(
             _, _, v = _chi_square_stats(table)
             vs.append(v)
 
-        ax.plot(rhos_arr, np.array(vs, dtype=float), marker="o", label=str(lab))
+        ax.plot(rates_arr, np.array(vs, dtype=float), marker="o", label=str(lab))
 
     ax.legend(fontsize="small")
-    if len(rhos_arr):
-        ax.set_xlim(float(rhos_arr.min()), float(rhos_arr.max()))
+    if len(rates_arr):
+        ax.set_xlim(float(rates_arr.min()), float(rates_arr.max()))
     ax.set_ylim(0.0, 1.0)
 
     fig.tight_layout()
@@ -432,41 +509,56 @@ def save_cramers_v_plot_from_pred_gold(
     plt.close(fig)
 
 
-def final_plots(
-    loss_history: Sequence[Mapping[str, float]],
+def save_loss_history(loss_history: Sequence[Mapping[str, float]], out_path: Path) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as f:
+        json.dump([dict(item) for item in loss_history], f, indent=2)
+
+
+def load_loss_history(path: Path) -> list[dict[str, float]]:
+    if not path.exists():
+        return []
+
+    with path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    if not isinstance(payload, list):
+        raise ValueError(f"Expected a list in {path}, found {type(payload).__name__}.")
+
+    history: list[dict[str, float]] = []
+    for item in payload:
+        if not isinstance(item, Mapping):
+            raise ValueError(f"Expected mapping entries in {path}, found {type(item).__name__}.")
+        history.append({str(k): float(v) for k, v in item.items()})
+    return history
+
+
+def save_label_plots(
     counts_pred: Optional[Sequence[Any]],
     counts_gold: Optional[Sequence[Any]],
-    rhos: Sequence[float],
+    selection_rates: Sequence[float],
+    plots_dir: Path,
     logger: logging.Logger,
-    xp: XP,
 ) -> None:
-    # 1) Loss plot
-    loss_path = "loss.png"
-    save_loss_plot(loss_history, loss_path)
-    logger.info("Saved loss plot to %s for experiment %s", loss_path, xp.sig)
-
-    has_labels = (counts_pred is not None) and (counts_gold is not None)
-    if not has_labels:
+    if counts_pred is None or counts_gold is None:
         return
 
-    assert counts_pred is not None and counts_gold is not None
     if len(counts_pred) != len(counts_gold):
         raise ValueError(
             f"counts_pred and counts_gold must have same length, got "
             f"{len(counts_pred)} vs {len(counts_gold)}"
         )
 
-    # 2) Selection rates plot
-    sel_path = "selection_rates.png"
-    save_selection_rates_plot_from_pred_gold(counts_pred, counts_gold, rhos, sel_path)
-    logger.info("Saved selection rate plot to %s for experiment %s", sel_path, xp.sig)
+    plots_dir.mkdir(parents=True, exist_ok=True)
 
-    # 3) Chi-square p-value plot
-    chi_path = "chi_square.png"
-    save_chi_square_plot_from_pred_gold(counts_pred, counts_gold, rhos, chi_path)
-    logger.info("Saved chi-square plot to %s for experiment %s", chi_path, xp.sig)
+    sel_path = plots_dir / "selection_rates.png"
+    save_selection_rates_plot_from_pred_gold(counts_pred, counts_gold, selection_rates, str(sel_path))
+    logger.info("Saved selection rate plot to %s", sel_path)
 
-    # 4) Cramér's V effect size plot
-    v_path = "cramers_v.png"
-    save_cramers_v_plot_from_pred_gold(counts_pred, counts_gold, rhos, v_path)
-    logger.info("Saved Cramer's V plot to %s for experiment %s", v_path, xp.sig)
+    chi_path = plots_dir / "chi_square.png"
+    save_chi_square_plot_from_pred_gold(counts_pred, counts_gold, selection_rates, str(chi_path))
+    logger.info("Saved chi-square plot to %s", chi_path)
+
+    v_path = plots_dir / "cramers_v.png"
+    save_cramers_v_plot_from_pred_gold(counts_pred, counts_gold, selection_rates, str(v_path))
+    logger.info("Saved Cramer's V plot to %s", v_path)

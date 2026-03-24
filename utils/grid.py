@@ -1,3 +1,4 @@
+import os
 import subprocess, yaml
 from datetime import datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ from tqdm import tqdm
 
 CONFIG_PATH = Path("./utils/grid.yaml")
 RUNS_DIR = Path("../outputs/grids")
+DEFAULT_EPOCHS = 30
 
 
 def load_config(path: Path) -> tuple[list[str], list[list[str]]]:
@@ -23,18 +25,57 @@ def load_config(path: Path) -> tuple[list[str], list[list[str]]]:
     return baseline, sweep
 
 
-def run_and_capture_signature(cmd: list[str], pbar: tqdm) -> str:
+def extract_override_value(overrides: list[str], key: str) -> str | None:
+    prefix = f"{key}="
+    for item in reversed(overrides):
+        if item.startswith(prefix):
+            return item[len(prefix):]
+    return None
+
+
+def resolve_train_epochs(baseline: list[str], overrides: list[str]) -> int:
+    value = extract_override_value(list(baseline) + list(overrides), "train.epochs")
+    if value is None:
+        return DEFAULT_EPOCHS
+    try:
+        return int(value)
+    except ValueError:
+        return DEFAULT_EPOCHS
+
+
+def run_and_capture_signature(cmd: list[str], pbar: tqdm, run_pbar: tqdm | None = None) -> str:
     signature = None
+    child_env = {
+        **os.environ,
+        "DISABLE_TQDM": "1",
+        "PYTHONUNBUFFERED": "1",
+    }
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        env=child_env,
     )
     assert process.stdout is not None
     for line in process.stdout:
         line = line.rstrip()
+        if run_pbar is not None and "GRID_EPOCH " in line:
+            step = line.rsplit("GRID_EPOCH ", 1)[1]
+            try:
+                current, total = step.split("/", 1)
+                current_i = int(current)
+                total_i = int(total)
+                if run_pbar.total != total_i:
+                    run_pbar.total = total_i
+                if current_i > run_pbar.n:
+                    run_pbar.update(current_i - run_pbar.n)
+                    run_pbar.refresh()
+                    pbar.refresh()
+            except ValueError:
+                pbar.write(line)
+            continue
         if line:
             pbar.write(line)
         if "Exp signature:" in line:
@@ -42,6 +83,8 @@ def run_and_capture_signature(cmd: list[str], pbar: tqdm) -> str:
     if not signature:
         raise RuntimeError("Experiment signature not found in output")
     returncode = process.wait()
+    if returncode == 0 and run_pbar is not None and run_pbar.total is not None and run_pbar.n < run_pbar.total:
+        run_pbar.update(run_pbar.total - run_pbar.n)
     if returncode != 0:
         raise subprocess.CalledProcessError(returncode, cmd)
     return signature
@@ -59,10 +102,11 @@ def main() -> None:
     summary_rows = []
 
     total_runs = len(sweep)
-    with tqdm(total=total_runs, desc="Grid sweep", unit="run") as pbar:
+    with tqdm(total=total_runs, desc="Grid sweep", unit="run", position=1, dynamic_ncols=True) as pbar:
         for overrides in sweep:
             setting_overrides = list(baseline) + list(overrides)
             setting_label = " ".join(overrides) if overrides else "<no overrides>"
+            train_epochs = resolve_train_epochs(baseline, overrides)
 
             pbar.write(f"\n=== Setting: {setting_label} ===")
             pbar.write(f"Baseline overrides: {baseline}")
@@ -71,18 +115,27 @@ def main() -> None:
             cmd = ["dora", "run"] + setting_overrides
             signatures = []
             failures = 0
-            try:
-                sig = run_and_capture_signature(cmd, pbar)
-                signatures.append(sig)
-                pbar.write(f"    ✓ Run signature: {sig}")
-            except subprocess.CalledProcessError as exc:
-                failures += 1
-                pbar.write(f"    ⚠️ Run failed: {exc}")
-            except RuntimeError as exc:
-                failures += 1
-                pbar.write(f"    ⚠️ {exc}")
-            finally:
-                pbar.update(1)
+            run_desc = f"Training {setting_label}"
+            with tqdm(
+                total=train_epochs,
+                desc=run_desc,
+                unit="epoch",
+                position=0,
+                leave=False,
+                dynamic_ncols=True,
+            ) as run_pbar:
+                try:
+                    sig = run_and_capture_signature(cmd, pbar, run_pbar=run_pbar)
+                    signatures.append(sig)
+                    pbar.write(f"    ✓ Run signature: {sig}")
+                except subprocess.CalledProcessError as exc:
+                    failures += 1
+                    pbar.write(f"    ⚠️ Run failed: {exc}")
+                except RuntimeError as exc:
+                    failures += 1
+                    pbar.write(f"    ⚠️ {exc}")
+                finally:
+                    pbar.update(1)
 
             summary_rows.append(
                 {

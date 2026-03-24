@@ -1,7 +1,8 @@
-baseline: ["runtime.data.rebuild=true"]
+baseline: ["runtime.grid=true", "runtime.data.batch_size=64", "runtime.data.dynamic_batch.enabled=true", "model.selector.suppress_special_tokens=true"]
 sweep:
-  - ["data.dataset=twitter"]
-  - ["data.dataset=ud"]
-  - ["data.dataset=treebank"]
+  - ["data.dataset=wikiann"]
+  - ["data.dataset=conll03"]
   - ["data.dataset=conll00"]
-  - ["data.dataset=ud_pos"]
+  - ["data.dataset=twitter"]
+  - ["data.dataset=mr"]
+  - ["data.dataset=ud"]

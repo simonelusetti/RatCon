@@ -1,3 +1,6 @@
+import os
+import sys
+
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
@@ -5,6 +8,26 @@ from datasets import load_dataset
 from scipy.stats import spearmanr
 from tqdm import tqdm
 from numpy import linspace
+
+
+def should_disable_tqdm() -> bool:
+    if os.environ.get("DISABLE_TQDM"):
+        return True
+    if not sys.stderr.isatty():
+        return True
+    return False
+
+
+def build_non_special_mask(tokenizer, input_ids, attention_mask, device):
+    special_tokens_mask = torch.tensor(
+        [
+            tokenizer.get_special_tokens_mask(ids, already_has_special_tokens=True)
+            for ids in input_ids.detach().cpu().tolist()
+        ],
+        dtype=attention_mask.dtype,
+        device=device,
+    )
+    return attention_mask * (1 - special_tokens_mask)
 
 
 def get_rhos(cfg):
@@ -66,7 +89,14 @@ def build_stsb_collate(tokenizer, device, max_length):
 def eval_baseline(loader, encoder):
     sims, labels = [], []
 
-    for batch in tqdm(loader, desc="STS-B baseline"):
+    for batch in tqdm(
+        loader,
+        desc="STS-B baseline",
+        leave=False,
+        dynamic_ncols=True,
+        disable=should_disable_tqdm(),
+        file=sys.stderr,
+    ):
         t1, t2 = batch["t1"], batch["t2"]
 
         e1 = encoder.token_embeddings(t1["input_ids"], t1["attention_mask"])
@@ -82,13 +112,31 @@ def eval_baseline(loader, encoder):
 
 
 @torch.no_grad()
-def eval_sweep(loader, encoder, mask_generator, eval_cfg):
+def eval_sweep(
+    loader,
+    encoder,
+    mask_generator,
+    eval_cfg,
+    desc: str = "STS-B selector",
+    progress_bar=None,
+):
     rhos = get_rhos(eval_cfg)
 
     sims = {rho: [] for rho in rhos}
     labels = []
 
-    for batch in tqdm(loader, desc="STS-B selector"):
+    iterator = loader
+    if progress_bar is None:
+        iterator = tqdm(
+            loader,
+            desc=desc,
+            leave=False,
+            dynamic_ncols=True,
+            disable=should_disable_tqdm(),
+            file=sys.stderr,
+        )
+
+    for batch in iterator:
         t1, t2 = batch["t1"], batch["t2"]
 
         a1 = t1["attention_mask"]
@@ -105,15 +153,32 @@ def eval_sweep(loader, encoder, mask_generator, eval_cfg):
             sims[rho].extend(F.cosine_similarity(z1, z2).cpu().tolist())
 
         labels.extend(batch["labels"].tolist())
+        if progress_bar is not None:
+            progress_bar.update(1)
 
     return {rho: float(spearmanr(sims[rho], labels)[0]) for rho in rhos}
 
 
-def build_selector_mask_generator(selector, encoder, device):
+def build_selector_mask_generator(
+    selector,
+    encoder,
+    tokenizer,
+    device,
+    suppress_special_tokens: bool = False,
+):
     @torch.no_grad()
     def mask_generator(t1, a1, rhos):
         e1_full = encoder.token_embeddings(t1["input_ids"], a1)
-        _, g_sweep, *_ = selector(t1["input_ids"], e1_full, a1, rhos=rhos)
+        selection_mask = a1
+        if suppress_special_tokens:
+            selection_mask = build_non_special_mask(tokenizer, t1["input_ids"], a1, device)
+        _, g_sweep, *_ = selector(
+            t1["input_ids"],
+            e1_full,
+            a1,
+            rhos=rhos,
+            selection_mask=selection_mask,
+        )
 
         new_a1_sweep = []
         for g in g_sweep:
@@ -125,18 +190,23 @@ def build_selector_mask_generator(selector, encoder, device):
     return mask_generator
 
 
-def build_random_mask_generator(cfg, device):
+def build_random_mask_generator(cfg, tokenizer, device, suppress_special_tokens: bool = False):
     @torch.no_grad()
     def mask_generator(t1, a1, rhos):
-        T1 = a1.sum(1)
+        candidate_mask = a1
+        if suppress_special_tokens:
+            candidate_mask = build_non_special_mask(tokenizer, t1["input_ids"], a1, device)
+
+        T1 = candidate_mask.sum(1)
         new_a1_sweep = []
 
         for rho in rhos:
-            k1 = torch.clamp((T1.float() * rho).round().long(), min=1)
+            k1 = (T1.float() * rho).round().long()
+            k1 = torch.where(T1 > 0, torch.clamp(k1, min=1), torch.zeros_like(k1))
             hard1 = torch.zeros_like(a1, dtype=torch.float, device=device)
 
             for b in range(a1.size(0)):
-                valid = (a1[b] == 1).nonzero(as_tuple=False).squeeze(1)
+                valid = (candidate_mask[b] == 1).nonzero(as_tuple=False).squeeze(1)
                 if valid.numel() == 0:
                     continue
 
@@ -145,7 +215,7 @@ def build_random_mask_generator(cfg, device):
                 topk = torch.topk(rvals, kb).indices
                 hard1[b, valid[topk]] = 1.0
 
-            new_a1_sweep.append(hard1 * a1)
+            new_a1_sweep.append(hard1 * candidate_mask)
 
         return new_a1_sweep
 
@@ -153,30 +223,44 @@ def build_random_mask_generator(cfg, device):
 
 
 @torch.no_grad()
-def eval_random_sweep(loader, encoder, tokenizer, eval_cfg, device):
+def eval_random_sweep(loader, encoder, tokenizer, eval_cfg, device, suppress_special_tokens: bool = False):
     rhos = get_rhos(eval_cfg)
     runs = eval_cfg.random_selector.runs
 
     acc = {rho: [] for rho in rhos}
 
-    for run in range(runs):
-        torch.manual_seed(eval_cfg.random_selector.seed + run)
-        rand_mask_gen = build_random_mask_generator(eval_cfg, device)
+    with tqdm(
+        total=runs * len(loader),
+        desc="STS-B random selector",
+        leave=False,
+        dynamic_ncols=True,
+        disable=should_disable_tqdm(),
+        file=sys.stderr,
+    ) as pbar:
+        for run in range(runs):
+            torch.manual_seed(eval_cfg.random_selector.seed + run)
+            rand_mask_gen = build_random_mask_generator(
+                eval_cfg,
+                tokenizer,
+                device,
+                suppress_special_tokens=suppress_special_tokens,
+            )
 
-        out = eval_sweep(
-            loader,
-            encoder,
-            rand_mask_gen,
-            eval_cfg,
-        )
+            out = eval_sweep(
+                loader,
+                encoder,
+                rand_mask_gen,
+                eval_cfg,
+                progress_bar=pbar,
+            )
 
-        for rho in rhos:
-            acc[rho].append(out[rho])
+            for rho in rhos:
+                acc[rho].append(out[rho])
 
     return {rho: sum(v) / len(v) for rho, v in acc.items()}
 
 
-def plot(base, ours, rand):
+def plot(base, ours, rand, out_path: str = "spearman_vs_rho.png"):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -192,12 +276,12 @@ def plot(base, ours, rand):
     plt.grid(True, linestyle=":")
     plt.legend()
     plt.tight_layout()
-    plt.savefig("spearman_vs_rho.png", dpi=300)
+    plt.savefig(out_path, dpi=300)
     plt.close()
 
 
 @torch.no_grad()
-def run_stsb_sweep(cfg, device, encoder, tokenizer, selector):
+def run_stsb_sweep(cfg, device, encoder, tokenizer, selector, out_path: str = "spearman_vs_rho.png"):
     hf_ds = load_dataset("glue", "stsb", split=cfg.runtime.eval.split)
     ds = STSBDataset(hf_ds)
 
@@ -217,11 +301,25 @@ def run_stsb_sweep(cfg, device, encoder, tokenizer, selector):
 
     base = eval_baseline(loader, encoder)
 
-    selector_mask_gen = build_selector_mask_generator(selector, encoder, device)
+    suppress_special_tokens = bool(cfg.model.selector.get("suppress_special_tokens", False))
+    selector_mask_gen = build_selector_mask_generator(
+        selector,
+        encoder,
+        tokenizer,
+        device,
+        suppress_special_tokens=suppress_special_tokens,
+    )
     
     ours = eval_sweep(loader, encoder, selector_mask_gen, cfg.runtime.eval)
-    rand = eval_random_sweep(loader, encoder, tokenizer, cfg.runtime.eval, device)
+    rand = eval_random_sweep(
+        loader,
+        encoder,
+        tokenizer,
+        cfg.runtime.eval,
+        device,
+        suppress_special_tokens=suppress_special_tokens,
+    )
 
-    plot(base, ours, rand)
+    plot(base, ours, rand, out_path=out_path)
 
     return base, ours, rand

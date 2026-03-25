@@ -1,8 +1,5 @@
-baseline: ["runtime.grid=true", "runtime.data.batch_size=64", "runtime.data.dynamic_batch.enabled=true", "model.selector.suppress_special_tokens=true"]
+baseline: ["runtime.grid=true", "runtime.data.batch_size=64", "runtime.data.dynamic_batch.enabled=true", "model.selector.suppress_special_tokens=true", "runtime.bf16=true"]
 sweep:
-  - ["data.dataset=wikiann"]
-  - ["data.dataset=conll03"]
-  - ["data.dataset=conll00"]
-  - ["data.dataset=twitter"]
-  - ["data.dataset=mr"]
-  - ["data.dataset=ud"]
+  - ["data.dataset=wikiann", "array=4"]
+  - ["data.dataset=conll03", "array=4"]
+  - ["data.dataset=twitter", "array=4"]

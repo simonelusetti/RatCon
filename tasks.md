@@ -1,4 +1,12 @@
-- mistura di selection rate nella loss (0.1-0.9)
-- plottare i risultati di recall(recall@k e recall "nostra", lo share)/similarity over selection rate
-- non fare i plot di tutto, fai solo gli esperimenti nelle entità e vediamo cosa succede
-    - plot con le barre d'errore, no le traiettorie di tutto
+- controllare che nelle run degeneri il selection rate sia davvero enforzato
+    - controllare loss nelle run degeneri rispetto a quelle normali
+- controllare la distribuzione delle label se è stabile
+- altri encoder (quelli più usati nel landscape)
+
+- trovare una metrica per misurare la differenza di distribuzione tra le label
+    - farlo tra varie run
+    - farlo tra dataset con diverse 
+
+- controllare l'interdipenza tra le label di diversi dataset
+
+- ACL paper utltimi usciti (a gennaio) (GUARDACI SUBITO)

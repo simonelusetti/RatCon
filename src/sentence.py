@@ -83,11 +83,8 @@ def bert_token_embeddings(
         k = k.view(bsz, seq_len, attn.num_attention_heads, attn.attention_head_size).transpose(1, 2)
         v = v.view(bsz, seq_len, attn.num_attention_heads, attn.attention_head_size).transpose(1, 2)
 
-        scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(attn.attention_head_size)
-        scores = scores + torch.log(key_mask.clamp(min=1e-9))  # mask padding
-
-        probs = torch.softmax(scores, dim=-1)
-        context = torch.matmul(probs, v)
+        attn_bias = torch.log(key_mask.clamp(min=1e-9))  # 0 for valid, ≈-inf for masked
+        context = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias)
 
         context = context.transpose(1, 2).contiguous().view(bsz, seq_len, attn.all_head_size)
         attn_out = layer.attention.output(context, hidden_states)

@@ -39,8 +39,11 @@ runtime:
   interop_threads: 4
   device: "cpu"
   token_parallelism: false
+  bf16: false      # BF16 autocast (big win on Sapphire Rapids / AMX CPUs)
+  compile: false   # torch.compile the selector model (first epoch slower)
   data:
     rebuild: false
+    test_subset: null
     batch_size: 256
     num_workers: 4
     dynamic_batch:
@@ -53,6 +56,7 @@ runtime:
     short_log: false
     log_examples: 0
     hard: true
+    skip_stsb: false
     split: "validation"
     sweep_range: [0.1, 1.0, 20]
     random_selector:

@@ -122,53 +122,42 @@ class RationaleSelectorModel(nn.Module):
             gamma=self.gamma_rank,
         )
 
-        # ── Phase 1: compute gates for every rho (cheap: no BERT calls) ──────
-        g_st_list: list[torch.Tensor] = []
-        hard_mask_list: list[torch.Tensor] = []
-        rho_eff_sweep: list[torch.Tensor] = []
+        # ── Phase 1: vectorised gate computation (no Python loops) ──────────
+        B, T = ids.shape
+        R = len(rhos)
 
-        for rho in rhos:
-            k = (float(rho) * T_eff).round().long()
-            k = torch.where(T_eff > 0, torch.clamp(k, min=1), torch.zeros_like(k))
+        rhos_t = torch.tensor(list(rhos), device=device, dtype=torch.float32)  # [R]
 
-            gate_raw = torch.sigmoid(
-                (k.float().unsqueeze(1) - ranks) / self.tau_gate
-            ) * selection_f
+        # k_all: [R, B] — number of tokens to select per (rho, sample)
+        k_all = (rhos_t[:, None] * T_eff[None]).round().long()
+        k_all = torch.where(T_eff[None] > 0, k_all.clamp(min=1), torch.zeros_like(k_all))
 
-            g_soft = gate_raw / gate_raw.sum(dim=1, keepdim=True).clamp(min=1e-8)
-            g_soft = g_soft * k.unsqueeze(1)
+        # Soft gates: [R, B, T]
+        gate_raw = torch.sigmoid(
+            (k_all.float()[:, :, None] - ranks[None]) / self.tau_gate
+        ) * selection_f[None]
+        g_soft = gate_raw / gate_raw.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+        g_soft = g_soft * k_all.float()[:, :, None]
 
-            hard_mask = torch.zeros_like(g_soft)
+        # Hard masks via sorted ranks — no Python loops at all.
+        # Assign inf to invalid positions so they sink to the end when sorted.
+        invalid_ranks = ranks.masked_fill(selection_mask == 0, float("inf"))  # [B, T]
+        _, sorted_idx = torch.sort(invalid_ranks, dim=1)                      # [B, T]
+        pos = torch.arange(T, device=device)                                   # [T]
+        valid_sel = pos[None, None, :] < k_all[:, :, None]                    # [R, B, T]
+        hard_masks = torch.zeros(R, B, T, device=device)
+        hard_masks.scatter_(2, sorted_idx[None].expand(R, -1, -1), valid_sel.float())
 
-            for b in range(ranks.size(0)):
-                kb = int(k[b].item())
-                valid_idx = selection_mask[b].nonzero(as_tuple=False).squeeze(1)
+        g_st_all = hard_masks + (g_soft - g_soft.detach())                    # [R, B, T]
 
-                if valid_idx.numel() == 0:
-                    continue
-
-                ranks_b = ranks[b, valid_idx]
-                topk = torch.topk(-ranks_b, kb).indices
-                selected = valid_idx[topk]
-
-                hard_mask[b, selected] = 1.0
-
-            g_st = hard_mask + (g_soft - g_soft.detach())
-
-            k_eff = hard_mask.sum(dim=1)
-            rho_eff = k_eff / T_eff.clamp(min=1.0)
-
-            g_st_list.append(g_st)
-            hard_mask_list.append(hard_mask)
-            rho_eff_sweep.append(rho_eff.detach())
+        k_eff = hard_masks.sum(dim=-1)                                        # [R, B]
+        rho_eff_sweep = list((k_eff / T_eff[None].clamp(min=1.0)).detach().unbind(0))
+        hard_mask_list = list(hard_masks.unbind(0))
 
         # ── Phase 2: one batched BERT forward for all rhos ───────────────────
         # Stack effective attention masks: [R, B, T] → [R*B, T]
-        R = len(rhos)
-        B, T = ids.shape
-
-        effective_attns = torch.stack([attn_f * g for g in g_st_list])   # [R, B, T]
-        ids_rep  = ids.unsqueeze(0).expand(R, B, T).reshape(R * B, T)    # [R*B, T]
+        effective_attns = attn_f[None] * g_st_all                         # [R, B, T]
+        ids_rep  = ids[None].expand(R, B, T).reshape(R * B, T)           # [R*B, T]
         attn_rep = effective_attns.reshape(R * B, T)                      # [R*B, T]
 
         all_token_emb = self.sent_encoder.token_embeddings(ids_rep, attn_rep)  # [R*B, T, D]
@@ -180,7 +169,7 @@ class RationaleSelectorModel(nn.Module):
         per_sample   = 1.0 - F.cosine_similarity(all_pred_rep, full_rep_exp, dim=-1)  # [R, B]
         recon_avg    = per_sample.mean()
 
-        g_sweep    = [hm.detach().cpu() for hm in hard_mask_list]
+        g_sweep    = [hm.detach().cpu() for hm in hard_mask_list]  # [R] × [B, T]
         loss_sweep = per_sample.mean(dim=1).tolist()
 
         losses_log = {
@@ -188,4 +177,4 @@ class RationaleSelectorModel(nn.Module):
             "total": float(recon_avg.detach().item()),
         }
 
-        return g_st_list[-1], g_sweep, recon_avg, losses_log, loss_sweep, rho_eff_sweep
+        return g_st_all[-1], g_sweep, recon_avg, losses_log, loss_sweep, rho_eff_sweep

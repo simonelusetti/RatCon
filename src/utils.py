@@ -300,6 +300,32 @@ def _contingency_2x2_from_pred_gold(
     return np.array([[tp, fn], [fp, tn]], dtype=np.int64)
 
 
+def _contingency_2x2_one_vs_rest(
+    pred: Any,
+    gold: Any,
+    label: Any,
+) -> np.ndarray:
+    tp = _get_count(pred, label)
+    tot_pos = _get_count(gold, label)
+
+    tot_selected = sum(_get_count(pred, lab) for lab in pred.data.keys())
+    tot_all = sum(_get_count(gold, lab) for lab in gold.data.keys())
+
+    fp = tot_selected - tp
+    tot_neg = tot_all - tot_pos
+
+    fn = tot_pos - tp
+    tn = tot_neg - fp
+
+    if fn < 0 or tn < 0:
+        raise ValueError(
+            f"Invalid counts in one-vs-rest table for label={label!r}: "
+            f"tp={tp}, tot_pos={tot_pos}, fp={fp}, tot_neg={tot_neg}"
+        )
+
+    return np.array([[tp, fn], [fp, tn]], dtype=np.int64)
+
+
 def _chi_square_stats(table_2x2: np.ndarray) -> Tuple[float, float, float]:
     """
     Safe chi-square computation.
@@ -397,20 +423,38 @@ def save_chi_square_plot_from_pred_gold(
     fig, ax = plt.subplots(figsize=(10, 8))
 
     labels = sorted(counts_gold[0].data.keys(), key=_label_sort_key)
+    use_one_vs_rest = False
     if non_entity_label is None:
-        non_entity_label = _infer_non_entity_label(labels)
+        try:
+            non_entity_label = _infer_non_entity_label(labels)
+        except ValueError:
+            use_one_vs_rest = True
 
-    test_labels = [lab for lab in labels if lab != non_entity_label]
+    test_labels = labels if use_one_vs_rest else [lab for lab in labels if lab != non_entity_label]
     rates_arr = np.array(selection_rates, dtype=float)
 
     ax.set_title("Chi-square Heatmap")
     ax.set_xlabel("Mean effective selection rate")
     ax.set_ylabel("Label")
 
+    # If a label is never selected at any sweep point, treat it as deterministically
+    # suppressed and render it as non-significant in this p-value heatmap.
+    always_zero_selected: set[Any] = set()
+    for lab in test_labels:
+        if all(_get_count(pred, lab) == 0 for pred in counts_pred):
+            always_zero_selected.add(lab)
+
     values = np.zeros((len(test_labels), len(rates_arr)), dtype=float)
     for row, lab in enumerate(test_labels):
+        if lab in always_zero_selected:
+            values[row, :] = 0.0
+            continue
+
         for col, (pred, gold) in enumerate(zip(counts_pred, counts_gold)):
-            table = _contingency_2x2_from_pred_gold(pred, gold, lab, non_entity_label)
+            if use_one_vs_rest:
+                table = _contingency_2x2_one_vs_rest(pred, gold, lab)
+            else:
+                table = _contingency_2x2_from_pred_gold(pred, gold, lab, non_entity_label)
             _, p, _ = _chi_square_stats(table)
             values[row, col] = -np.log10(np.clip(float(p), 1e-300, 1.0))
 
@@ -480,20 +524,30 @@ def save_cramers_v_plot_from_pred_gold(
     fig, ax = plt.subplots(figsize=(8, 8))
 
     labels = sorted(counts_gold[0].data.keys(), key=_label_sort_key)
+    use_one_vs_rest = False
     if non_entity_label is None:
-        non_entity_label = _infer_non_entity_label(labels)
+        try:
+            non_entity_label = _infer_non_entity_label(labels)
+        except ValueError:
+            use_one_vs_rest = True
 
-    test_labels = [lab for lab in labels if lab != non_entity_label]
+    test_labels = labels if use_one_vs_rest else [lab for lab in labels if lab != non_entity_label]
     rates_arr = np.array(selection_rates, dtype=float)
 
-    ax.set_title(f"Cramér's V vs {non_entity_label!r} (one-vs-non-entity)")
+    if use_one_vs_rest:
+        ax.set_title("Cramér's V (one-vs-rest)")
+    else:
+        ax.set_title(f"Cramér's V vs {non_entity_label!r} (one-vs-non-entity)")
     ax.set_xlabel("Mean effective selection rate")
     ax.set_ylabel("Cramér's V")
 
     for lab in test_labels:
         vs: List[float] = []
         for pred, gold in zip(counts_pred, counts_gold):
-            table = _contingency_2x2_from_pred_gold(pred, gold, lab, non_entity_label)
+            if use_one_vs_rest:
+                table = _contingency_2x2_one_vs_rest(pred, gold, lab)
+            else:
+                table = _contingency_2x2_from_pred_gold(pred, gold, lab, non_entity_label)
             _, _, v = _chi_square_stats(table)
             vs.append(v)
 

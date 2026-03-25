@@ -68,6 +68,7 @@ class SelectorTrainer:
         self.examples = cfg.runtime.eval.log_examples
         self.device = cfg.runtime.device
         self.rhos = linspace(cfg.model.loss.sweep_range[0], cfg.model.loss.sweep_range[1], cfg.model.loss.sweep_range[2])
+        self.bf16 = bool(cfg.runtime.get("bf16", False))
 
         self._tqdm_disabled = should_disable_tqdm(self.short_log, self.grid_mode)
 
@@ -100,6 +101,10 @@ class SelectorTrainer:
         self.model = RationaleSelectorModel(
             model_dim, loss_cfg=cfg.model.loss, sent_encoder=self.sent_encoder
         ).to(self.device)
+
+        if cfg.runtime.get("compile", False):
+            self.model = torch.compile(self.model, dynamic=True)
+            logger.info("torch.compile enabled (first epoch will be slower).")
 
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
@@ -255,12 +260,13 @@ class SelectorTrainer:
         if rhos is None:
             rhos = self.rhos
 
-        with torch.no_grad():
-            tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
-        selection_mask = self.selection_candidate_mask(batch)
+        with torch.autocast("cpu", dtype=torch.bfloat16, enabled=self.bf16):
+            with torch.no_grad():
+                tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
+            selection_mask = self.selection_candidate_mask(batch)
 
-        z, g_sweep, loss_tensor, losses_log, loss_sweep, rho_eff_sweep = \
-            self.model(ids, tkns_embd, attn, rhos=rhos, selection_mask=selection_mask)
+            z, g_sweep, loss_tensor, losses_log, loss_sweep, rho_eff_sweep = \
+                self.model(ids, tkns_embd, attn, rhos=rhos, selection_mask=selection_mask)
 
         if total_losses is None:
             total_losses = {k: 0.0 for k in losses_log}
@@ -372,6 +378,10 @@ class SelectorTrainer:
             self.plots_dir,
             self.logger,
         )
+        if bool(self.cfg.runtime.eval.get("skip_stsb", False)):
+            self.logger.info("Skipping STS-B sweep (runtime.eval.skip_stsb=true).")
+            return
+
         stsb_plot_path = self.plots_dir / "spearman_vs_rho.png"
         _, _, _ = run_stsb_sweep(
             cfg=self.cfg,
@@ -462,7 +472,7 @@ class SelectorTrainer:
                 )
                 self.logger.info(f"\n{dict_to_table(total_losses)}")
 
-            eval_losses, _, _, _ = self.evaluate()
+            eval_losses, _, _, _ = self.evaluate(short=True)
             self.record_eval_losses(eval_losses)
             epoch_end_stats = self.batch_controller.sample_memory()
             new_loaders = self.batch_controller.maybe_reduce_after_epoch(

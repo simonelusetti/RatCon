@@ -2,7 +2,7 @@ import logging, torch
 from pathlib import Path
 from typing import Callable, Optional, TypedDict
 from typing_extensions import NotRequired
-from datasets import DatasetDict, load_dataset, load_from_disk, Value, Sequence
+from datasets import Dataset, DatasetDict, load_dataset, load_from_disk, Value, Sequence
 from dora import to_absolute_path
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
@@ -115,6 +115,15 @@ def shuffle_and_subset(ds: DatasetDict, subset: float | int | None, shuffle: boo
     return ds
 
 
+def subset_split(split, subset: float | int | None):
+    if subset is None or subset == 1.0:
+        return split
+
+    n = int(len(split) * subset) if subset <= 1 else int(subset)
+    n = max(0, min(len(split), n))
+    return split.select(range(n))
+
+
 def collate(batch: list[TokenizedExample]) -> CollatedBatch:
     tokens = [x["tokens"] for x in batch]
     tokens_max_len = max(len(x) for x in tokens)
@@ -225,7 +234,6 @@ def resolve_dataset(
     assert "train" in ds and "test" in ds, "Dataset must have train and test splits"
     return ds
 
-@torch.no_grad()
 def encode_examples(
     data_cfg: dict,
     ds: DatasetDict,
@@ -266,6 +274,7 @@ def encode_examples(
         return out
 
     out = DatasetDict()
+    template_features = None
     for split, d in ds.items():
         cols = ["ids", "attn_mask", "tokens", "word_ids"]
         
@@ -274,7 +283,36 @@ def encode_examples(
             if scnd_labels_map is not None:
                 cols.append("scnd_labels")
 
-        out[split] = d.map(_encode).select_columns(cols)
+        if len(d) == 0:
+            if template_features is None:
+                continue
+            out[split] = Dataset.from_dict({c: [] for c in cols}, features=template_features)
+            continue
+
+        # Map to add new columns, remove old ones
+        mapped = d.map(
+            _encode,
+            batched=False,
+            desc=f"Encoding {split} split",
+            load_from_cache_file=False,
+            remove_columns=d.column_names  # Remove all original columns, keep only what _encode returns
+        )
+        out[split] = mapped
+        if template_features is None:
+            template_features = mapped.features
+
+    for split, d in ds.items():
+        if split in out:
+            continue
+        cols = ["ids", "attn_mask", "tokens", "word_ids"]
+        if labels_present:
+            cols.append("labels")
+            if scnd_labels_map is not None:
+                cols.append("scnd_labels")
+        if template_features is None:
+            out[split] = Dataset.from_dict({c: [] for c in cols})
+        else:
+            out[split] = Dataset.from_dict({c: [] for c in cols}, features=template_features)
 
     return out
 
@@ -335,6 +373,18 @@ def initialize_data(
     ds = get_dataset(data_cfg, runtime_cfg, tokenizer, logger)
     ds = shuffle_and_subset(ds, data_cfg.subset, data_cfg.shuffle)
 
+    test_subset = runtime_cfg.get("test_subset", None)
+    if test_subset is not None and "test" in ds:
+        old_test_len = len(ds["test"])
+        ds["test"] = subset_split(ds["test"], test_subset)
+        if logger is not None:
+            logger.info(
+                "Applied runtime.data.test_subset=%s: test split %d -> %d samples",
+                test_subset,
+                old_test_len,
+                len(ds["test"]),
+            )
+
     ds_train, ds_test = build_dataloaders(
         ds,
         batch_size=int(runtime_cfg.batch_size),
@@ -359,6 +409,8 @@ def build_dataloaders(
 ) -> tuple[DataLoader, DataLoader]:
     batch_size = max(1, int(batch_size))
 
+    persistent = num_workers > 0
+
     ds_train = DataLoader(
         ds["train"],
         batch_size=batch_size,
@@ -366,6 +418,7 @@ def build_dataloaders(
         collate_fn=collate,
         shuffle=shuffle,
         pin_memory=(device == "cuda"),
+        persistent_workers=persistent,
     )
 
     ds_test = DataLoader(
@@ -375,6 +428,7 @@ def build_dataloaders(
         collate_fn=collate,
         shuffle=shuffle,
         pin_memory=(device == "cuda"),
+        persistent_workers=persistent,
     )
 
     return ds_train, ds_test

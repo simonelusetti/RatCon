@@ -14,7 +14,7 @@ model:
     l_tv: 0.0
     sweep_range: [0.1, 1.0, 10]
   optim:
-    lr: 1e-3
+    lr: 3e-4
     weight_decay: 1e-2
     betas: [0.9, 0.999]
 

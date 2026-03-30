@@ -5,7 +5,7 @@ defaults:
 model:
   selector:
     hard_type: "probabilistic_top_k"
-    suppress_special_tokens: false
+    keep_special: true
   loss:
     l_e: 1.0
     hard: false
@@ -14,7 +14,7 @@ model:
     l_tv: 0.0
     sweep_range: [0.1, 1.0, 10]
   optim:
-    lr: 3e-4
+    lr: 1e-3
     weight_decay: 1e-2
     betas: [0.9, 0.999]
 
@@ -39,7 +39,7 @@ runtime:
   interop_threads: 4
   device: "cpu"
   token_parallelism: false
-  bf16: false      # BF16 autocast (big win on Sapphire Rapids / AMX CPUs)
+  bf16: true      # BF16 autocast (big win on Sapphire Rapids / AMX CPUs)
   compile: false   # torch.compile the selector model (first epoch slower)
   data:
     rebuild: false

@@ -164,13 +164,13 @@ def build_selector_mask_generator(
     encoder,
     tokenizer,
     device,
-    suppress_special_tokens: bool = False,
+    keep_special: bool = True,
 ):
     @torch.no_grad()
     def mask_generator(t1, a1, rhos):
         e1_full = encoder.token_embeddings(t1["input_ids"], a1)
         selection_mask = a1
-        if suppress_special_tokens:
+        if not keep_special:
             selection_mask = build_non_special_mask(tokenizer, t1["input_ids"], a1, device)
         _, g_sweep, *_ = selector(
             t1["input_ids"],
@@ -190,11 +190,11 @@ def build_selector_mask_generator(
     return mask_generator
 
 
-def build_random_mask_generator(cfg, tokenizer, device, suppress_special_tokens: bool = False):
+def build_random_mask_generator(cfg, tokenizer, device, keep_special: bool = True):
     @torch.no_grad()
     def mask_generator(t1, a1, rhos):
         candidate_mask = a1
-        if suppress_special_tokens:
+        if not keep_special:
             candidate_mask = build_non_special_mask(tokenizer, t1["input_ids"], a1, device)
 
         T1 = candidate_mask.sum(1)
@@ -223,7 +223,7 @@ def build_random_mask_generator(cfg, tokenizer, device, suppress_special_tokens:
 
 
 @torch.no_grad()
-def eval_random_sweep(loader, encoder, tokenizer, eval_cfg, device, suppress_special_tokens: bool = False):
+def eval_random_sweep(loader, encoder, tokenizer, eval_cfg, device, keep_special: bool = True):
     rhos = get_rhos(eval_cfg)
     runs = eval_cfg.random_selector.runs
 
@@ -243,7 +243,7 @@ def eval_random_sweep(loader, encoder, tokenizer, eval_cfg, device, suppress_spe
                 eval_cfg,
                 tokenizer,
                 device,
-                suppress_special_tokens=suppress_special_tokens,
+                keep_special=keep_special,
             )
 
             out = eval_sweep(
@@ -301,13 +301,14 @@ def run_stsb_sweep(cfg, device, encoder, tokenizer, selector, out_path: str = "s
 
     base = eval_baseline(loader, encoder)
 
-    suppress_special_tokens = bool(cfg.model.selector.get("suppress_special_tokens", False))
+    selector_cfg = cfg.model.selector
+    keep_special = bool(selector_cfg.get("keep_special", True))
     selector_mask_gen = build_selector_mask_generator(
         selector,
         encoder,
         tokenizer,
         device,
-        suppress_special_tokens=suppress_special_tokens,
+        keep_special=keep_special,
     )
     
     ours = eval_sweep(loader, encoder, selector_mask_gen, cfg.runtime.eval)
@@ -317,7 +318,7 @@ def run_stsb_sweep(cfg, device, encoder, tokenizer, selector, out_path: str = "s
         tokenizer,
         cfg.runtime.eval,
         device,
-        suppress_special_tokens=suppress_special_tokens,
+        keep_special=keep_special,
     )
 
     plot(base, ours, rand, out_path=out_path)

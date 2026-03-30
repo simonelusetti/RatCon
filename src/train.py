@@ -27,8 +27,10 @@ from .utils import (
     load_loss_history,
     save_label_plots,
     save_loss_history,
-    save_loss_plot,
+    save_train_eval_loss_plot,
     selection_rate_matrix_to_table,
+    start_run_metrics_capture,
+    write_metrics_artifacts,
 )
 from .retrival_fun import run_stsb_sweep
 
@@ -55,6 +57,7 @@ class SelectorTrainer:
         labels_set: set | None,
         logger: Logger,
         xp: XP,
+        start_capture,
     ) -> None:
 
         self.cfg = cfg
@@ -73,12 +76,15 @@ class SelectorTrainer:
         self._tqdm_disabled = should_disable_tqdm(self.short_log, self.grid_mode)
 
         self.xp = xp
+        self.start_capture = start_capture
         self.resume_training = bool(cfg.train.get("continue", False))
+        self.completed_epochs = 0
         self.checkpoint_dir = Path(os.getcwd())
         self.state_dir = self.checkpoint_dir / "state"
         self.models_dir = self.state_dir / "models"
         self.plots_dir = self.checkpoint_dir / "plots"
-        self.loss_history_path = self.state_dir / "loss_history.json"
+        self.eval_loss_history_path = self.state_dir / "loss_history.json"
+        self.train_loss_history_path = self.state_dir / "train_loss_history.json"
         self.legacy_checkpoint_path = self.checkpoint_dir / "model.pth"
         self.legacy_models_glob = "model_*.pth"
 
@@ -115,7 +121,9 @@ class SelectorTrainer:
 
         self.models_dir.mkdir(parents=True, exist_ok=True)
         self.plots_dir.mkdir(parents=True, exist_ok=True)
-        self.loss_history = load_loss_history(self.loss_history_path)
+        self.eval_loss_history = load_loss_history(self.eval_loss_history_path)
+        self.train_loss_history = load_loss_history(self.train_loss_history_path)
+        self.loss_history = self.eval_loss_history
         self.batch_controller = DynamicBatchController(
             cfg.runtime.data,
             ds=ds,
@@ -165,12 +173,14 @@ class SelectorTrainer:
                     "epoch": epoch,
                     **self.batch_controller.checkpoint_meta(),
                 },
-                "loss_history": self.loss_history,
+                "eval_loss_history": self.eval_loss_history,
+                "train_loss_history": self.train_loss_history,
             },
             checkpoint_path,
             _use_new_zipfile_serialization=False,
         )
-        save_loss_history(self.loss_history, self.loss_history_path)
+        save_loss_history(self.eval_loss_history, self.eval_loss_history_path)
+        save_loss_history(self.train_loss_history, self.train_loss_history_path)
         self.logger.info("Saved checkpoint to %s", checkpoint_path)
         
     def load_checkpoint(self, checkpoint_path: Path | None = None) -> int:
@@ -189,17 +199,26 @@ class SelectorTrainer:
         self.model.load_state_dict(checkpoint["model"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         meta = checkpoint.get("meta", {})
-        if self.loss_history_path.exists():
-            self.loss_history = load_loss_history(self.loss_history_path)
+        if self.eval_loss_history_path.exists():
+            self.eval_loss_history = load_loss_history(self.eval_loss_history_path)
         else:
-            self.loss_history = [
+            self.eval_loss_history = [
                 {str(k): float(v) for k, v in item.items()}
-                for item in checkpoint.get("loss_history", [])
+                for item in checkpoint.get("eval_loss_history", checkpoint.get("loss_history", []))
             ]
+        if self.train_loss_history_path.exists():
+            self.train_loss_history = load_loss_history(self.train_loss_history_path)
+        else:
+            self.train_loss_history = [
+                {str(k): float(v) for k, v in item.items()}
+                for item in checkpoint.get("train_loss_history", [])
+            ]
+        self.loss_history = self.eval_loss_history
         restored_loaders = self.batch_controller.load_checkpoint_meta(meta)
         if restored_loaders is not None:
             self.train_dl, self.test_dl = restored_loaders
         loaded_epoch = int(meta.get("epoch", resolved_epoch or 0))
+        self.completed_epochs = max(self.completed_epochs, loaded_epoch)
         self.logger.info(
             "Loaded checkpoint from %s with signature %s at epoch %d (batch size %d)",
             resolved_path,
@@ -210,16 +229,21 @@ class SelectorTrainer:
         return loaded_epoch
 
     def record_eval_losses(self, eval_losses: dict) -> None:
-        self.loss_history.append({str(k): float(v) for k, v in eval_losses.items()})
-        save_loss_history(self.loss_history, self.loss_history_path)
+        self.eval_loss_history.append({str(k): float(v) for k, v in eval_losses.items()})
+        self.loss_history = self.eval_loss_history
+        save_loss_history(self.eval_loss_history, self.eval_loss_history_path)
+
+    def record_train_losses(self, train_losses: dict) -> None:
+        self.train_loss_history.append({str(k): float(v) for k, v in train_losses.items()})
+        save_loss_history(self.train_loss_history, self.train_loss_history_path)
 
     def write_loss_plot(self) -> None:
-        if not self.loss_history:
+        if not self.train_loss_history and not self.eval_loss_history:
             self.logger.info("Skipping loss plot because no loss history is available.")
             return
 
         loss_path = self.plots_dir / "loss.png"
-        save_loss_plot(self.loss_history, str(loss_path))
+        save_train_eval_loss_plot(self.train_loss_history, self.eval_loss_history, str(loss_path))
         self.logger.info("Saved loss plot to %s", loss_path)
 
     def selection_candidate_mask(self, batch: dict) -> torch.Tensor:
@@ -348,8 +372,9 @@ class SelectorTrainer:
                     counts_pred[i] += Counts(flat_labels, flat_attn, flat_preds)
                     counts_gold[i] += Counts(flat_labels, flat_attn)
 
+        num_batches = max(1, len(self.test_dl))
         for k in total_losses:
-            total_losses[k] /= max(examples_count, 1)
+            total_losses[k] /= num_batches
 
         if self.labels_set is not None and not short:
             selection_rates: list[float] = list(rhos)
@@ -404,6 +429,7 @@ class SelectorTrainer:
                 _, checkpoint_path = latest
                 start_epoch = self.load_checkpoint(checkpoint_path)
                 if start_epoch >= self.epochs:
+                    self.completed_epochs = self.epochs
                     self.logger.info(
                         "Checkpoint epoch %d already reaches the target of %d epochs. Running final evaluation only.",
                         start_epoch,
@@ -458,8 +484,9 @@ class SelectorTrainer:
                 loss_tensor.backward()
                 self.optimizer.step()
 
+            num_batches = max(1, len(self.train_dl))
             for k in total_losses:
-                total_losses[k] /= max(examples_count, 1)
+                total_losses[k] /= num_batches
 
             if self.grid_mode:
                 self.logger.info("GRID_EPOCH %d/%d", epoch + 1, self.epochs)
@@ -471,6 +498,7 @@ class SelectorTrainer:
                     self.batch_controller.batch_size,
                 )
                 self.logger.info(f"\n{dict_to_table(total_losses)}")
+            self.record_train_losses(total_losses)
 
             eval_losses, _, _, _ = self.evaluate(short=True)
             self.record_eval_losses(eval_losses)
@@ -481,13 +509,26 @@ class SelectorTrainer:
             )
             if new_loaders is not None:
                 self.train_dl, self.test_dl = new_loaders
+            self.completed_epochs = epoch + 1
             self.save_checkpoint(epoch + 1)
+            write_metrics_artifacts(
+                cfg=self.cfg,
+                xp=self.xp,
+                train_loss_history=self.train_loss_history,
+                eval_loss_history=self.eval_loss_history,
+                start_capture=self.start_capture,
+                epochs_completed=self.completed_epochs,
+                epochs_target=int(self.epochs),
+                training_completed=False,
+            )
 
         self.final_eval()
 
 
 @hydra_main(config_path="conf", config_name="default", version_base="1.1")
 def main(cfg: DictConfig) -> None:
+    start_capture = start_run_metrics_capture()
+
     logger = get_logger()
     xp = get_xp()
 
@@ -507,7 +548,7 @@ def main(cfg: DictConfig) -> None:
     )
 
     trainer = SelectorTrainer(
-        cfg, ds, train_dl, test_dl, encoder, tokenizer, labels_set, logger, xp
+        cfg, ds, train_dl, test_dl, encoder, tokenizer, labels_set, logger, xp, start_capture
     )
 
     if cfg.train.no_train:
@@ -515,6 +556,17 @@ def main(cfg: DictConfig) -> None:
         trainer.final_eval()
     else:
         trainer.train()
+        trainer.completed_epochs = int(cfg.train.epochs)
+        write_metrics_artifacts(
+            cfg=cfg,
+            xp=xp,
+            train_loss_history=trainer.train_loss_history,
+            eval_loss_history=trainer.eval_loss_history,
+            start_capture=start_capture,
+            epochs_completed=trainer.completed_epochs,
+            epochs_target=int(cfg.train.epochs),
+            training_completed=True,
+        )
 
 
 if __name__ == "__main__":

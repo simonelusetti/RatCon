@@ -2,6 +2,10 @@ import json
 import logging
 import os
 import sys
+import time
+import resource
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import (
     Any,
@@ -31,6 +35,103 @@ if TYPE_CHECKING:
 
 
 tqdm._instances.clear()
+
+
+@dataclass(frozen=True)
+class RunStartCapture:
+    started_perf: float
+    ru_start: resource.struct_rusage
+
+
+def start_run_metrics_capture() -> RunStartCapture:
+    return RunStartCapture(
+        started_perf=time.perf_counter(),
+        ru_start=resource.getrusage(resource.RUSAGE_SELF),
+    )
+
+
+def _rss_bytes(ru: resource.struct_rusage) -> int:
+    # macOS returns bytes, Linux returns kilobytes
+    return int(ru.ru_maxrss if sys.platform == "darwin" else ru.ru_maxrss * 1024)
+
+
+def _build_run_statistics(start_capture: RunStartCapture) -> dict:
+    ru_end = resource.getrusage(resource.RUSAGE_SELF)
+    finished_perf = time.perf_counter()
+    return {
+        "finished_at_utc": datetime.now(timezone.utc).isoformat(),
+        "duration_seconds": finished_perf - start_capture.started_perf,
+        "resources": {
+            "cpu_user_seconds": ru_end.ru_utime - start_capture.ru_start.ru_utime,
+            "cpu_system_seconds": ru_end.ru_stime - start_capture.ru_start.ru_stime,
+            "max_rss_bytes": _rss_bytes(ru_end),
+        },
+    }
+
+
+def _write_json(path: str, payload: dict) -> None:
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def write_metrics_artifacts(
+    cfg: Dict,
+    xp: XP,
+    train_loss_history: Sequence[Mapping[str, float]],
+    eval_loss_history: Sequence[Mapping[str, float]],
+    start_capture: RunStartCapture,
+    epochs_completed: int,
+    epochs_target: int,
+    training_completed: bool,
+) -> None:
+    run_statistics = _build_run_statistics(start_capture)
+    final_losses = dict(eval_loss_history[-1]) if eval_loss_history else {}
+
+    compact_metrics = {
+        "run_statistics": run_statistics,
+        "final_losses": final_losses,
+        "training_progress": {
+            "epochs_completed": int(epochs_completed),
+            "epochs_target": int(epochs_target),
+            "completed": bool(training_completed),
+        },
+    }
+
+    training_cfg = cfg.get("train", {}) if isinstance(cfg, Mapping) else {}
+    runtime_cfg = cfg.get("runtime", {}) if isinstance(cfg, Mapping) else {}
+    runtime_data_cfg = runtime_cfg.get("data", {}) if isinstance(runtime_cfg, Mapping) else {}
+
+    details_metrics = {
+        "experiment": {
+            "signature": xp.sig,
+            "folder": str(xp.folder),
+        },
+        "training": {
+            "epochs_target": int(training_cfg.get("epochs", 0) or 0),
+            "no_train": bool(training_cfg.get("no_train", False)),
+            "continue": bool(training_cfg.get("continue", False)),
+            "epochs_completed": int(epochs_completed),
+            "completed": bool(training_completed),
+        },
+        "runtime": {
+            "device": str(runtime_cfg.get("device", "")),
+            "bf16": bool(runtime_cfg.get("bf16", False)),
+            "compile": bool(runtime_cfg.get("compile", False)),
+            "batch_size": int(runtime_data_cfg.get("batch_size", 0) or 0),
+            "num_workers": int(runtime_data_cfg.get("num_workers", 0) or 0),
+        },
+        "run_statistics": run_statistics,
+        "loss_history": [dict(item) for item in eval_loss_history],
+        "train_loss_history": [dict(item) for item in train_loss_history],
+        "eval_loss_history": [dict(item) for item in eval_loss_history],
+    }
+
+    metrics_file = str(cfg.get("metrics_file", "metrics.json"))
+    metrics_details_file = str(cfg.get("metrics_details_file", "metrics_details.json"))
+    _write_json(metrics_details_file, details_metrics)
+    if training_completed:
+        _write_json(metrics_file, compact_metrics)
 
 
 def configure_runtime(runtime_cfg: Dict) -> Tuple[Dict, bool]:
@@ -369,6 +470,63 @@ def save_loss_plot(loss_history: Sequence[Mapping[str, float]], out_path: str) -
     all_values = [v for loss in loss_history for v in loss.values()]
     if all_values:
         ax.set_ylim(min(all_values), max(all_values) * 1.2)
+
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_train_eval_loss_plot(
+    train_loss_history: Sequence[Mapping[str, float]],
+    eval_loss_history: Sequence[Mapping[str, float]],
+    out_path: str,
+    ema_alpha: float = 0.2,
+) -> None:
+    if not train_loss_history and not eval_loss_history:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    train_ax, eval_ax = axes
+
+    alpha = float(ema_alpha)
+    if not (0.0 < alpha <= 1.0):
+        alpha = 0.2
+
+    def _ema(values: Sequence[float], alpha_value: float) -> list[float]:
+        if not values:
+            return []
+        smoothed = [float(values[0])]
+        for value in values[1:]:
+            smoothed.append(alpha_value * float(value) + (1.0 - alpha_value) * smoothed[-1])
+        return smoothed
+
+    def _plot_history(ax, history: Sequence[Mapping[str, float]], title: str) -> None:
+        ax.set_title(title)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Loss")
+        if not history:
+            ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+            return
+
+        epochs = range(1, len(history) + 1)
+        loss_keys = list(history[0].keys())
+        for key in loss_keys:
+            ys = [float(entry.get(key, np.nan)) for entry in history]
+            ax.plot(epochs, ys, alpha=0.45, linewidth=1.5, label=f"{key} (raw)")
+            ys_ema = _ema(ys, alpha)
+            ax.plot(epochs, ys_ema, linewidth=2.2, label=f"{key} (EMA {alpha:.2f})")
+
+        values = [float(v) for entry in history for v in entry.values()]
+        if values:
+            vmin = min(values)
+            vmax = max(values)
+            if vmax <= vmin:
+                vmax = vmin + 1.0
+            ax.set_ylim(vmin, vmax * 1.05)
+        ax.legend(fontsize="small")
+
+    _plot_history(train_ax, train_loss_history, "Train Losses")
+    _plot_history(eval_ax, eval_loss_history, "Eval Losses")
 
     fig.tight_layout()
     fig.savefig(out_path, bbox_inches="tight")

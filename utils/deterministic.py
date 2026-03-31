@@ -30,7 +30,6 @@ def build_cfgs(args: argparse.Namespace) -> tuple[DictConfig, DictConfig]:
         "threads": args.threads,
         "interop_threads": args.interop_threads,
         "device": args.device,
-        "token_parallelism": False,
         "data": {
             "rebuild": False,
             "batch_size": args.batch_size,

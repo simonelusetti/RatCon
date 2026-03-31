@@ -358,11 +358,44 @@ def get_dataset(
     return ds_tok
 
 
+def filter_special_tokens(
+    ds: DatasetDict,
+    logger: logging.Logger | None = None,
+) -> DatasetDict:
+    """
+    Remove all examples that contain SPECIAL_TAG from the dataset.
+    Used when keep_special=False to exclude special tokens entirely.
+    """
+    def has_special(labels: list[str]) -> bool:
+        return SPECIAL_TAG in labels
+
+    filtered = {}
+    for split, dataset in ds.items():
+        old_len = len(dataset)
+        filtered_dataset = dataset.filter(
+            lambda ex: not has_special(ex["labels"]),
+            desc=f"Filtering {split}",
+        )
+        new_len = len(filtered_dataset)
+        if logger is not None and old_len != new_len:
+            logger.info(
+                "Filtered %s split: removed %d examples with SPECIAL_TAG (%d -> %d samples)",
+                split,
+                old_len - new_len,
+                old_len,
+                new_len,
+            )
+        filtered[split] = filtered_dataset
+
+    return DatasetDict(filtered)
+
+
 def initialize_data(
     data_cfg: dict,
     runtime_cfg: dict,
     logger: logging.Logger | None = None,
     device: str = "cpu",
+    keep_special: bool = True,
 ) -> tuple[DataLoader, DataLoader, SentenceEncoder, PreTrainedTokenizerBase, set[str] | None, DatasetDict]:
     encoder, tokenizer = build_sentence_encoder(
         family=data_cfg.encoder.family,
@@ -372,6 +405,9 @@ def initialize_data(
 
     ds = get_dataset(data_cfg, runtime_cfg, tokenizer, logger)
     ds = shuffle_and_subset(ds, data_cfg.subset, data_cfg.shuffle)
+
+    if not keep_special and "labels" in ds["train"].column_names:
+        ds = filter_special_tokens(ds, logger)
 
     test_subset = runtime_cfg.get("test_subset", None)
     if test_subset is not None and "test" in ds:

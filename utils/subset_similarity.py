@@ -3,6 +3,7 @@ import json
 import sys
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from datasets import Dataset
@@ -227,13 +228,18 @@ def main() -> None:
             T_eff = attn.sum(1)  # per example
 
             # ----- selector outputs (hard masks per rho) -----
-            # Note: your selector returns hard masks in g_sweep (cpu).
+            # Note: your selector returns hard masks in g [R, B, L].
             # We move them back to device for pooling.
             if selector is not None:
                 with torch.no_grad():
-                    _, g_sweep, *_ = selector(ids, token_emb_full, attn)
-                # g_sweep is list[Tensor[B,T]] on CPU
-                g_sweep = [g.to(device) for g in g_sweep]
+                    # Generate rhos from selector's loss_cfg
+                    if selector.loss_cfg and "sweep_range" in selector.loss_cfg:
+                        start, end, steps = selector.loss_cfg["sweep_range"]
+                        rhos = list(np.linspace(start, end, steps))
+                    else:
+                        rhos = [0.5]
+                    
+                    _, g, _ = selector(ids, token_emb_full, attn, rhos=rhos)
 
             # ----- random baseline per frac -----
             for frac in FRACS:
@@ -275,10 +281,8 @@ def main() -> None:
 
             # ----- selector metrics per frac (hard top-k masks) -----
             if selector is not None:
-                # IMPORTANT: g_sweep order matches linspace(sweep_start, sweep_end, sweep_steps)
-                # which we set to align with FRACS.
                 for i, frac in enumerate(FRACS):
-                    hard_mask = g_sweep[i].long()
+                    hard_mask = g[i].long()
                     if args.keep_special:
                         hard_mask = hard_mask | special.long()
 

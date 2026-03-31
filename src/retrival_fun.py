@@ -169,20 +169,23 @@ def build_selector_mask_generator(
     @torch.no_grad()
     def mask_generator(t1, a1, rhos):
         e1_full = encoder.token_embeddings(t1["input_ids"], a1)
-        selection_mask = a1
-        if not keep_special:
-            selection_mask = build_non_special_mask(tokenizer, t1["input_ids"], a1, device)
-        _, g_sweep, *_ = selector(
+        _, g_sweep, _ = selector(
             t1["input_ids"],
             e1_full,
             a1,
             rhos=rhos,
-            selection_mask=selection_mask,
+        )
+
+        non_special = (
+            build_non_special_mask(tokenizer, t1["input_ids"], a1, device)
+            if not keep_special
+            else None
         )
 
         new_a1_sweep = []
         for g in g_sweep:
-            g = g.detach().to(device).float()
+            if non_special is not None:
+                g = g * non_special.float()
             new_a1_sweep.append(g * a1)
 
         return new_a1_sweep
@@ -301,8 +304,7 @@ def run_stsb_sweep(cfg, device, encoder, tokenizer, selector, out_path: str = "s
 
     base = eval_baseline(loader, encoder)
 
-    selector_cfg = cfg.model.selector
-    keep_special = bool(selector_cfg.get("keep_special", True))
+    keep_special = bool(cfg.model.get("keep_special", True))
     selector_mask_gen = build_selector_mask_generator(
         selector,
         encoder,

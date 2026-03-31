@@ -3,15 +3,9 @@ defaults:
   - override: default
 
 model:
-  selector:
-    hard_type: "probabilistic_top_k"
-    keep_special: true
+  keep_special: true
   loss:
-    l_e: 1.0
-    hard: false
-    s_target: 0.3
     tau: 1.0
-    l_tv: 0.0
     sweep_range: [0.1, 1.0, 10]
   optim:
     lr: 3e-4
@@ -38,7 +32,6 @@ runtime:
   threads: 48
   interop_threads: 4
   device: "cpu"
-  token_parallelism: false
   bf16: true      # BF16 autocast (big win on Sapphire Rapids / AMX CPUs)
   compile: false   # torch.compile the selector model (first epoch slower)
   data:
@@ -54,8 +47,6 @@ runtime:
       max_swap_growth_mb: 128
   eval:
     short_log: false
-    log_examples: 0
-    hard: true
     skip_stsb: false
     split: "validation"
     sweep_range: [0.1, 1.0, 20]

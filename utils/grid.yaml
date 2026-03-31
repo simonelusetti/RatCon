@@ -1,4 +1,4 @@
-baseline: ["runtime.grid=true", "runtime.data.batch_size=64", "model.selector.keep_special=false", "runtime.bf16=true"]
+baseline: ["runtime.grid=true", "runtime.data.batch_size=64", "model.keep_special=false", "runtime.bf16=true"]
 sweep:
   - ["data.dataset=wikiann", "array=4"]
   - ["data.dataset=conll03", "array=4"]

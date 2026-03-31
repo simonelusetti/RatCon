@@ -90,11 +90,25 @@ def compute_gates(
     selector: RationaleSelectorModel | Callable,
     ids: torch.Tensor,
     attn: torch.Tensor,
+    rhos: list[float] | None = None,
 ) -> torch.Tensor:
     token_emb = encoder.token_embeddings(ids, attn)
     if isinstance(selector, RationaleSelectorModel):
-        _, g, _ = selector(token_emb, attn)
-        return g
+        # For RationaleSelectorModel, extract default rhos from loss_cfg if not provided
+        if rhos is None:
+            if selector.loss_cfg and "sweep_range" in selector.loss_cfg:
+                start, end, steps = selector.loss_cfg["sweep_range"]
+                rhos = list(np.linspace(start, end, steps))
+            else:
+                # Fallback: use middle value
+                rhos = [0.5]
+        
+        # Forward returns: (z, g, loss)
+        # z: [R, B, L] soft gates
+        # g: [R, B, L] hard masks
+        _, g, _ = selector(ids, token_emb, attn, rhos=rhos)
+        # g is [R, B, L], average across rhos for a single prediction
+        return g.mean(dim=0)  # [B, L]
     else:
         return selector(token_emb, attn)
 

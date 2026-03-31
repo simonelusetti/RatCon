@@ -68,7 +68,6 @@ class SelectorTrainer:
         self.epochs = cfg.train.epochs
         self.short_log = cfg.runtime.eval.short_log
         self.grid_mode = bool(cfg.runtime.grid)
-        self.examples = cfg.runtime.eval.log_examples
         self.device = cfg.runtime.device
         self.rhos = linspace(cfg.model.loss.sweep_range[0], cfg.model.loss.sweep_range[1], cfg.model.loss.sweep_range[2])
         self.bf16 = bool(cfg.runtime.get("bf16", False))
@@ -90,8 +89,6 @@ class SelectorTrainer:
 
         self.tokenizer = tokenizer
         self.labels_set = None if labels_set is None else set(labels_set) | {SPECIAL_TAG}
-        selector_cfg = cfg.model.selector
-        self.keep_special = bool(selector_cfg.get("keep_special", True))
 
         self.sent_encoder = sent_encoder.to(self.device)
         self.sent_encoder.eval()
@@ -249,37 +246,7 @@ class SelectorTrainer:
         save_train_eval_loss_plot(self.train_loss_history, self.eval_loss_history, str(loss_path))
         self.logger.info("Saved loss plot to %s", loss_path)
 
-    def selection_candidate_mask(self, batch: dict) -> torch.Tensor:
-        attn = batch["attn_mask"]
-        if self.keep_special:
-            return attn
-
-        word_ids = batch.get("word_ids")
-        if word_ids is None:
-            return attn
-
-        return attn * word_ids.ge(0).to(dtype=attn.dtype)
-
-    def flatten_eval_labels(self, batch: dict, attn: torch.Tensor) -> list[str]:
-        labels = batch["labels"]
-        flat_labels = [label for seq in labels for label in seq]
-        word_ids = batch.get("word_ids")
-        if word_ids is None:
-            return flat_labels
-
-        flat_attn = attn.bool().view(-1).cpu()
-        flat_word_ids = word_ids.view(-1).cpu().tolist()
-
-        adjusted_labels: list[str] = []
-        for label, is_attended, word_id in zip(flat_labels, flat_attn.tolist(), flat_word_ids):
-            if is_attended and word_id < 0 and label == PAD_TAG:
-                adjusted_labels.append(SPECIAL_TAG)
-            else:
-                adjusted_labels.append(label)
-
-        return adjusted_labels
-
-    def forward_pass(self, batch: dict, examples_count: int, total_losses: dict | None, rhos: list | None = None):
+    def forward_pass(self, batch: dict, examples_count: int, total_loss: float , rhos: list | None = None):
         ids = batch["ids"]
         attn = batch["attn_mask"]
         bs = ids.size(0)
@@ -297,25 +264,14 @@ class SelectorTrainer:
             with torch.no_grad():
                 tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
 
-        selection_mask = self.selection_candidate_mask(batch)
-        z, g_sweep, loss_tensor, losses_log, loss_sweep, rho_eff_sweep = \
-            self.model(ids, tkns_embd, attn, rhos=rhos, selection_mask=selection_mask)
-
-        if total_losses is None:
-            total_losses = {k: 0.0 for k in losses_log}
-        for k in total_losses:
-            total_losses[k] += losses_log[k]
+        _, g, loss = self.model(ids, tkns_embd, attn, rhos=rhos)
 
         return (
             attn,
-            z,
-            g_sweep,
-            loss_tensor,
-            losses_log,
-            loss_sweep,
-            rho_eff_sweep,
+            g,
+            loss,
             examples_count + bs,
-            total_losses,
+            total_loss + loss.item() * bs,
         )
         
     @torch.no_grad()
@@ -324,7 +280,7 @@ class SelectorTrainer:
     ) -> dict:
         self.model.eval()
         examples_count = 0
-        total_losses = None
+        total_loss = 0.0
 
         for batch in tqdm(
             self.test_dl,
@@ -335,13 +291,12 @@ class SelectorTrainer:
             file=sys.stderr,
         ):
             batch = to_device(self.device, batch)
-            _, _, _, _, _, _, _, examples_count, total_losses = self.forward_pass(batch, examples_count, total_losses)
+            _, _, _, examples_count, total_loss \
+                = self.forward_pass(batch, examples_count, total_loss)
         
-        num_batches = max(1, len(self.test_dl))
-        for k in total_losses:
-            total_losses[k] /= num_batches
-        
-        return total_losses
+        total_loss /= max(1, examples_count)
+
+        return {"eval_loss": total_loss}
 
     @torch.no_grad()
     def evaluate(
@@ -350,15 +305,11 @@ class SelectorTrainer:
         self.model.eval()
         
         examples_count = 0
-        total_losses = None
+        total_loss = 0.0
 
         counts_pred, counts_gold = None, None
-        start, end, steps = self.cfg.model.loss.sweep_range
-        sweep_range = len(linspace(start, end, steps))
+        sweep_range = len(self.rhos)
         rho_eff_sum = [0.0 for _ in range(sweep_range)]
-        rho_eff_weighted_num = [0.0 for _ in range(sweep_range)]
-        t_eff_total = 0.0
-        n_samples = 0
         counts_pred = [Counts(labels=self.labels_set) for _ in range(sweep_range)]
         counts_gold = [Counts(labels=self.labels_set) for _ in range(sweep_range)]
 
@@ -372,72 +323,36 @@ class SelectorTrainer:
         ):
             batch = to_device(self.device, batch)
 
-            attn, _, g_sweep, _, _, _, rho_eff_sweep, examples_count, total_losses \
-                = self.forward_pass(batch, examples_count, total_losses, rhos=self.rhos)
+            attn, g_masks, _, examples_count, total_loss \
+                = self.forward_pass(batch, examples_count, total_loss, rhos=self.rhos)
 
-            t_eff = self.selection_candidate_mask(batch).sum(dim=1).float()
-            t_eff_total += t_eff.sum().item()
-            n_samples += int(t_eff.numel())
-
-            for i, r in enumerate(rho_eff_sweep):
-                r_float = r.float()
-                rho_eff_sum[i] += r_float.sum().item()
-                rho_eff_weighted_num[i] += (r_float * t_eff).sum().item()
+            L_eff = attn.float().sum(-1)                        # [B]
+            for i, g_i in enumerate(g_masks):
+                rho_eff_sum[i] += (g_i.sum(-1) / L_eff.clamp(min=1)).sum().item()
 
             if self.labels_set is not None:
-                flat_labels = self.flatten_eval_labels(batch, attn)
+                labels = batch["labels"]
+                flat_labels = [label for seq in labels for label in seq]
                 flat_attn = attn.bool().view(-1).cpu()
 
-                for i, g in enumerate(g_sweep):
-                    flat_preds = g.view(-1)  # already CPU
+                for i, g_i in enumerate(g_masks):
+                    flat_preds = g_i.cpu().view(-1)
                     counts_pred[i] += Counts(flat_labels, flat_attn, flat_preds)
                     counts_gold[i] += Counts(flat_labels, flat_attn)
 
-        num_batches = max(1, len(self.test_dl))
-        for k in total_losses:
-            total_losses[k] /= num_batches
+        total_loss /= max(1, examples_count)
 
         if self.labels_set is not None:
-            selection_rates: list[float] = list(self.rhos)
-            selection_rates = [value / max(n_samples, 1) for value in rho_eff_sum]
-
-            for i, (pred, gold) in enumerate(zip(counts_pred, counts_gold)):
-                total_gold = sum(int(v) for v in gold.data.values())
-                total_pred = sum(int(v) for v in pred.data.values())
-                overall_keep = (total_pred / total_gold) if total_gold > 0 else 0.0
-
-                special_gold = int(gold.data.get(SPECIAL_TAG, 0))
-                special_pred = int(pred.data.get(SPECIAL_TAG, 0))
-                non_special_gold = total_gold - special_gold
-                non_special_pred = total_pred - special_pred
-                non_special_keep = (
-                    non_special_pred / non_special_gold if non_special_gold > 0 else 0.0
-                )
-
-                effective_keep = overall_keep if self.keep_special else non_special_keep
-                model_weighted_keep = (
-                    rho_eff_weighted_num[i] / t_eff_total if t_eff_total > 0 else 0.0
-                )
-                theoretical_gap = abs(float(selection_rates[i]) - float(model_weighted_keep))
-                quantization_eps = 1.0 / max(
-                    total_gold if self.keep_special else non_special_gold,
-                    1,
-                )
-                gap = abs(float(selection_rates[i]) - float(effective_keep))
-                assert gap <= theoretical_gap + quantization_eps, (
-                    f"Selection-rate mismatch at rho[{i}]={selection_rates[i]:.3f}: "
-                    f"effective_keep={effective_keep:.3f}, gap={gap:.3f}, "
-                    f"bound={theoretical_gap + quantization_eps:.3f}"
-                )
+            selection_rates: list[float] = [value / max(examples_count, 1) for value in rho_eff_sum]
 
             self.logger.info(
                 "\nLabel selection matrix (columns = mean effective selection rate):\n%s",
                 selection_rate_matrix_to_table(counts_pred, counts_gold, selection_rates),
             )
 
-            return total_losses, counts_pred, counts_gold, selection_rates
+            return {"eval_loss": total_loss}, counts_pred, counts_gold, selection_rates
 
-        return total_losses, None, None, None
+        return {"eval_loss": total_loss}, None, None, None
 
     @torch.no_grad()
     def final_eval(self, record_eval_history: bool = True) -> None:
@@ -505,7 +420,7 @@ class SelectorTrainer:
         for epoch in epoch_bar:
             epoch_start_stats = self.batch_controller.sample_memory()
             self.model.train()
-            total_losses = None
+            total_loss = 0.0
             examples_count = 0
 
             for batch in tqdm(
@@ -519,15 +434,19 @@ class SelectorTrainer:
                 batch = to_device(self.device, batch)
                 self.optimizer.zero_grad(set_to_none=True)
 
-                _, _, _, loss_tensor, _, _, _, examples_count, total_losses \
-                    = self.forward_pass(batch, examples_count, total_losses)
+                _, _, loss, examples_count, total_loss \
+                    = self.forward_pass(batch, examples_count, total_loss)
 
-                loss_tensor.backward()
+                loss.backward()
                 self.optimizer.step()
 
-            num_batches = max(1, len(self.train_dl))
-            for k in total_losses:
-                total_losses[k] /= num_batches
+            total_loss /= max(1, examples_count)
+            
+            train_losses = {"train_loss": total_loss}
+            self.record_train_losses(train_losses)
+
+            eval_losses = self.short_evaluate()
+            self.record_eval_losses(eval_losses)
 
             if self.grid_mode:
                 self.logger.info("GRID_EPOCH %d/%d", epoch + 1, self.epochs)
@@ -538,11 +457,7 @@ class SelectorTrainer:
                     self.epochs,
                     self.batch_controller.batch_size,
                 )
-                self.logger.info(f"\n{dict_to_table(total_losses)}")
-            self.record_train_losses(total_losses)
-
-            eval_losses = self.short_evaluate()
-            self.record_eval_losses(eval_losses)
+                self.logger.info(f"\n{dict_to_table({**train_losses, **eval_losses})}")
             epoch_end_stats = self.batch_controller.sample_memory()
             new_loaders = self.batch_controller.maybe_reduce_after_epoch(
                 epoch_start_stats,
@@ -551,6 +466,7 @@ class SelectorTrainer:
             if new_loaders is not None:
                 self.train_dl, self.test_dl = new_loaders
             self.completed_epochs = epoch + 1
+            print("\a", end="", flush=True, file=sys.stderr)
             self.save_checkpoint(epoch + 1)
             write_metrics_artifacts(
                 cfg=self.cfg,
@@ -586,6 +502,7 @@ def main(cfg: DictConfig) -> None:
         cfg.runtime.data,
         logger,
         device=cfg.runtime.device,
+        keep_special=bool(cfg.model.get("keep_special", True)),
     )
 
     trainer = SelectorTrainer(

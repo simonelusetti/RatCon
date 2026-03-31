@@ -72,6 +72,7 @@ class RationaleSelectorModel(nn.Module):
         dropout: float = 0.1,
         sent_encoder: SentenceEncoder | None = None,
         loss_cfg: dict | None = None,
+        selector_cfg: dict | None = None,
     ) -> None:
         super().__init__()
 
@@ -82,9 +83,11 @@ class RationaleSelectorModel(nn.Module):
         self.sent_encoder = sent_encoder
         self.loss_cfg = loss_cfg
 
-        self.tau_rank = 0.5
-        self.gamma_rank = 1.0
-        self.tau_gate = 1.0
+        selector_cfg = selector_cfg or {}
+
+        self.tau_rank = float(selector_cfg.get("tau_rank", 0.05))
+        self.gamma_rank = float(selector_cfg.get("gamma_rank", 2.0))
+        self.tau_gate = float(selector_cfg.get("tau_gate", 0.2))
 
     def forward(
         self,

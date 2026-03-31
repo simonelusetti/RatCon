@@ -1,5 +1,38 @@
-baseline: ["runtime.grid=true", "runtime.data.batch_size=64", "model.keep_special=false", "runtime.bf16=true"]
+baseline:
+  - "runtime.grid=true"
+  - "runtime.data.batch_size=64"
+  - "runtime.bf16=true"
+  - "data.dataset=wikiann"
+  - "data.subset=0.1"
+  - "train.epochs=10"
+
 sweep:
-  - ["data.dataset=wikiann", "array=4"]
-  - ["data.dataset=conll03", "array=4"]
-  - ["data.dataset=twitter", "array=4"]
+  - ["model.selector.tau_rank=0.03", "model.selector.gamma_rank=1.0", "model.selector.tau_gate=0.10"]
+  - ["model.selector.tau_rank=0.03", "model.selector.gamma_rank=1.0", "model.selector.tau_gate=0.20"]
+  - ["model.selector.tau_rank=0.03", "model.selector.gamma_rank=1.0", "model.selector.tau_gate=0.40"]
+  - ["model.selector.tau_rank=0.03", "model.selector.gamma_rank=2.0", "model.selector.tau_gate=0.10"]
+  - ["model.selector.tau_rank=0.03", "model.selector.gamma_rank=2.0", "model.selector.tau_gate=0.20"]
+  - ["model.selector.tau_rank=0.03", "model.selector.gamma_rank=2.0", "model.selector.tau_gate=0.40"]
+  - ["model.selector.tau_rank=0.03", "model.selector.gamma_rank=3.0", "model.selector.tau_gate=0.10"]
+  - ["model.selector.tau_rank=0.03", "model.selector.gamma_rank=3.0", "model.selector.tau_gate=0.20"]
+  - ["model.selector.tau_rank=0.03", "model.selector.gamma_rank=3.0", "model.selector.tau_gate=0.40"]
+
+  - ["model.selector.tau_rank=0.05", "model.selector.gamma_rank=1.0", "model.selector.tau_gate=0.10"]
+  - ["model.selector.tau_rank=0.05", "model.selector.gamma_rank=1.0", "model.selector.tau_gate=0.20"]
+  - ["model.selector.tau_rank=0.05", "model.selector.gamma_rank=1.0", "model.selector.tau_gate=0.40"]
+  - ["model.selector.tau_rank=0.05", "model.selector.gamma_rank=2.0", "model.selector.tau_gate=0.10"]
+  - ["model.selector.tau_rank=0.05", "model.selector.gamma_rank=2.0", "model.selector.tau_gate=0.20"]
+  - ["model.selector.tau_rank=0.05", "model.selector.gamma_rank=2.0", "model.selector.tau_gate=0.40"]
+  - ["model.selector.tau_rank=0.05", "model.selector.gamma_rank=3.0", "model.selector.tau_gate=0.10"]
+  - ["model.selector.tau_rank=0.05", "model.selector.gamma_rank=3.0", "model.selector.tau_gate=0.20"]
+  - ["model.selector.tau_rank=0.05", "model.selector.gamma_rank=3.0", "model.selector.tau_gate=0.40"]
+
+  - ["model.selector.tau_rank=0.10", "model.selector.gamma_rank=1.0", "model.selector.tau_gate=0.10"]
+  - ["model.selector.tau_rank=0.10", "model.selector.gamma_rank=1.0", "model.selector.tau_gate=0.20"]
+  - ["model.selector.tau_rank=0.10", "model.selector.gamma_rank=1.0", "model.selector.tau_gate=0.40"]
+  - ["model.selector.tau_rank=0.10", "model.selector.gamma_rank=2.0", "model.selector.tau_gate=0.10"]
+  - ["model.selector.tau_rank=0.10", "model.selector.gamma_rank=2.0", "model.selector.tau_gate=0.20"]
+  - ["model.selector.tau_rank=0.10", "model.selector.gamma_rank=2.0", "model.selector.tau_gate=0.40"]
+  - ["model.selector.tau_rank=0.10", "model.selector.gamma_rank=3.0", "model.selector.tau_gate=0.10"]
+  - ["model.selector.tau_rank=0.10", "model.selector.gamma_rank=3.0", "model.selector.tau_gate=0.20"]
+  - ["model.selector.tau_rank=0.10", "model.selector.gamma_rank=3.0", "model.selector.tau_gate=0.40"]

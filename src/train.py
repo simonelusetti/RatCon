@@ -103,7 +103,10 @@ class SelectorTrainer:
             ).shape[-1]
 
         self.model = RationaleSelectorModel(
-            model_dim, loss_cfg=cfg.model.loss, sent_encoder=self.sent_encoder
+            model_dim,
+            loss_cfg=cfg.model.loss,
+            selector_cfg=cfg.model.get("selector", None),
+            sent_encoder=self.sent_encoder,
         ).to(self.device)
 
         if cfg.runtime.get("compile", False):

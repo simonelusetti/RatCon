@@ -4,11 +4,15 @@ defaults:
 
 model:
   keep_special: true
+  selector:
+    tau_rank: 0.05
+    gamma_rank: 2.0
+    tau_gate: 0.2
   loss:
     tau: 1.0
     sweep_range: [0.1, 1.0, 10]
   optim:
-    lr: 3e-4
+    lr: 1e-3
     weight_decay: 1e-2
     betas: [0.9, 0.999]
 

@@ -5,6 +5,7 @@ defaults:
 model:
   keep_special: true
   selector:
+    condition_on_rho: true
     tau_rank: 0.05
     gamma_rank: 2.0
     tau_gate: 0.2
@@ -30,6 +31,7 @@ train:
   epochs: 30
   no_train: false
   continue: false
+  checkpoint_path: null
 
 runtime:
   grid: false
@@ -64,6 +66,7 @@ dora:
     - "runtime.*"
     - "train.no_train"
     - "train.continue"
+    - "train.checkpoint_path"
 
 array: 0
 

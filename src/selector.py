@@ -11,15 +11,31 @@ from src.sentence import SentenceEncoder
 # ------------------------------------------------------------
 
 class SelectorMLP(nn.Module):
-    def __init__(self, d_model: int, hidden: int, dropout: float) -> None:
+    def __init__(
+        self,
+        d_model: int,
+        hidden: int,
+        dropout: float,
+        condition_on_rho: bool = True,
+    ) -> None:
         super().__init__()
-        self.ln = nn.LayerNorm(d_model)
-        self.fc1 = nn.Linear(d_model, hidden)
+        self.condition_on_rho = condition_on_rho
+        in_dim = d_model + 1 if condition_on_rho else d_model
+        self.ln = nn.LayerNorm(in_dim)
+        self.fc1 = nn.Linear(in_dim, hidden)
         self.fc2 = nn.Linear(hidden, 1)
         self.drop = nn.Dropout(dropout)
 
-    def forward(self, token_emb: torch.Tensor) -> torch.Tensor:
-        x = self.ln(token_emb)
+    def forward(self, token_emb: torch.Tensor, rho: torch.Tensor | None = None) -> torch.Tensor:
+        if self.condition_on_rho:
+            if rho is None:
+                raise ValueError("rho must be provided when condition_on_rho is enabled")
+            rho = rho[:, None, None].to(dtype=token_emb.dtype, device=token_emb.device)
+            rho = rho.expand(token_emb.shape[0], token_emb.shape[1], 1)
+            x = torch.cat([token_emb, rho], dim=-1)
+        else:
+            x = token_emb
+        x = self.ln(x)
         x = self.fc1(x)
         x = F.gelu(x)
         x = self.drop(x)
@@ -79,11 +95,17 @@ class RationaleSelectorModel(nn.Module):
         if hidden is None:
             hidden = 4 * embedding_dim // 3
 
-        self.selector = SelectorMLP(embedding_dim, hidden, dropout)
+        selector_cfg = selector_cfg or {}
+        self.condition_on_rho = bool(selector_cfg.get("condition_on_rho", True))
+
+        self.selector = SelectorMLP(
+            embedding_dim,
+            hidden,
+            dropout,
+            condition_on_rho=self.condition_on_rho,
+        )
         self.sent_encoder = sent_encoder
         self.loss_cfg = loss_cfg
-
-        selector_cfg = selector_cfg or {}
 
         self.tau_rank = float(selector_cfg.get("tau_rank", 0.05))
         self.gamma_rank = float(selector_cfg.get("gamma_rank", 2.0))
@@ -102,10 +124,6 @@ class RationaleSelectorModel(nn.Module):
 
         device = embeddings.device
 
-        emb = embeddings * attn.unsqueeze(-1)
-        scores = self.selector(emb)
-        scores = scores.masked_fill(attn == 0, 0.0)
-
         attn_f = attn.float()
         with torch.no_grad():
             full_rep = self.sent_encoder.pool(embeddings, attn_f)
@@ -113,38 +131,58 @@ class RationaleSelectorModel(nn.Module):
         selection_f = attn_f
         L_eff = selection_f.sum(dim=1).float()
 
-        ranks = soft_rank(
-            scores,
-            selection_f,
-            tau=self.tau_rank,
-            gamma=self.gamma_rank,
-        )
-
         B, L = ids.shape
         R = len(rhos)
 
         rhos_t = torch.tensor(list(rhos), device=device, dtype=torch.float32)
 
+        emb = embeddings * attn.unsqueeze(-1)
+        if self.condition_on_rho:
+            emb_rep = emb[None].expand(R, B, L, -1).reshape(R * B, L, emb.shape[-1])
+            attn_rep_for_rank = attn_f[None].expand(R, B, L).reshape(R * B, L)
+            rho_per_example = rhos_t[:, None].expand(R, B).reshape(R * B)
+
+            scores = self.selector(emb_rep, rho_per_example)
+            scores = scores.masked_fill(attn_rep_for_rank == 0, 0.0)
+
+            ranks = soft_rank(
+                scores,
+                attn_rep_for_rank,
+                tau=self.tau_rank,
+                gamma=self.gamma_rank,
+            ).view(R, B, L)
+        else:
+            scores = self.selector(emb)
+            scores = scores.masked_fill(attn_f == 0, 0.0)
+            shared_ranks = soft_rank(
+                scores,
+                attn_f,
+                tau=self.tau_rank,
+                gamma=self.gamma_rank,
+            )
+            ranks = shared_ranks.unsqueeze(0).expand(R, -1, -1)
+
         k = (rhos_t[:, None] * L_eff[None]).round().long()
         k = torch.where(L_eff[None] > 0, k.clamp(min=1), torch.zeros_like(k))
 
         gate_raw = torch.sigmoid(
-            (k.float()[:, :, None] - ranks[None]) / self.tau_gate
+            (k.float()[:, :, None] - ranks) / self.tau_gate
         ) * selection_f[None]
 
         z = gate_raw / gate_raw.sum(dim=-1, keepdim=True).clamp(min=1e-8)
         z = z * k.float()[:, :, None]
 
-        invalid_ranks = ranks.masked_fill(attn == 0, float("inf"))
-        _, sorted_idx = torch.sort(invalid_ranks, dim=1)
+        invalid_ranks = ranks.masked_fill(attn_f[None] == 0, float("inf"))
+        _, sorted_idx = torch.sort(invalid_ranks, dim=2)
         pos = torch.arange(L, device=device)
         valid_sel = pos[None, None, :] < k[:, :, None]
         g = torch.zeros(R, B, L, device=device)
-        g.scatter_(2, sorted_idx[None].expand(R, -1, -1), valid_sel.float())
+        g.scatter_(2, sorted_idx, valid_sel.float())
 
         g_st = g + (z - z.detach())
 
-        effective_attns = attn_f[None] * g_st
+        #effective_attns = attn_f[None] * g_st
+        effective_attns = attn_f[None] * z
         ids_rep = ids[None].expand(R, B, L).reshape(R * B, L)
         attn_rep = effective_attns.reshape(R * B, L)
 

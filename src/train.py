@@ -24,10 +24,10 @@ from .utils import (
     configure_runtime,
     to_device,
     dict_to_table,
-    load_loss_history,
     save_label_plots,
-    save_loss_history,
     save_train_eval_loss_plot,
+    save_combined_loss_history,
+    load_combined_loss_history,
     selection_rate_matrix_to_table,
     start_run_metrics_capture,
     write_metrics_artifacts,
@@ -82,8 +82,7 @@ class SelectorTrainer:
         self.state_dir = self.checkpoint_dir / "state"
         self.models_dir = self.state_dir / "models"
         self.plots_dir = self.checkpoint_dir / "plots"
-        self.eval_loss_history_path = self.state_dir / "loss_history.json"
-        self.train_loss_history_path = self.state_dir / "train_loss_history.json"
+        self.loss_history_path = self.state_dir / "loss_history.json"
         self.legacy_checkpoint_path = self.checkpoint_dir / "model.pth"
         self.legacy_models_glob = "model_*.pth"
 
@@ -122,8 +121,7 @@ class SelectorTrainer:
 
         self.models_dir.mkdir(parents=True, exist_ok=True)
         self.plots_dir.mkdir(parents=True, exist_ok=True)
-        self.eval_loss_history = load_loss_history(self.eval_loss_history_path)
-        self.train_loss_history = load_loss_history(self.train_loss_history_path)
+        self.train_loss_history, self.eval_loss_history = load_combined_loss_history(self.loss_history_path)
         # Backward-compatible alias used by older checkpoint payloads.
         self.loss_history = self.eval_loss_history
         self.batch_controller = DynamicBatchController(
@@ -182,8 +180,7 @@ class SelectorTrainer:
             checkpoint_path,
             _use_new_zipfile_serialization=False,
         )
-        save_loss_history(self.eval_loss_history, self.eval_loss_history_path)
-        save_loss_history(self.train_loss_history, self.train_loss_history_path)
+        save_combined_loss_history(self.train_loss_history, self.eval_loss_history, self.loss_history_path)
         self.logger.info("Saved checkpoint to %s", checkpoint_path)
         
     def load_checkpoint(self, checkpoint_path: Path | None = None) -> int:
@@ -202,16 +199,15 @@ class SelectorTrainer:
         self.model.load_state_dict(checkpoint["model"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         meta = checkpoint.get("meta", {})
-        if self.eval_loss_history_path.exists():
-            self.eval_loss_history = load_loss_history(self.eval_loss_history_path)
+
+        if self.loss_history_path.exists():
+            self.train_loss_history, self.eval_loss_history = load_combined_loss_history(self.loss_history_path)
         else:
+            # Backward compatibility for old checkpoints/history format.
             self.eval_loss_history = [
                 {str(k): float(v) for k, v in item.items()}
                 for item in checkpoint.get("eval_loss_history", checkpoint.get("loss_history", []))
             ]
-        if self.train_loss_history_path.exists():
-            self.train_loss_history = load_loss_history(self.train_loss_history_path)
-        else:
             self.train_loss_history = [
                 {str(k): float(v) for k, v in item.items()}
                 for item in checkpoint.get("train_loss_history", [])
@@ -234,11 +230,11 @@ class SelectorTrainer:
     def record_eval_losses(self, eval_losses: dict) -> None:
         self.eval_loss_history.append({str(k): float(v) for k, v in eval_losses.items()})
         self.loss_history = self.eval_loss_history
-        save_loss_history(self.eval_loss_history, self.eval_loss_history_path)
+        save_combined_loss_history(self.train_loss_history, self.eval_loss_history, self.loss_history_path)
 
     def record_train_losses(self, train_losses: dict) -> None:
         self.train_loss_history.append({str(k): float(v) for k, v in train_losses.items()})
-        save_loss_history(self.train_loss_history, self.train_loss_history_path)
+        save_combined_loss_history(self.train_loss_history, self.eval_loss_history, self.loss_history_path)
 
     def write_loss_plot(self) -> None:
         if not self.train_loss_history and not self.eval_loss_history:
@@ -513,7 +509,7 @@ def main(cfg: DictConfig) -> None:
     )
 
     if cfg.train.no_train:
-        trainer.load_checkpoint()
+        trainer.load_checkpoint(Path(os.getcwd()) / "state/models/" / str(cfg.train.checkpoint_path))
         trainer.final_eval(record_eval_history=False)
     else:
         trainer.train()

@@ -745,6 +745,50 @@ def load_loss_history(path: Path) -> list[dict[str, float]]:
     return history
 
 
+def save_combined_loss_history(
+    train_history: Sequence[Mapping[str, float]],
+    eval_history: Sequence[Mapping[str, float]],
+    out_path: Path,
+) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    combined = {
+        "train": [dict(item) for item in train_history],
+        "eval": [dict(item) for item in eval_history],
+    }
+    with out_path.open("w", encoding="utf-8") as f:
+        json.dump(combined, f, indent=2)
+
+
+def load_combined_loss_history(path: Path) -> tuple[list[dict[str, float]], list[dict[str, float]]]:
+    if not path.exists():
+        return [], []
+
+    with path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected a dict in {path}, found {type(payload).__name__}.")
+
+    train_history: list[dict[str, float]] = []
+    eval_history: list[dict[str, float]] = []
+
+    for key in ["train", "eval"]:
+        history_list = payload.get(key, [])
+        if not isinstance(history_list, list):
+            raise ValueError(f"Expected a list for '{key}' in {path}, found {type(history_list).__name__}.")
+        
+        for item in history_list:
+            if not isinstance(item, Mapping):
+                raise ValueError(f"Expected mapping entries in '{key}' in {path}, found {type(item).__name__}.")
+        
+        if key == "train":
+            train_history = [{str(k): float(v) for k, v in item.items()} for item in history_list]
+        else:
+            eval_history = [{str(k): float(v) for k, v in item.items()} for item in history_list]
+
+    return train_history, eval_history
+
+
 def save_label_plots(
     counts_pred: Optional[Sequence[Any]],
     counts_gold: Optional[Sequence[Any]],

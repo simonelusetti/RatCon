@@ -97,6 +97,9 @@ class RationaleSelectorModel(nn.Module):
 
         selector_cfg = selector_cfg or {}
         self.condition_on_rho = bool(selector_cfg.get("condition_on_rho", True))
+        self.use_hard_for_reencode = bool(
+            selector_cfg.get("use_hard", selector_cfg.get("use_hard_mask_for_reencode", False))
+        )
 
         self.selector = SelectorMLP(
             embedding_dim,
@@ -181,8 +184,10 @@ class RationaleSelectorModel(nn.Module):
 
         g_st = g + (z - z.detach())
 
-        #effective_attns = attn_f[None] * g_st
-        effective_attns = attn_f[None] * z
+        if self.use_hard_for_reencode:
+            effective_attns = attn_f[None] * g_st
+        else:
+            effective_attns = attn_f[None] * z
         ids_rep = ids[None].expand(R, B, L).reshape(R * B, L)
         attn_rep = effective_attns.reshape(R * B, L)
 

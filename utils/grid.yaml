@@ -2,37 +2,14 @@ baseline:
   - "runtime.grid=true"
   - "runtime.data.batch_size=64"
   - "runtime.bf16=true"
-  - "data.dataset=wikiann"
-  - "data.subset=0.1"
-  - "train.epochs=10"
+  - model.selector.condition_on_rho=false
+  - model.selector.use_hard=false 
+  - "run=1"
 
 sweep:
-  - ["model.selector.tau_rank=0.03", "model.selector.gamma_rank=1.0", "model.selector.tau_gate=0.10"]
-  - ["model.selector.tau_rank=0.03", "model.selector.gamma_rank=1.0", "model.selector.tau_gate=0.20"]
-  - ["model.selector.tau_rank=0.03", "model.selector.gamma_rank=1.0", "model.selector.tau_gate=0.40"]
-  - ["model.selector.tau_rank=0.03", "model.selector.gamma_rank=2.0", "model.selector.tau_gate=0.10"]
-  - ["model.selector.tau_rank=0.03", "model.selector.gamma_rank=2.0", "model.selector.tau_gate=0.20"]
-  - ["model.selector.tau_rank=0.03", "model.selector.gamma_rank=2.0", "model.selector.tau_gate=0.40"]
-  - ["model.selector.tau_rank=0.03", "model.selector.gamma_rank=3.0", "model.selector.tau_gate=0.10"]
-  - ["model.selector.tau_rank=0.03", "model.selector.gamma_rank=3.0", "model.selector.tau_gate=0.20"]
-  - ["model.selector.tau_rank=0.03", "model.selector.gamma_rank=3.0", "model.selector.tau_gate=0.40"]
-
-  - ["model.selector.tau_rank=0.05", "model.selector.gamma_rank=1.0", "model.selector.tau_gate=0.10"]
-  - ["model.selector.tau_rank=0.05", "model.selector.gamma_rank=1.0", "model.selector.tau_gate=0.20"]
-  - ["model.selector.tau_rank=0.05", "model.selector.gamma_rank=1.0", "model.selector.tau_gate=0.40"]
-  - ["model.selector.tau_rank=0.05", "model.selector.gamma_rank=2.0", "model.selector.tau_gate=0.10"]
-  - ["model.selector.tau_rank=0.05", "model.selector.gamma_rank=2.0", "model.selector.tau_gate=0.20"]
-  - ["model.selector.tau_rank=0.05", "model.selector.gamma_rank=2.0", "model.selector.tau_gate=0.40"]
-  - ["model.selector.tau_rank=0.05", "model.selector.gamma_rank=3.0", "model.selector.tau_gate=0.10"]
-  - ["model.selector.tau_rank=0.05", "model.selector.gamma_rank=3.0", "model.selector.tau_gate=0.20"]
-  - ["model.selector.tau_rank=0.05", "model.selector.gamma_rank=3.0", "model.selector.tau_gate=0.40"]
-
-  - ["model.selector.tau_rank=0.10", "model.selector.gamma_rank=1.0", "model.selector.tau_gate=0.10"]
-  - ["model.selector.tau_rank=0.10", "model.selector.gamma_rank=1.0", "model.selector.tau_gate=0.20"]
-  - ["model.selector.tau_rank=0.10", "model.selector.gamma_rank=1.0", "model.selector.tau_gate=0.40"]
-  - ["model.selector.tau_rank=0.10", "model.selector.gamma_rank=2.0", "model.selector.tau_gate=0.10"]
-  - ["model.selector.tau_rank=0.10", "model.selector.gamma_rank=2.0", "model.selector.tau_gate=0.20"]
-  - ["model.selector.tau_rank=0.10", "model.selector.gamma_rank=2.0", "model.selector.tau_gate=0.40"]
-  - ["model.selector.tau_rank=0.10", "model.selector.gamma_rank=3.0", "model.selector.tau_gate=0.10"]
-  - ["model.selector.tau_rank=0.10", "model.selector.gamma_rank=3.0", "model.selector.tau_gate=0.20"]
-  - ["model.selector.tau_rank=0.10", "model.selector.gamma_rank=3.0", "model.selector.tau_gate=0.40"]
+  - ["data.dataset=mr"]
+  - ["data.dataset=twitter"]
+  - ["data.dataset=conll03"]
+  - ["data.dataset=conll00"]
+  - ["data.dataset=ud"]
+  - ["data.dataset=ud_pos"]

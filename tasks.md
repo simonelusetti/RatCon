@@ -1,5 +1,4 @@
-- controllare che nelle run degeneri il selection rate sia davvero enforzato
-    - controllare loss nelle run degeneri rispetto a quelle normali
+- controllare loss nelle run degeneri rispetto a quelle normali
 - controllare la distribuzione delle label se è stabile
 - altri encoder (quelli più usati nel landscape)
 

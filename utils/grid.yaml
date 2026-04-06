@@ -4,11 +4,10 @@ baseline:
   - "runtime.bf16=true"
   - model.selector.condition_on_rho=false
   - model.selector.use_hard=false 
-  - "run=1"
+  - "run=2"
+  - "train.continue=true"
 
 sweep:
-  - ["data.dataset=mr"]
-  - ["data.dataset=twitter"]
   - ["data.dataset=conll03"]
   - ["data.dataset=conll00"]
   - ["data.dataset=ud"]

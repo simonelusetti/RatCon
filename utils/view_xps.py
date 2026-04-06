@@ -30,7 +30,8 @@ import yaml
 
 
 XPS_DIR = Path(__file__).parent.parent / "outputs" / "xps"
-PLOT_FILE = Path("plots/chi_square.png")
+CHI_PLOT_FILE = Path("plots/chi_square.png")
+SPEARMAN_PLOT_FILE = Path("plots/spearman_vs_rho.png")
 OVERRIDES_FILE = Path(".hydra/overrides.yaml")
 
 
@@ -52,8 +53,12 @@ def clean_label(sig: str, overrides: list[str]) -> str:
     return f"{sig}\n{body}"
 
 
-def collect_experiments(sigs: list[str]) -> list[tuple[str, Path, str]]:
-    """Return list of (sig, plot_path, label) for experiments with a chi_square plot."""
+def collect_experiments(
+    sigs: list[str],
+    plot_file: Path,
+    plot_name: str,
+) -> list[tuple[str, Path, str]]:
+    """Return list of (sig, plot_path, label) for experiments with the target plot."""
     if sigs:
         candidates = [(s, XPS_DIR / s) for s in sigs]
     else:
@@ -65,7 +70,7 @@ def collect_experiments(sigs: list[str]) -> list[tuple[str, Path, str]]:
     results = []
     missing = []
     for sig, sig_dir in candidates:
-        plot_path = sig_dir / PLOT_FILE
+        plot_path = sig_dir / plot_file
         if not plot_path.exists():
             missing.append(sig)
             continue
@@ -74,7 +79,7 @@ def collect_experiments(sigs: list[str]) -> list[tuple[str, Path, str]]:
         results.append((sig, plot_path, label))
 
     if missing:
-        print(f"Skipped (no chi_square plot): {', '.join(missing)}")
+        print(f"Skipped (no {plot_name} plot): {', '.join(missing)}")
 
     return results
 
@@ -120,19 +125,34 @@ def make_grid(entries: list[tuple[str, Path, str]], out_path: Path, ncols: int) 
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Grid view of chi_square plots across experiments.")
-    ap.add_argument("--out", type=Path, default=Path("outputs/chi_square_overview.png"))
+    ap = argparse.ArgumentParser(
+        description="Grid view of chi_square and spearman plots across experiments."
+    )
+    ap.add_argument("--out-chi", type=Path, default=Path("outputs/chi_square_overview.png"))
+    ap.add_argument("--out-spearman", type=Path, default=Path("outputs/spearman_overview.png"))
     ap.add_argument("--ncols", type=int, default=4, help="Number of columns in the grid")
     args = ap.parse_args()
 
     sigs = EXPERIMENTS
-    entries = collect_experiments(sigs)
-    if not entries:
+
+    entries_chi = collect_experiments(sigs, CHI_PLOT_FILE, "chi_square")
+    entries_spearman = collect_experiments(sigs, SPEARMAN_PLOT_FILE, "spearman")
+
+    if not entries_chi and not entries_spearman:
         print("Nothing to show.")
         return
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    make_grid(entries, args.out, ncols=args.ncols)
+    if entries_chi:
+        args.out_chi.parent.mkdir(parents=True, exist_ok=True)
+        make_grid(entries_chi, args.out_chi, ncols=args.ncols)
+    else:
+        print("No chi_square plots to show.")
+
+    if entries_spearman:
+        args.out_spearman.parent.mkdir(parents=True, exist_ok=True)
+        make_grid(entries_spearman, args.out_spearman, ncols=args.ncols)
+    else:
+        print("No spearman plots to show.")
 
 
 if __name__ == "__main__":

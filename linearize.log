@@ -1,0 +1,221 @@
+2026-04-05 02:47:45,301 - INFO - Linearize utility run (no Dora experiment)
+2026-04-05 02:47:45,301 - INFO - {'model': {'keep_special': True, 'selector': {'condition_on_rho': True, 'use_hard': False, 'tau_rank': 0.05, 'gamma_rank': 2.0, 'tau_gate': 0.2}, 'loss': {'tau': 1.0, 'sweep_range': [0.1, 1.0, 10]}, 'optim': {'lr': 0.001, 'weight_decay': 0.01, 'betas': [0.9, 0.999]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'mr', 'config': None, 'subset': 1.0, 'encoder': {'family': 'sbert', 'name': None}}, 'train': {'epochs': 30, 'no_train': True, 'continue': False, 'checkpoint_path': None}, 'runtime': {'grid': False, 'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'bf16': True, 'compile': False, 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 256, 'num_workers': 4, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}, 'eval': {'short_log': False, 'skip_stsb': False, 'split': 'validation', 'sweep_range': [0.1, 1.0, 20], 'random_selector': {'runs': 5, 'seed': 1234}}}}
+2026-04-05 02:47:45,301 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 02:47:48,128 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/movie_rationales_tok=bert-base
+2026-04-05 02:51:26,653 - INFO - Linearize utility run (no Dora experiment)
+2026-04-05 02:51:26,654 - INFO - {'model': {'keep_special': True, 'selector': {'condition_on_rho': True, 'use_hard': False, 'tau_rank': 0.05, 'gamma_rank': 2.0, 'tau_gate': 0.2}, 'loss': {'tau': 1.0, 'sweep_range': [0.1, 1.0, 10]}, 'optim': {'lr': 0.001, 'weight_decay': 0.01, 'betas': [0.9, 0.999]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'mr', 'config': None, 'subset': 1.0, 'encoder': {'family': 'sbert', 'name': None}}, 'train': {'epochs': 30, 'no_train': True, 'continue': False, 'checkpoint_path': None}, 'runtime': {'grid': False, 'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'bf16': True, 'compile': False, 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 256, 'num_workers': 4, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}, 'eval': {'short_log': False, 'skip_stsb': False, 'split': 'validation', 'sweep_range': [0.1, 1.0, 20], 'random_selector': {'runs': 5, 'seed': 1234}}}}
+2026-04-05 02:51:26,654 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 02:51:29,775 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/movie_rationales_tok=bert-base
+2026-04-05 02:51:34,938 - INFO - Loading checkpoint from /home/simonelusetti/RatCon/outputs/xps/e7fb80e4/state/models/model_10.pth
+2026-04-05 02:57:33,004 - INFO - Oracle linearize utility run (no Dora experiment)
+2026-04-05 02:57:33,005 - INFO - {'model': {'keep_special': True, 'loss': {'sweep_range': [0.1, 1.0, 10]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'mr', 'config': None, 'subset': 1.0, 'encoder': {'family': 'sbert', 'name': None}}, 'runtime': {'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 64, 'num_workers': 2, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}}, 'linearize': {'exclude_special': True, 'max_eval_samples': 50, 'max_enum_combinations': 200000, 'plots_dir': 'plots'}}
+2026-04-05 02:57:33,005 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 02:57:35,858 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/movie_rationales_tok=bert-base
+2026-04-05 03:02:24,300 - INFO - Oracle linearize utility run (no Dora experiment)
+2026-04-05 03:02:24,301 - INFO - {'model': {'keep_special': True, 'loss': {'sweep_range': [0.1, 1.0, 10]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'mr', 'config': None, 'subset': 1.0, 'encoder': {'family': 'sbert', 'name': None}}, 'runtime': {'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 64, 'num_workers': 2, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}}, 'linearize': {'exclude_special': True, 'max_eval_samples': 50, 'max_enum_combinations': 200000, 'random_candidates': 4096, 'seed': 1234, 'plots_dir': 'plots'}}
+2026-04-05 03:02:24,301 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 03:02:27,121 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/movie_rationales_tok=bert-base
+2026-04-05 03:06:12,750 - INFO - Oracle linearize utility run (no Dora experiment)
+2026-04-05 03:06:12,750 - INFO - {'model': {'keep_special': True, 'loss': {'sweep_range': [0.1, 1.0, 10]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'mr', 'config': None, 'subset': 1.0, 'encoder': {'family': 'sbert', 'name': None}}, 'runtime': {'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 64, 'num_workers': 2, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}}, 'linearize': {'exclude_special': True, 'max_eval_samples': 50, 'max_enum_combinations': 200000, 'random_candidates': 4096, 'seed': 1234, 'plots_dir': 'plots'}}
+2026-04-05 03:06:12,750 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 03:06:15,652 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/movie_rationales_tok=bert-base
+2026-04-05 13:46:33,193 - INFO - Oracle linearize utility run (no Dora experiment)
+2026-04-05 13:46:33,194 - INFO - {'model': {'keep_special': True, 'loss': {'sweep_range': [0.1, 1.0, 10]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'mr', 'config': None, 'subset': 10.0, 'encoder': {'family': 'sbert', 'name': None}}, 'runtime': {'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 64, 'num_workers': 2, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}}, 'linearize': {'exclude_special': True, 'max_eval_samples': 50, 'max_enum_combinations': 200000, 'random_candidates': 4096, 'seed': 1234, 'plots_dir': 'plots'}}
+2026-04-05 13:46:33,194 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 13:46:36,076 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/movie_rationales_tok=bert-base
+2026-04-05 13:48:01,005 - INFO - Oracle linearize utility run (no Dora experiment)
+2026-04-05 13:48:01,006 - INFO - {'model': {'keep_special': True, 'loss': {'sweep_range': [0.1, 1.0, 10]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'mr', 'config': None, 'subset': 10.0, 'encoder': {'family': 'sbert', 'name': None}}, 'runtime': {'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 64, 'num_workers': 2, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}}, 'linearize': {'exclude_special': True, 'max_eval_samples': 50, 'max_enum_combinations': 200000, 'random_candidates': 4096, 'seed': 1234, 'plots_dir': 'plots'}}
+2026-04-05 13:48:01,006 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 13:48:03,734 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/movie_rationales_tok=bert-base
+2026-04-05 13:48:23,797 - INFO - Oracle linearize utility run (no Dora experiment)
+2026-04-05 13:48:23,798 - INFO - {'model': {'keep_special': True, 'loss': {'sweep_range': [0.1, 1.0, 10]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'mr', 'config': None, 'subset': 10.0, 'encoder': {'family': 'sbert', 'name': None}}, 'runtime': {'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 64, 'num_workers': 2, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}}, 'linearize': {'exclude_special': True, 'max_eval_samples': 50, 'max_enum_combinations': 200000, 'random_candidates': 4096, 'seed': 1234, 'plots_dir': 'plots'}}
+2026-04-05 13:48:23,798 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 13:48:26,606 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/movie_rationales_tok=bert-base
+2026-04-05 13:48:58,942 - INFO - Oracle linearize utility run (no Dora experiment)
+2026-04-05 13:48:58,942 - INFO - {'model': {'keep_special': True, 'loss': {'sweep_range': [0.1, 1.0, 10]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'mr', 'config': None, 'subset': 10.0, 'encoder': {'family': 'sbert', 'name': None}}, 'runtime': {'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 64, 'num_workers': 2, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}}, 'linearize': {'exclude_special': True, 'max_eval_samples': 50, 'max_enum_combinations': 200000, 'random_candidates': 4096, 'seed': 1234, 'plots_dir': 'plots'}}
+2026-04-05 13:48:58,942 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 13:49:01,694 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/movie_rationales_tok=bert-base
+2026-04-05 13:49:27,521 - INFO - Oracle linearize utility run (no Dora experiment)
+2026-04-05 13:49:27,521 - INFO - {'model': {'keep_special': True, 'loss': {'sweep_range': [0.1, 1.0, 10]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'mr', 'config': None, 'subset': 10.0, 'encoder': {'family': 'sbert', 'name': None}}, 'runtime': {'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 64, 'num_workers': 2, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}}, 'linearize': {'exclude_special': True, 'max_eval_samples': 50, 'max_enum_combinations': 200000, 'random_candidates': 4096, 'seed': 1234, 'plots_dir': 'plots'}}
+2026-04-05 13:49:27,522 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 13:49:30,299 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/movie_rationales_tok=bert-base
+2026-04-05 13:51:17,910 - INFO - Oracle linearize utility run (no Dora experiment)
+2026-04-05 13:51:17,910 - INFO - {'model': {'keep_special': True, 'loss': {'sweep_range': [0.1, 1.0, 10]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'wikiann', 'config': None, 'subset': 10.0, 'encoder': {'family': 'sbert', 'name': None}}, 'runtime': {'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 64, 'num_workers': 2, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}}, 'linearize': {'exclude_special': True, 'max_eval_samples': 50, 'max_enum_combinations': 200000, 'random_candidates': 4096, 'seed': 1234, 'plots_dir': 'plots'}}
+2026-04-05 13:51:17,910 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 13:51:20,715 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/wikiann_tok=bert-base
+2026-04-05 13:53:22,294 - INFO - Oracle linearize utility run (no Dora experiment)
+2026-04-05 13:53:22,295 - INFO - {'model': {'keep_special': True, 'loss': {'sweep_range': [0.1, 1.0, 10]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'mr', 'config': None, 'subset': 0.02, 'encoder': {'family': 'sbert', 'name': None}}, 'runtime': {'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 64, 'num_workers': 2, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}}, 'linearize': {'exclude_special': True, 'max_eval_samples': 1, 'max_enum_combinations': 200, 'random_candidates': 64, 'seed': 1234, 'plots_dir': 'plots'}}
+2026-04-05 13:53:22,295 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 13:53:25,032 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/movie_rationales_tok=bert-base
+2026-04-05 13:53:50,807 - INFO - Saved oracle loss plot to /home/simonelusetti/RatCon/plots/linearize_loss.png
+2026-04-05 13:53:50,888 - INFO - Saved Spearman plot to /home/simonelusetti/RatCon/plots/spearman_vs_rho.png (rho=-0.9636)
+2026-04-05 13:53:50,888 - INFO - 
+Label selection matrix (oracle masks):
++-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| label | 0.100 | 0.199 | 0.299 | 0.398 | 0.498 | 0.598 | 0.697 | 0.797 | 0.896 | 0.996 |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+
+|   0   |  0.10 |  0.20 |  0.30 |  0.40 |  0.50 |  0.60 |  0.70 |  0.80 |  0.90 |  1.00 |
+|   1   |  0.00 |  0.00 |  0.00 |  0.00 |  0.00 |  0.00 |  0.00 |  0.00 |  0.00 |  0.00 |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+
+2026-04-05 13:53:51,024 - INFO - Saved selection rate plot to /home/simonelusetti/RatCon/plots/selection_rates.png
+2026-04-05 13:53:51,265 - INFO - Saved chi-square plot to /home/simonelusetti/RatCon/plots/chi_square.png
+2026-04-05 13:53:51,353 - INFO - Saved Cramer's V plot to /home/simonelusetti/RatCon/plots/cramers_v.png
+2026-04-05 13:53:51,353 - INFO - Evaluated samples: 1
+2026-04-05 13:53:51,353 - INFO - Random-fallback sentence/rho solves: 9
+2026-04-05 13:53:51,353 - INFO - Done.
+2026-04-05 14:04:02,479 - INFO - Oracle linearize utility run (no Dora experiment)
+2026-04-05 14:04:02,482 - INFO - {'model': {'keep_special': True, 'loss': {'sweep_range': [0.1, 1.0, 10]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'mr', 'config': None, 'subset': 0.02, 'encoder': {'family': 'sbert', 'name': None}}, 'runtime': {'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 64, 'num_workers': 2, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}}, 'linearize': {'exclude_special': True, 'max_eval_samples': 1, 'max_enum_combinations': 200, 'random_candidates': 64, 'seed': 1234, 'plots_dir': 'plots'}}
+2026-04-05 14:04:02,482 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 14:04:05,409 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/movie_rationales_tok=bert-base
+2026-04-05 14:05:44,746 - INFO - Oracle linearize utility run (no Dora experiment)
+2026-04-05 14:05:44,746 - INFO - {'model': {'keep_special': True, 'loss': {'sweep_range': [0.1, 1.0, 10]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'mr', 'config': None, 'subset': 0.02, 'encoder': {'family': 'sbert', 'name': None}}, 'runtime': {'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 64, 'num_workers': 2, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}}, 'linearize': {'exclude_special': True, 'max_eval_samples': 1, 'max_enum_combinations': 200, 'random_candidates': 64, 'seed': 1234, 'plots_dir': 'plots'}}
+2026-04-05 14:05:44,747 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 14:05:47,527 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/movie_rationales_tok=bert-base
+2026-04-05 14:06:14,522 - INFO - Saved oracle loss plot to /home/simonelusetti/RatCon/plots/linearize_loss.png
+2026-04-05 14:06:14,614 - INFO - Saved Spearman plot to /home/simonelusetti/RatCon/plots/spearman_vs_rho.png (rho=-0.9879)
+2026-04-05 14:06:14,614 - INFO - 
+Label selection matrix (oracle masks):
++-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| label | 0.100 | 0.199 | 0.299 | 0.398 | 0.498 | 0.598 | 0.697 | 0.797 | 0.896 | 0.996 |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+
+|   0   |  0.10 |  0.20 |  0.30 |  0.40 |  0.50 |  0.60 |  0.70 |  0.80 |  0.90 |  1.00 |
+|   1   |  0.00 |  0.00 |  0.00 |  0.00 |  0.00 |  0.00 |  0.00 |  0.00 |  0.00 |  0.00 |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+
+2026-04-05 14:06:14,752 - INFO - Saved selection rate plot to /home/simonelusetti/RatCon/plots/selection_rates.png
+2026-04-05 14:06:14,980 - INFO - Saved chi-square plot to /home/simonelusetti/RatCon/plots/chi_square.png
+2026-04-05 14:06:15,097 - INFO - Saved Cramer's V plot to /home/simonelusetti/RatCon/plots/cramers_v.png
+2026-04-05 14:06:15,098 - INFO - Evaluated samples: 1
+2026-04-05 14:06:15,098 - INFO - Random-fallback sentence/rho solves: 9
+2026-04-05 14:06:15,098 - INFO - Done.
+2026-04-05 14:08:27,937 - INFO - Oracle linearize utility run (no Dora experiment)
+2026-04-05 14:08:27,937 - INFO - {'model': {'keep_special': True, 'loss': {'sweep_range': [0.1, 1.0, 10]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'wikiann', 'config': None, 'subset': 10.0, 'encoder': {'family': 'sbert', 'name': None}}, 'runtime': {'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 64, 'num_workers': 2, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}}, 'linearize': {'exclude_special': True, 'max_eval_samples': 50, 'max_enum_combinations': 200000, 'random_candidates': 4096, 'seed': 1234, 'plots_dir': 'plots'}}
+2026-04-05 14:08:27,937 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 14:08:30,708 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/wikiann_tok=bert-base
+2026-04-05 14:16:58,365 - INFO - Oracle linearize utility run (no Dora experiment)
+2026-04-05 14:16:58,366 - INFO - {'model': {'keep_special': True, 'loss': {'sweep_range': [0.1, 1.0, 10]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'mr', 'config': None, 'subset': 0.02, 'encoder': {'family': 'sbert', 'name': None}}, 'runtime': {'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 64, 'num_workers': 2, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}}, 'linearize': {'exclude_special': True, 'max_masks_per_sentence': 64, 'seed': 1234, 'plots_dir': 'plots'}}
+2026-04-05 14:16:58,366 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 14:17:01,310 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/movie_rationales_tok=bert-base
+2026-04-05 14:20:15,460 - INFO - Saved oracle loss plot to /home/simonelusetti/RatCon/plots/linearize_loss.png
+2026-04-05 14:20:15,545 - INFO - Saved Spearman plot to /home/simonelusetti/RatCon/plots/spearman_vs_rho.png (rho=-0.9636)
+2026-04-05 14:20:15,546 - INFO - 
+Label selection matrix (oracle masks):
++-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| label | 0.100 | 0.199 | 0.299 | 0.398 | 0.498 | 0.597 | 0.697 | 0.797 | 0.896 | 0.996 |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+
+|   0   |  0.10 |  0.20 |  0.30 |  0.40 |  0.50 |  0.60 |  0.70 |  0.80 |  0.90 |  1.00 |
+|   1   |  0.09 |  0.17 |  0.31 |  0.40 |  0.46 |  0.62 |  0.67 |  0.81 |  0.91 |  1.00 |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+
+2026-04-05 14:20:15,691 - INFO - Saved selection rate plot to /home/simonelusetti/RatCon/plots/selection_rates.png
+2026-04-05 14:20:15,897 - INFO - Saved chi-square plot to /home/simonelusetti/RatCon/plots/chi_square.png
+2026-04-05 14:20:16,006 - INFO - Saved Cramer's V plot to /home/simonelusetti/RatCon/plots/cramers_v.png
+2026-04-05 14:20:16,007 - INFO - Evaluated samples: 7
+2026-04-05 14:20:16,007 - INFO - Random masks per sentence/rho: 64
+2026-04-05 14:20:16,007 - INFO - Done.
+2026-04-05 14:21:55,416 - INFO - Oracle linearize utility run (no Dora experiment)
+2026-04-05 14:21:55,417 - INFO - {'model': {'keep_special': True, 'loss': {'sweep_range': [0.1, 1.0, 10]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'wikiann', 'config': None, 'subset': 10.0, 'encoder': {'family': 'sbert', 'name': None}}, 'runtime': {'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 64, 'num_workers': 2, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}}, 'linearize': {'exclude_special': True, 'max_masks_per_sentence': 4096, 'seed': 1234, 'plots_dir': 'plots'}}
+2026-04-05 14:21:55,417 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 14:21:58,246 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/wikiann_tok=bert-base
+2026-04-05 14:24:52,931 - INFO - Saved oracle loss plot to /home/simonelusetti/RatCon/plots/linearize_loss.png
+2026-04-05 14:24:53,072 - INFO - Saved Spearman plot to /home/simonelusetti/RatCon/plots/spearman_vs_rho.png (rho=-0.8303)
+2026-04-05 14:24:53,073 - INFO - 
+Label selection matrix (oracle masks):
++-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| label | 0.106 | 0.155 | 0.254 | 0.319 | 0.388 | 0.478 | 0.572 | 0.642 | 0.708 | 0.797 |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+
+|   0   |  0.05 |  0.14 |  0.23 |  0.37 |  0.44 |  0.56 |  0.74 |  0.84 |  0.93 |  1.00 |
+|   1   |  0.33 |  0.17 |  0.33 |  0.50 |  0.50 |  0.50 |  0.50 |  0.67 |  0.67 |  1.00 |
+|   2   |  0.08 |  0.33 |  0.50 |  0.42 |  0.83 |  0.83 |  0.83 |  0.83 |  0.92 |  1.00 |
+|   3   |  0.22 |  0.33 |  0.22 |  0.44 |  0.33 |  0.67 |  0.56 |  0.78 |  0.89 |  1.00 |
+|   4   |  0.11 |  0.11 |  0.44 |  0.33 |  0.56 |  0.67 |  0.67 |  0.78 |  0.89 |  1.00 |
+|   5   |  0.29 |  0.29 |  0.71 |  0.57 |  0.57 |  0.71 |  0.71 |  0.71 |  0.71 |  1.00 |
+|   6   |  0.14 |  0.14 |  0.00 |  0.29 |  0.29 |  0.29 |  0.71 |  0.86 |  1.00 |  1.00 |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+
+2026-04-05 14:24:53,281 - INFO - Saved selection rate plot to /home/simonelusetti/RatCon/plots/selection_rates.png
+2026-04-05 14:24:53,628 - INFO - Saved chi-square plot to /home/simonelusetti/RatCon/plots/chi_square.png
+2026-04-05 14:24:53,767 - INFO - Saved Cramer's V plot to /home/simonelusetti/RatCon/plots/cramers_v.png
+2026-04-05 14:24:53,768 - INFO - Evaluated samples: 10
+2026-04-05 14:24:53,768 - INFO - Random masks per sentence/rho: 4096
+2026-04-05 14:24:53,768 - INFO - Done.
+2026-04-05 14:42:59,684 - INFO - Oracle linearize utility run (no Dora experiment)
+2026-04-05 14:42:59,684 - INFO - {'model': {'keep_special': True, 'loss': {'sweep_range': [0.1, 1.0, 10]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'wikiann', 'config': None, 'subset': 1.0, 'encoder': {'family': 'sbert', 'name': None}}, 'runtime': {'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 64, 'num_workers': 2, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}}, 'linearize': {'exclude_special': True, 'max_masks_per_sentence': 4096, 'seed': 1234, 'plots_dir': 'plots'}}
+2026-04-05 14:42:59,684 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 14:43:02,458 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/wikiann_tok=bert-base
+2026-04-05 14:55:09,512 - INFO - Oracle linearize utility run (no Dora experiment)
+2026-04-05 14:55:09,513 - INFO - {'model': {'keep_special': True, 'loss': {'sweep_range': [0.1, 1.0, 10]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'wikiann', 'config': None, 'subset': 1.0, 'encoder': {'family': 'sbert', 'name': None}}, 'runtime': {'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 64, 'num_workers': 2, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}}, 'linearize': {'exclude_special': True, 'max_masks_per_sentence': 4096, 'seed': 1234, 'plots_dir': 'plots'}}
+2026-04-05 14:55:09,513 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 14:55:12,317 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/wikiann_tok=bert-base
+2026-04-05 15:05:17,135 - INFO - Oracle linearize utility run (no Dora experiment)
+2026-04-05 15:05:17,136 - INFO - {'model': {'keep_special': True, 'loss': {'sweep_range': [0.1, 1.0, 10]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'wikiann', 'config': None, 'subset': 0.1, 'encoder': {'family': 'sbert', 'name': None}}, 'runtime': {'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 64, 'num_workers': 2, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}}, 'linearize': {'exclude_special': True, 'max_masks_per_sentence': 4096, 'seed': 1234, 'plots_dir': 'plots'}}
+2026-04-05 15:05:17,136 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 15:05:19,977 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/wikiann_tok=bert-base
+2026-04-05 15:37:32,287 - INFO - Oracle linearize utility run (no Dora experiment)
+2026-04-05 15:37:32,289 - INFO - {'model': {'keep_special': True, 'loss': {'sweep_range': [0.1, 1.0, 10]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'mr', 'config': None, 'subset': 0.02, 'encoder': {'family': 'sbert', 'name': None}}, 'runtime': {'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 64, 'num_workers': 2, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}}, 'linearize': {'exclude_special': True, 'max_masks_per_sentence': 32, 'seed': 1234, 'plots_dir': 'plots'}}
+2026-04-05 15:37:32,289 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 15:37:35,128 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/movie_rationales_tok=bert-base
+2026-04-05 15:40:10,236 - INFO - Saved oracle loss plot to /home/simonelusetti/RatCon/plots/linearize_loss.png
+2026-04-05 15:40:10,340 - INFO - Saved Spearman plot to /home/simonelusetti/RatCon/plots/spearman_vs_rho.png (rho=-0.9879)
+2026-04-05 15:40:10,341 - INFO - 
+Label selection matrix (oracle masks):
++-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| label | 0.100 | 0.199 | 0.299 | 0.398 | 0.498 | 0.597 | 0.697 | 0.797 | 0.896 | 0.996 |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+
+|   0   |  0.10 |  0.20 |  0.30 |  0.40 |  0.50 |  0.60 |  0.70 |  0.80 |  0.90 |  1.00 |
+|   1   |  0.09 |  0.15 |  0.31 |  0.42 |  0.45 |  0.60 |  0.67 |  0.81 |  0.89 |  1.00 |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+
+2026-04-05 15:40:10,470 - INFO - Saved selection rate plot to /home/simonelusetti/RatCon/plots/selection_rates.png
+2026-04-05 15:40:10,735 - INFO - Saved chi-square plot to /home/simonelusetti/RatCon/plots/chi_square.png
+2026-04-05 15:40:10,847 - INFO - Saved Cramer's V plot to /home/simonelusetti/RatCon/plots/cramers_v.png
+2026-04-05 15:40:10,847 - INFO - Evaluated samples: 7
+2026-04-05 15:40:10,847 - INFO - Total masks evaluated: 2023
+2026-04-05 15:40:10,847 - INFO - Random masks per sentence/rho: 32
+2026-04-05 15:40:10,847 - INFO - Done.
+2026-04-05 15:40:46,525 - INFO - Oracle linearize utility run (no Dora experiment)
+2026-04-05 15:40:46,526 - INFO - {'model': {'keep_special': True, 'loss': {'sweep_range': [0.1, 1.0, 10]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'wikiann', 'config': None, 'subset': 0.1, 'encoder': {'family': 'sbert', 'name': None}}, 'runtime': {'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 64, 'num_workers': 2, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}}, 'linearize': {'exclude_special': True, 'max_masks_per_sentence': 4096, 'seed': 1234, 'plots_dir': 'plots'}}
+2026-04-05 15:40:46,526 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 15:40:49,382 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/wikiann_tok=bert-base
+2026-04-05 15:43:25,989 - INFO - Oracle linearize utility run (no Dora experiment)
+2026-04-05 15:43:25,989 - INFO - {'model': {'keep_special': True, 'loss': {'sweep_range': [0.1, 1.0, 10]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'wikiann', 'config': None, 'subset': 0.1, 'encoder': {'family': 'sbert', 'name': None}}, 'runtime': {'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 64, 'num_workers': 2, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}}, 'linearize': {'exclude_special': True, 'max_masks_per_sentence': 4096, 'seed': 1234, 'plots_dir': 'plots'}}
+2026-04-05 15:43:25,989 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 15:43:28,739 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/wikiann_tok=bert-base
+2026-04-05 18:53:26,280 - INFO - Oracle linearize utility run (no Dora experiment)
+2026-04-05 18:53:26,280 - INFO - {'model': {'keep_special': True, 'loss': {'sweep_range': [0.1, 1.0, 10]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'mr', 'config': None, 'subset': 0.01, 'encoder': {'family': 'sbert', 'name': None}}, 'runtime': {'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 64, 'num_workers': 2, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}}, 'linearize': {'exclude_special': True, 'max_masks_per_sentence': 8, 'seed': 1234, 'plots_dir': 'plots'}}
+2026-04-05 18:53:26,281 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 18:53:29,355 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/movie_rationales_tok=bert-base
+2026-04-05 18:54:23,804 - INFO - Saved oracle loss plot to /home/simonelusetti/RatCon/plots/linearize_loss.png
+2026-04-05 18:54:23,911 - INFO - Saved Spearman plot to /home/simonelusetti/RatCon/plots/spearman_vs_rho.png (rho=-0.9152)
+2026-04-05 18:54:23,911 - INFO - 
+Label selection matrix (oracle masks):
++-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| label | 0.100 | 0.199 | 0.299 | 0.399 | 0.497 | 0.597 | 0.697 | 0.796 | 0.896 | 0.996 |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+
+|   0   |  0.10 |  0.20 |  0.30 |  0.40 |  0.50 |  0.60 |  0.70 |  0.80 |  0.90 |  1.00 |
+|   1   |  0.06 |  0.12 |  0.40 |  0.40 |  0.48 |  0.56 |  0.62 |  0.75 |  0.90 |  1.00 |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+
+2026-04-05 18:54:24,047 - INFO - Saved selection rate plot to /home/simonelusetti/RatCon/plots/selection_rates.png
+2026-04-05 18:54:24,307 - INFO - Saved chi-square plot to /home/simonelusetti/RatCon/plots/chi_square.png
+2026-04-05 18:54:24,422 - INFO - Saved Cramer's V plot to /home/simonelusetti/RatCon/plots/cramers_v.png
+2026-04-05 18:54:24,422 - INFO - Evaluated samples: 3
+2026-04-05 18:54:24,422 - INFO - Total masks evaluated: 219
+2026-04-05 18:54:24,422 - INFO - Random masks per sentence/rho: 8
+2026-04-05 18:54:24,422 - INFO - Done.
+2026-04-05 18:56:45,614 - INFO - Oracle linearize utility run (no Dora experiment)
+2026-04-05 18:56:45,615 - INFO - {'model': {'keep_special': True, 'loss': {'sweep_range': [0.1, 1.0, 10]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'mr', 'config': None, 'subset': 0.01, 'encoder': {'family': 'sbert', 'name': None}}, 'runtime': {'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 64, 'num_workers': 2, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}}, 'linearize': {'exclude_special': True, 'max_masks_per_sentence': 8, 'seed': 1234, 'plots_dir': 'plots'}}
+2026-04-05 18:56:45,616 - INFO - Work dir: /home/simonelusetti/RatCon
+2026-04-05 18:56:48,585 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/movie_rationales_tok=bert-base
+2026-04-05 18:57:04,479 - INFO - Saved oracle loss plot to /home/simonelusetti/RatCon/plots/linearize_loss.png
+2026-04-05 18:57:04,720 - INFO - Saved Spearman plot to /home/simonelusetti/RatCon/plots/spearman_vs_rho.png (rho=-0.9152)
+2026-04-05 18:57:04,721 - INFO - 
+Label selection matrix (oracle masks):
++-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| label | 0.100 | 0.199 | 0.299 | 0.399 | 0.497 | 0.597 | 0.697 | 0.796 | 0.896 | 0.996 |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+
+|   0   |  0.10 |  0.20 |  0.30 |  0.40 |  0.50 |  0.60 |  0.70 |  0.80 |  0.90 |  1.00 |
+|   1   |  0.06 |  0.12 |  0.40 |  0.40 |  0.48 |  0.56 |  0.62 |  0.75 |  0.90 |  1.00 |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+
+2026-04-05 18:57:04,858 - INFO - Saved selection rate plot to /home/simonelusetti/RatCon/plots/selection_rates.png
+2026-04-05 18:57:05,120 - INFO - Saved chi-square plot to /home/simonelusetti/RatCon/plots/chi_square.png
+2026-04-05 18:57:05,236 - INFO - Saved Cramer's V plot to /home/simonelusetti/RatCon/plots/cramers_v.png
+2026-04-05 18:57:05,236 - INFO - Evaluated samples: 3
+2026-04-05 18:57:05,236 - INFO - Total masks evaluated: 219
+2026-04-05 18:57:05,236 - INFO - Random masks per sentence/rho: 8
+2026-04-05 18:57:05,236 - INFO - Done.

@@ -495,3 +495,28 @@ Label selection matrix (oracle masks):
 2026-04-07 11:01:01,124 - INFO - {'model': {'keep_special': True, 'loss': {'sweep_range': [0.1, 1.0, 10]}}, 'data': {'shuffle': False, 'max_length': 512, 'dataset': 'wikiann', 'config': None, 'subset': 1.0, 'encoder': {'family': 'sbert', 'name': None}}, 'runtime': {'threads': 48, 'interop_threads': 4, 'device': 'cpu', 'data': {'rebuild': False, 'test_subset': None, 'batch_size': 16, 'num_workers': 2, 'dynamic_batch': {'enabled': False, 'min_batch_size': 16, 'reduce_factor': 0.5, 'min_available_ratio': 0.1, 'max_swap_growth_mb': 128}}}, 'linearize': {'exclude_special': True, 'max_masks_per_sentence': 1024, 'seed': 1234, 'plots_dir': 'plots'}}
 2026-04-07 11:01:01,124 - INFO - Work dir: /home/simonelusetti/RatCon
 2026-04-07 11:01:04,034 - INFO - Loading cached TOKENIZED dataset from /home/simonelusetti/RatCon/data/cache/wikiann_tok=bert-base
+2026-04-07 11:31:29,808 - INFO - Saved oracle loss plot to /home/simonelusetti/RatCon/plots/linearize_loss.png
+2026-04-07 11:31:29,881 - INFO - Saved Spearman plot to /home/simonelusetti/RatCon/plots/spearman_vs_rho.png (rho=-1.0000)
+2026-04-07 11:31:29,881 - INFO - Configured rho grid: 0.100, 0.200, 0.300, 0.400, 0.500, 0.600, 0.700, 0.800, 0.900, 1.000
+2026-04-07 11:31:29,881 - INFO - Effective selected-token rates: 0.106, 0.163, 0.247, 0.324, 0.404, 0.485, 0.574, 0.647, 0.720, 0.810
+2026-04-07 11:31:29,882 - INFO - 
+Label selection matrix (oracle masks):
++-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+
+| label | 0.100 | 0.200 | 0.300 | 0.400 | 0.500 | 0.600 | 0.700 | 0.800 | 0.900 | 1.000 |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+
+|   0   |  0.09 |  0.19 |  0.28 |  0.36 |  0.45 |  0.53 |  0.62 |  0.72 |  0.82 |  0.93 |
+|   1   |  0.05 |  0.21 |  0.42 |  0.54 |  0.64 |  0.73 |  0.81 |  0.88 |  0.95 |  0.99 |
+|   2   |  0.01 |  0.04 |  0.11 |  0.23 |  0.35 |  0.49 |  0.62 |  0.72 |  0.81 |  0.91 |
+|   3   |  0.03 |  0.17 |  0.36 |  0.51 |  0.63 |  0.73 |  0.82 |  0.89 |  0.95 |  0.99 |
+|   4   |  0.02 |  0.05 |  0.11 |  0.21 |  0.33 |  0.46 |  0.59 |  0.70 |  0.80 |  0.90 |
+|   5   |  0.03 |  0.12 |  0.29 |  0.43 |  0.55 |  0.65 |  0.75 |  0.83 |  0.90 |  0.98 |
+|   6   |  0.02 |  0.04 |  0.08 |  0.15 |  0.24 |  0.35 |  0.49 |  0.59 |  0.71 |  0.85 |
++-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+-------+
+2026-04-07 11:31:29,989 - INFO - Saved selection rate plot to /home/simonelusetti/RatCon/plots/selection_rates.png
+2026-04-07 11:31:30,221 - INFO - Saved chi-square plot to /home/simonelusetti/RatCon/plots/chi_square.png
+2026-04-07 11:31:30,323 - INFO - Saved Cramer's V plot to /home/simonelusetti/RatCon/plots/cramers_v.png
+2026-04-07 11:31:30,331 - INFO - Saved raw eval data to /home/simonelusetti/RatCon/plots/eval_raw.json
+2026-04-07 11:31:30,331 - INFO - Evaluated samples: 20000
+2026-04-07 11:31:30,332 - INFO - Total masks evaluated: 204800000
+2026-04-07 11:31:30,332 - INFO - Random masks per sentence/rho: 1024
+2026-04-07 11:31:30,332 - INFO - Done.

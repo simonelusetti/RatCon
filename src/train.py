@@ -1,4 +1,5 @@
 import os
+import json
 import re
 import sys
 import torch
@@ -24,7 +25,6 @@ from .utils import (
     configure_runtime,
     to_device,
     dict_to_table,
-    save_label_plots,
     save_train_eval_loss_plot,
     save_combined_loss_history,
     load_combined_loss_history,
@@ -82,7 +82,8 @@ class SelectorTrainer:
         self.state_dir = self.checkpoint_dir / "state"
         self.models_dir = self.state_dir / "models"
         self.plots_dir = self.checkpoint_dir / "plots"
-        self.loss_history_path = self.state_dir / "loss_history.json"
+        self.data_dir = self.checkpoint_dir / "data"
+        self.loss_history_path = self.data_dir / "loss_history.json"
         self.legacy_checkpoint_path = self.checkpoint_dir / "model.pth"
         self.legacy_models_glob = "model_*.pth"
 
@@ -121,6 +122,7 @@ class SelectorTrainer:
 
         self.models_dir.mkdir(parents=True, exist_ok=True)
         self.plots_dir.mkdir(parents=True, exist_ok=True)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
         self.train_loss_history, self.eval_loss_history = load_combined_loss_history(self.loss_history_path)
         # Backward-compatible alias used by older checkpoint payloads.
         self.loss_history = self.eval_loss_history
@@ -245,6 +247,30 @@ class SelectorTrainer:
         save_train_eval_loss_plot(self.train_loss_history, self.eval_loss_history, str(loss_path))
         self.logger.info("Saved loss plot to %s", loss_path)
 
+    def _save_eval_selections(self, counts_pred: list, counts_gold: list, selection_rates: list) -> None:
+        """Save per-example selections from evaluation."""
+        if counts_pred is None or counts_gold is None:
+            return
+        
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        selections_path = self.data_dir / "selections.json"
+        
+        # Convert Counts objects to serializable format
+        selections_data = {
+            "selection_rates": [float(r) for r in selection_rates],
+            "selections_by_rho": []
+        }
+        
+        for rate, pred, gold in zip(selection_rates, counts_pred, counts_gold):
+            selections_data["selections_by_rho"].append({
+                "rho": float(rate),
+                "pred_counts": dict(pred.data),
+                "gold_counts": dict(gold.data),
+            })
+        
+        selections_path.write_text(json.dumps(selections_data, indent=2), encoding="utf-8")
+        self.logger.info("Saved eval selections to %s", selections_path)
+
     def forward_pass(self, batch: dict, examples_count: int, total_loss: float , rhos: list | None = None):
         ids = batch["ids"]
         attn = batch["attn_mask"]
@@ -358,21 +384,22 @@ class SelectorTrainer:
         eval_losses, counts_pred, counts_gold, selection_rates = self.evaluate()
         if record_eval_history:
             self.record_eval_losses(eval_losses)
-        self.logger.info(f"\nFinal evaluation:\n{dict_to_table(eval_losses)}")
+        self.logger.info("Final evaluation: eval_loss=%.4f", eval_losses.get("eval_loss", 0.0))
         self.write_loss_plot()
-        save_label_plots(
-            counts_pred,
-            counts_gold,
-            selection_rates if selection_rates is not None else self.rhos,
-            self.plots_dir,
-            self.logger,
-        )
+        
+        # Save selections data (per-example selections from eval)
+        self._save_eval_selections(counts_pred, counts_gold, selection_rates)
+        
         if bool(self.cfg.runtime.eval.get("skip_stsb", False)):
             self.logger.info("Skipping STS-B sweep (runtime.eval.skip_stsb=true).")
             return
 
+        # Create data and plots directories
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.plots_dir.mkdir(parents=True, exist_ok=True)
+        
         stsb_plot_path = self.plots_dir / "spearman_vs_rho.png"
-        _, _, _ = run_stsb_sweep(
+        base, ours, rand = run_stsb_sweep(
             cfg=self.cfg,
             device=self.device,
             encoder=self.sent_encoder,
@@ -380,7 +407,16 @@ class SelectorTrainer:
             selector=self.model,
             out_path=str(stsb_plot_path),
         )
+        stsb_path = self.data_dir / "stsb.json"
+        stsb_data = {
+            "base": float(base),
+            "ours_by_rho": {str(float(k)): float(v) for k, v in ours.items()},
+            "random_by_rho": {str(float(k)): float(v) for k, v in rand.items()},
+            "rhos": [float(k) for k in ours.keys()],
+        }
+        stsb_path.write_text(json.dumps(stsb_data, indent=2), encoding="utf-8")
         self.logger.info("Saved STS-B plot to: %s", stsb_plot_path)
+        self.logger.info("Saved STS-B data to: %s", stsb_path)
 
     def train(self) -> None:
         start_epoch = 0
@@ -447,16 +483,15 @@ class SelectorTrainer:
             eval_losses = self.short_evaluate()
             self.record_eval_losses(eval_losses)
 
-            if self.grid_mode:
-                self.logger.info("GRID_EPOCH %d/%d", epoch + 1, self.epochs)
-            elif not self.short_log:
-                self.logger.info(
-                    "Epoch %d/%d (batch size %d)",
-                    epoch + 1,
-                    self.epochs,
-                    self.batch_controller.batch_size,
-                )
-                self.logger.info(f"\n{dict_to_table({**train_losses, **eval_losses})}")
+            # Always log epoch details (for audit trail)
+            self.logger.info(
+                "Epoch %d/%d | train_loss=%.4f | eval_loss=%.4f | batch_size=%d",
+                epoch + 1,
+                self.epochs,
+                train_losses.get("train_loss", 0.0),
+                eval_losses.get("eval_loss", 0.0),
+                self.batch_controller.batch_size,
+            )
             epoch_end_stats = self.batch_controller.sample_memory()
             new_loaders = self.batch_controller.maybe_reduce_after_epoch(
                 epoch_start_stats,

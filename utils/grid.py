@@ -9,8 +9,8 @@ from tqdm import tqdm
 
 
 CONFIG_PATH = Path("./utils/grid.yaml")
-RUNS_DIR = Path("../outputs/grids")
-DEFAULT_EPOCHS = 30
+RUNS_DIR = Path("outputs/utils/grid")
+DEFAULT_CFG_PATH = Path("./src/conf/default.yaml")
 
 
 def load_config(path: Path) -> tuple[list[str], list[list[str]]]:
@@ -25,6 +25,21 @@ def load_config(path: Path) -> tuple[list[str], list[list[str]]]:
     return baseline, sweep
 
 
+def load_default_train_epochs(path: Path) -> int:
+    if not path.exists():
+        return 30
+
+    with path.open("r", encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+
+    train_cfg = data.get("train", {}) or {}
+    value = train_cfg.get("epochs")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 30
+
+
 def extract_override_value(overrides: list[str], key: str) -> str | None:
     prefix = f"{key}="
     for item in reversed(overrides):
@@ -36,11 +51,11 @@ def extract_override_value(overrides: list[str], key: str) -> str | None:
 def resolve_train_epochs(baseline: list[str], overrides: list[str]) -> int:
     value = extract_override_value(list(baseline) + list(overrides), "train.epochs")
     if value is None:
-        return DEFAULT_EPOCHS
+        return load_default_train_epochs(DEFAULT_CFG_PATH)
     try:
         return int(value)
     except ValueError:
-        return DEFAULT_EPOCHS
+        return load_default_train_epochs(DEFAULT_CFG_PATH)
 
 
 def run_and_capture_signature(cmd: list[str], pbar: tqdm, run_pbar: tqdm | None = None) -> str:
@@ -102,13 +117,13 @@ def main() -> None:
     summary_rows = []
 
     total_runs = len(sweep)
-    with tqdm(total=total_runs, desc="Grid sweep", unit="run", position=1, dynamic_ncols=True) as pbar:
+    with tqdm(total=total_runs, desc="Grid sweep", unit="run", position=0, leave=True, dynamic_ncols=True) as pbar:
         for overrides in sweep:
             setting_overrides = list(baseline) + list(overrides)
             setting_label = " ".join(overrides) if overrides else "<no overrides>"
             train_epochs = resolve_train_epochs(baseline, overrides)
 
-            pbar.write(f"\n=== Setting: {setting_label} ===")
+            pbar.write(f"=== Setting: {setting_label} ===")
             pbar.write(f"Baseline overrides: {baseline}")
             pbar.write(f"Sweep overrides   : {overrides}")
 
@@ -120,7 +135,7 @@ def main() -> None:
                 total=train_epochs,
                 desc=run_desc,
                 unit="epoch",
-                position=0,
+                position=1,
                 leave=False,
                 dynamic_ncols=True,
             ) as run_pbar:

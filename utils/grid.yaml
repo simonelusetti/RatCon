@@ -3,6 +3,7 @@ baseline:
   - "runtime.data.batch_size=64"
   - "runtime.bf16=true"
   - "data.dataset=pwc"
+  - "data.subset=0.1"
 
 sweep:
   - ["model.selector.condition_on_rho=false", "model.selector.use_hard=false"]

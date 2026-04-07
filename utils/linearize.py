@@ -66,7 +66,7 @@ DEFAULT_CFG = {
         "exclude_special": True,
         "max_masks_per_sentence": 1024,
         "seed": 1234,
-        "plots_dir": "plots",
+        "plots_dir": "outputs/utils/linearize",
     },
 }
 
@@ -423,7 +423,7 @@ def main() -> None:
 
     selection_rates = [value / float(evaluated) for value in rho_eff_sum]
 
-    plots_dir = Path(str(cfg.linearize.get("plots_dir", "plots")))
+    plots_dir = Path(str(cfg.linearize.get("plots_dir", "outputs/utils/linearize")))
     if not plots_dir.is_absolute():
         plots_dir = Path.cwd() / plots_dir
     plots_dir.mkdir(parents=True, exist_ok=True)

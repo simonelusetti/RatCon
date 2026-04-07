@@ -108,10 +108,20 @@ def expected_checkpoint(sig_dir: Path) -> Path | None:
     return ckpt
 
 
-def rerun_eval(sig: str, sig_dir: Path, ckpt: Path | None, dry_run: bool) -> None:
+def needs_eval(sig_dir: Path) -> bool:
+    """Check if a run needs evaluation (missing required data files)."""
+    loss_history_path = sig_dir / "data" / "loss_history.json"
+    stsb_path = sig_dir / "data" / "stsb.json"
+    
+    # Run needs eval if either critical file is missing
+    return not loss_history_path.exists() or not stsb_path.exists()
+
+
+def rerun_eval(sig: str, sig_dir: Path, ckpt: Path | None, dry_run: bool) -> bool:
+    """Re-run evaluation for a signature. Returns True if eval ran successfully."""
     if ckpt is None:
         print(f"Skipping eval rerun for {sig}: expected final checkpoint not found in {sig_dir / 'state/models'}")
-        return
+        return False
     cmd = [
         "dora",
         "run",
@@ -125,10 +135,16 @@ def rerun_eval(sig: str, sig_dir: Path, ckpt: Path | None, dry_run: bool) -> Non
     ]
     if dry_run:
         print("DRY-RUN:", " ".join(cmd))
-        return
-    proc = subprocess.run(cmd, cwd=PROJECT_ROOT, text=True, check=False)
+        return False
+    print(f"Running evaluation for {sig}...")
+    proc = subprocess.run(cmd, cwd=PROJECT_ROOT, text=True, capture_output=True)
     if proc.returncode != 0:
-        raise RuntimeError(f"Eval rerun failed for {sig} with exit code {proc.returncode}")
+        print(f"WARNING: Eval rerun failed for {sig}")
+        print(f"  stdout: {proc.stdout}")
+        print(f"  stderr: {proc.stderr}")
+        return False
+    print(f"  ✓ Evaluation completed for {sig}")
+    return True
 
 
 @dataclass
@@ -322,8 +338,9 @@ def main() -> None:
         description="Render grouped overview figures (loss, chi-square, spearman) as mean+-std across runs."
     )
     parser.add_argument("--sigs", nargs="*", default=None, help="Optional list of signatures to include.")
-    parser.add_argument("--rerun-eval", action="store_true", help="Re-run eval on each selected signature before aggregation.")
+    parser.add_argument("--rerun-eval", action="store_true", help="Force re-run eval on each selected signature.")
     parser.add_argument("--dry-run-eval", action="store_true", help="Print eval commands only.")
+    parser.add_argument("--skip-auto-eval", action="store_true", help="Skip automatic eval for missing data.")
     parser.add_argument("--ncols", type=int, default=4, help="Grid columns for overview figures.")
     parser.add_argument("--output-dir", type=Path, default=None, help="Custom output directory.")
     args = parser.parse_args()
@@ -340,10 +357,24 @@ def main() -> None:
         if not sig_dir.exists():
             raise FileNotFoundError(f"Missing signature directory: {sig_dir}")
 
+    # Auto-trigger eval for runs with missing data (unless skipped)
+    if not args.skip_auto_eval:
+        missing_eval = [sd for sd in sig_dirs if needs_eval(sd)]
+        if missing_eval:
+            print(f"Found {len(missing_eval)} runs with missing evaluation data.")
+            print(f"Auto-triggering evaluation...")
+            for sig_dir in missing_eval:
+                rerun_eval(sig_dir.name, sig_dir, expected_checkpoint(sig_dir), dry_run=args.dry_run_eval)
+            print()
+
+    # Explicit eval rerun (if requested)
     if args.rerun_eval:
+        print(f"Force re-running evaluation for all {len(sig_dirs)} selected signatures...")
         for sig_dir in sig_dirs:
             rerun_eval(sig_dir.name, sig_dir, expected_checkpoint(sig_dir), dry_run=args.dry_run_eval)
+        print()
 
+    # Load all runs, skip any that still fail
     runs: list[RunData] = []
     for sig_dir in sig_dirs:
         try:

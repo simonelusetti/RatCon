@@ -2,13 +2,10 @@ baseline:
   - "runtime.grid=true"
   - "runtime.data.batch_size=64"
   - "runtime.bf16=true"
-  - model.selector.condition_on_rho=false
-  - model.selector.use_hard=false 
-  - "run=2"
-  - "train.continue=true"
+  - "data.dataset=pwc"
 
 sweep:
-  - ["data.dataset=conll03"]
-  - ["data.dataset=conll00"]
-  - ["data.dataset=ud"]
-  - ["data.dataset=ud_pos"]
+  - ["model.selector.condition_on_rho=false", "model.selector.use_hard=false"]
+  - ["model.selector.condition_on_rho=true", "model.selector.use_hard=false"]
+  - ["model.selector.condition_on_rho=false", "model.selector.use_hard=true"]
+  - ["model.selector.condition_on_rho=true", "model.selector.use_hard=true"]

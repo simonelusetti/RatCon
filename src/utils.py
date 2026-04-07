@@ -721,6 +721,105 @@ def save_cramers_v_plot_from_pred_gold(
     plt.close(fig)
 
 
+def build_eval_raw_data_from_pred_gold(
+    counts_pred: Sequence[Any],
+    counts_gold: Sequence[Any],
+    selection_rates: Sequence[float],
+    non_entity_label: Optional[Any] = None,
+    alpha: float = 0.05,
+) -> dict[str, Any]:
+    labels = sorted(counts_gold[0].data.keys(), key=_label_sort_key)
+    rates_arr = np.array(selection_rates, dtype=float)
+
+    use_one_vs_rest = False
+    if non_entity_label is None:
+        try:
+            non_entity_label = _infer_non_entity_label(labels)
+        except ValueError:
+            use_one_vs_rest = True
+
+    test_labels = labels if use_one_vs_rest else [lab for lab in labels if lab != non_entity_label]
+
+    selection_by_label: Dict[str, list[float]] = {}
+    selected_counts_by_label: Dict[str, list[int]] = {}
+    total_counts_by_label: Dict[str, list[int]] = {}
+    chi2_by_label: Dict[str, list[float]] = {}
+    p_by_label: Dict[str, list[float]] = {}
+    neglog10p_by_label: Dict[str, list[float]] = {}
+    cramers_v_by_label: Dict[str, list[float]] = {}
+
+    for label in labels:
+        lab_key = str(label)
+        selected_counts: list[int] = []
+        total_counts: list[int] = []
+        selection_values: list[float] = []
+        for pred, gold in zip(counts_pred, counts_gold):
+            kept = _get_count(pred, label)
+            tot = _get_count(gold, label)
+            selected_counts.append(int(kept))
+            total_counts.append(int(tot))
+            selection_values.append(float(kept / tot) if tot > 0 else 0.0)
+
+        selection_by_label[lab_key] = selection_values
+        selected_counts_by_label[lab_key] = selected_counts
+        total_counts_by_label[lab_key] = total_counts
+
+    for label in test_labels:
+        lab_key = str(label)
+        chi2_values: list[float] = []
+        p_values: list[float] = []
+        neglog10_values: list[float] = []
+        v_values: list[float] = []
+
+        for pred, gold in zip(counts_pred, counts_gold):
+            if use_one_vs_rest:
+                table = _contingency_2x2_one_vs_rest(pred, gold, label)
+            else:
+                table = _contingency_2x2_from_pred_gold(pred, gold, label, non_entity_label)
+            chi2, p, v = _chi_square_stats(table)
+            chi2_values.append(float(chi2))
+            p_values.append(float(p))
+            neglog10_values.append(float(-np.log10(np.clip(float(p), 1e-300, 1.0))))
+            v_values.append(float(v))
+
+        chi2_by_label[lab_key] = chi2_values
+        p_by_label[lab_key] = p_values
+        neglog10p_by_label[lab_key] = neglog10_values
+        cramers_v_by_label[lab_key] = v_values
+
+    return {
+        "selection_rates": [float(x) for x in rates_arr.tolist()],
+        "alpha": float(alpha),
+        "use_one_vs_rest": bool(use_one_vs_rest),
+        "non_entity_label": None if non_entity_label is None else str(non_entity_label),
+        "labels": [str(lab) for lab in labels],
+        "test_labels": [str(lab) for lab in test_labels],
+        "selection_by_label": selection_by_label,
+        "selected_counts_by_label": selected_counts_by_label,
+        "total_counts_by_label": total_counts_by_label,
+        "chi2_by_label": chi2_by_label,
+        "pvalue_by_label": p_by_label,
+        "neglog10p_by_label": neglog10p_by_label,
+        "cramers_v_by_label": cramers_v_by_label,
+    }
+
+
+def save_eval_raw_data_from_pred_gold(
+    counts_pred: Sequence[Any],
+    counts_gold: Sequence[Any],
+    selection_rates: Sequence[float],
+    out_path: Path,
+) -> None:
+    payload = build_eval_raw_data_from_pred_gold(
+        counts_pred=counts_pred,
+        counts_gold=counts_gold,
+        selection_rates=selection_rates,
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
 def save_loss_history(loss_history: Sequence[Mapping[str, float]], out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as f:
@@ -818,3 +917,7 @@ def save_label_plots(
     v_path = plots_dir / "cramers_v.png"
     save_cramers_v_plot_from_pred_gold(counts_pred, counts_gold, selection_rates, str(v_path))
     logger.info("Saved Cramer's V plot to %s", v_path)
+
+    raw_path = plots_dir / "eval_raw.json"
+    save_eval_raw_data_from_pred_gold(counts_pred, counts_gold, selection_rates, raw_path)
+    logger.info("Saved raw eval data to %s", raw_path)

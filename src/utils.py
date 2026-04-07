@@ -443,6 +443,54 @@ def _chi_square_stats(table_2x2: np.ndarray) -> Tuple[float, float, float]:
     return float(chi2), float(p), v
 
 
+def build_chi_square_payload(
+    counts_pred: Sequence[Any],
+    counts_gold: Sequence[Any],
+    selection_rates: Sequence[float],
+) -> dict[str, Any]:
+    """Build chi-square and Cramer's V data for each rho and label."""
+    if not counts_pred or not counts_gold:
+        return {
+            "mode": "one_vs_rest",
+            "labels": [],
+            "rows": [],
+        }
+
+    labels = sorted(
+        {label for counts in counts_gold for label in counts.data.keys()},
+        key=_label_sort_key,
+    )
+
+    rows: list[dict[str, Any]] = []
+    for rate, pred, gold in zip(selection_rates, counts_pred, counts_gold):
+        label_rows: list[dict[str, Any]] = []
+        for label in labels:
+            table = _contingency_2x2_one_vs_rest(pred, gold, label)
+            chi2, p_value, cramers_v = _chi_square_stats(table)
+            label_rows.append(
+                {
+                    "label": str(label),
+                    "contingency": [[int(x) for x in row] for row in table.tolist()],
+                    "chi2": float(chi2),
+                    "p_value": float(p_value),
+                    "cramers_v": float(cramers_v),
+                }
+            )
+
+        rows.append(
+            {
+                "rho": float(rate),
+                "labels": label_rows,
+            }
+        )
+
+    return {
+        "mode": "one_vs_rest",
+        "labels": [str(label) for label in labels],
+        "rows": rows,
+    }
+
+
 # ---------------------------------------------------------------------
 # Individual Plotters (square figures, saved individually)
 # ---------------------------------------------------------------------

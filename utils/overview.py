@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -109,12 +110,21 @@ def expected_checkpoint(sig_dir: Path) -> Path | None:
 
 
 def needs_eval(sig_dir: Path) -> bool:
-    """Check if a run needs evaluation (missing required data files)."""
-    loss_history_path = sig_dir / "data" / "loss_history.json"
+    """Check if a run needs an eval rerun based on eval-generated artifacts."""
+    data_dir = sig_dir / "data"
     stsb_path = sig_dir / "data" / "stsb.json"
-    
-    # Run needs eval if either critical file is missing
-    return not loss_history_path.exists() or not stsb_path.exists()
+    selections_path = data_dir / "selections.json"
+    chi_square_path = data_dir / "chi_square.json"
+
+    # STS-B should always be produced when eval is enabled.
+    if not stsb_path.exists():
+        return True
+
+    # Chi-square exists only for labeled datasets where selections are produced.
+    if selections_path.exists() and not chi_square_path.exists():
+        return True
+
+    return False
 
 
 def rerun_eval(sig: str, sig_dir: Path, ckpt: Path | None, dry_run: bool) -> bool:
@@ -137,11 +147,9 @@ def rerun_eval(sig: str, sig_dir: Path, ckpt: Path | None, dry_run: bool) -> boo
         print("DRY-RUN:", " ".join(cmd))
         return False
     print(f"Running evaluation for {sig}...")
-    proc = subprocess.run(cmd, cwd=PROJECT_ROOT, text=True, capture_output=True)
+    proc = subprocess.run(cmd, cwd=PROJECT_ROOT, text=True, check=False)
     if proc.returncode != 0:
         print(f"WARNING: Eval rerun failed for {sig}")
-        print(f"  stdout: {proc.stdout}")
-        print(f"  stderr: {proc.stderr}")
         return False
     print(f"  ✓ Evaluation completed for {sig}")
     return True
@@ -155,24 +163,21 @@ class RunData:
     run_id: int | None
     train_history: list[dict[str, float]]
     eval_history: list[dict[str, float]]
+    chi_square: dict[str, Any] | None
     stsb: dict[str, Any] | None
 
 
 def load_run(sig_dir: Path) -> RunData:
     argv_path = sig_dir / ".argv.json"
-    details_path = sig_dir / "metrics_details.json"
     loss_history_path = sig_dir / "data" / "loss_history.json"
+    chi_square_path = sig_dir / "data" / "chi_square.json"
     stsb_path = sig_dir / "data" / "stsb.json"
     if not argv_path.exists():
         raise FileNotFoundError(f"Missing {argv_path}")
-    if not details_path.exists():
-        raise FileNotFoundError(f"Missing {details_path}")
-    if not loss_history_path.exists():
-        raise FileNotFoundError(f"Missing {loss_history_path} (loss history not found)")
 
     overrides = [str(x) for x in load_json(argv_path)]
-    details = load_json(details_path)
-    loss_data = load_json(loss_history_path)
+    loss_data = load_json(loss_history_path) if loss_history_path.exists() else {}
+    chi_square = load_json(chi_square_path) if chi_square_path.exists() else None
     stsb = load_json(stsb_path) if stsb_path.exists() else None
 
     # Load loss histories from dedicated loss_history.json
@@ -188,6 +193,7 @@ def load_run(sig_dir: Path) -> RunData:
         run_id=parse_run_id(overrides),
         train_history=[{str(k): float(v) for k, v in d.items()} for d in train_history],
         eval_history=[{str(k): float(v) for k, v in d.items()} for d in eval_history],
+        chi_square=chi_square,
         stsb=stsb,
     )
 
@@ -202,20 +208,28 @@ def mean_std_curves(curves: list[list[float]]) -> tuple[np.ndarray, np.ndarray]:
     return mean, std
 
 
-def plot_with_band(ax, x: np.ndarray, mean: np.ndarray, std: np.ndarray, label: str) -> None:
+def plot_with_band(
+    ax,
+    x: np.ndarray,
+    mean: np.ndarray,
+    std: np.ndarray,
+    label: str,
+    linestyle: str = "-",
+    alpha: float = 0.18,
+) -> None:
     valid = np.isfinite(mean)
     if not np.any(valid):
         return
     xv = x[valid]
     yv = mean[valid]
     sv = std[valid]
-    ax.plot(xv, yv, marker="o", linewidth=2.0, label=label)
+    line, = ax.plot(xv, yv, marker="o", linewidth=2.0, linestyle=linestyle, label=label)
     band_valid = np.isfinite(sv)
     if np.any(band_valid):
         xb = xv[band_valid]
         yb = yv[band_valid]
         sb = sv[band_valid]
-        ax.fill_between(xb, yb - sb, yb + sb, alpha=0.18)
+        ax.fill_between(xb, yb - sb, yb + sb, alpha=alpha, color=line.get_color())
 
 
 @dataclass
@@ -241,13 +255,22 @@ def plot_loss_overview(groups: list[GroupData], out_path: Path, ncols: int) -> N
     fig, axes = make_axes(len(groups), ncols)
     for ax, group in zip(axes, groups):
         eval_curves = [[x["eval_loss"] for x in r.eval_history if "eval_loss" in x] for r in group.runs]
+        eval_curves = [curve for curve in eval_curves if curve]
+        if not eval_curves:
+            style_group_axis(ax, group.label, len(group.runs))
+            ax.set_xlabel("history step")
+            ax.set_ylabel("eval loss")
+            ax.text(0.5, 0.5, "no eval loss history", transform=ax.transAxes, ha="center", va="center")
+            continue
         mean, std = mean_std_curves(eval_curves)
         x = np.arange(1, len(mean) + 1, dtype=float)
         plot_with_band(ax, x, mean, std, "eval mean+-std")
         style_group_axis(ax, group.label, len(group.runs))
         ax.set_xlabel("history step")
         ax.set_ylabel("eval loss")
-        ax.legend(fontsize=7)
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(fontsize=7)
 
     for ax in axes[len(groups):]:
         ax.set_visible(False)
@@ -261,52 +284,140 @@ def plot_loss_overview(groups: list[GroupData], out_path: Path, ncols: int) -> N
 
 
 
-def extract_spearman_curve(stsb: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
-    ours = stsb.get("ours_by_rho", stsb.get("ours"))
-    if ours is None:
-        raise ValueError("Missing `ours_by_rho` in stsb.json")
+def extract_spearman_curve(stsb: dict[str, Any], keys: tuple[str, ...]) -> tuple[np.ndarray, np.ndarray]:
+    values = None
+    for key in keys:
+        if key in stsb:
+            values = stsb[key]
+            break
+    if values is None:
+        raise ValueError(f"Missing one of {keys} in stsb.json")
 
-    if isinstance(ours, dict):
-        items = sorted(((float(k), float(v)) for k, v in ours.items()), key=lambda kv: kv[0])
+    if isinstance(values, dict):
+        items = sorted(((float(k), float(v)) for k, v in values.items()), key=lambda kv: kv[0])
         x = np.asarray([k for k, _ in items], dtype=float)
         y = np.asarray([v for _, v in items], dtype=float)
         return x, y
 
-    if isinstance(ours, list):
+    if isinstance(values, list):
         rhos = stsb.get("rhos")
-        if not isinstance(rhos, list) or len(rhos) != len(ours):
+        if not isinstance(rhos, list) or len(rhos) != len(values):
             raise ValueError("Invalid list spearman format in stsb.json")
         x = np.asarray([float(v) for v in rhos], dtype=float)
-        y = np.asarray([float(v) for v in ours], dtype=float)
+        y = np.asarray([float(v) for v in values], dtype=float)
         return x, y
 
-    raise ValueError("Unsupported `ours_by_rho` format in stsb.json")
+    raise ValueError(f"Unsupported format for {keys} in stsb.json")
 
 
 def plot_spearman_overview(groups: list[GroupData], out_path: Path, ncols: int) -> None:
     fig, axes = make_axes(len(groups), ncols)
     for ax, group in zip(axes, groups):
-        curves: list[np.ndarray] = []
+        selector_curves: list[np.ndarray] = []
+        random_curves: list[np.ndarray] = []
         x_ref: np.ndarray | None = None
 
         for run in group.runs:
             if run.stsb is None:
-                raise FileNotFoundError(
-                    f"Missing {run.sig_dir / 'data' / 'stsb.json'}; rerun eval with STS-B enabled to plot spearman overview."
-                )
-            x, y = extract_spearman_curve(run.stsb)
+                print(f"Skipping STS-B for {run.sig}: missing {run.sig_dir / 'data' / 'stsb.json'}")
+                continue
+            x, y_selector = extract_spearman_curve(run.stsb, ("ours_by_rho", "ours"))
+            _, y_random = extract_spearman_curve(run.stsb, ("random_by_rho", "random"))
             if x_ref is None:
                 x_ref = x
             elif x_ref.shape != x.shape or not np.allclose(x_ref, x, atol=1e-8, rtol=1e-8):
                 raise ValueError(f"Spearman rho grid mismatch inside group: {group.label}")
-            curves.append(y)
+            selector_curves.append(y_selector)
+            random_curves.append(y_random)
 
-        mean, std = mean_std_curves([c.tolist() for c in curves])
-        plot_with_band(ax, x_ref, mean, std, "selector mean+-std")
+        if not selector_curves or x_ref is None:
+            style_group_axis(ax, group.label, len(group.runs))
+            ax.set_xlabel("selection rate (rho)")
+            ax.set_ylabel("spearman")
+            ax.text(0.5, 0.5, "no stsb data", transform=ax.transAxes, ha="center", va="center")
+            continue
+
+        selector_mean, selector_std = mean_std_curves([c.tolist() for c in selector_curves])
+        random_mean, random_std = mean_std_curves([c.tolist() for c in random_curves])
+        plot_with_band(ax, x_ref, selector_mean, selector_std, "selector mean+-std", linestyle="-")
+        plot_with_band(ax, x_ref, random_mean, random_std, "random mean+-std", linestyle="--", alpha=0.14)
         style_group_axis(ax, group.label, len(group.runs))
         ax.set_xlabel("selection rate (rho)")
         ax.set_ylabel("spearman")
-        ax.legend(fontsize=7)
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(fontsize=7)
+
+    for ax in axes[len(groups):]:
+        ax.set_visible(False)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+
+def extract_chi_square_curves(chi_square: dict[str, Any], metric: str) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    rows = chi_square.get("rows") if isinstance(chi_square, dict) else None
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("Invalid chi_square.json format: expected non-empty rows list")
+
+    rho_values: list[float] = []
+    label_points: dict[str, list[float]] = {}
+    for row in rows:
+        rho = float(row.get("rho"))
+        rho_values.append(rho)
+        labels = row.get("labels", [])
+        if not isinstance(labels, list):
+            continue
+        for item in labels:
+            label = str(item.get("label"))
+            if metric == "chi_square":
+                p_value = float(item.get("p_value", 1.0))
+                p_value = max(p_value, 1e-300)
+                value = -math.log10(p_value)
+            else:
+                value = float(item.get("cramers_v", 0.0))
+            label_points.setdefault(label, []).append(value)
+
+    x = np.asarray(rho_values, dtype=float)
+    curves = {label: np.asarray(values, dtype=float) for label, values in label_points.items()}
+    return x, curves
+
+
+def plot_chi_square_overview(groups: list[GroupData], out_path: Path, ncols: int, metric: str) -> None:
+    ylabel = "-log10(p)" if metric == "chi_square" else "Cramer's V"
+    fig, axes = make_axes(len(groups), ncols)
+    for ax, group in zip(axes, groups):
+        x_ref: np.ndarray | None = None
+        per_label_runs: dict[str, list[np.ndarray]] = {}
+
+        for run in group.runs:
+            if run.chi_square is None:
+                continue
+            x, label_curves = extract_chi_square_curves(run.chi_square, metric=metric)
+            if x_ref is None:
+                x_ref = x
+            elif x_ref.shape != x.shape or not np.allclose(x_ref, x, atol=1e-8, rtol=1e-8):
+                raise ValueError(f"Chi-square rho grid mismatch inside group: {group.label}")
+            for label, curve in label_curves.items():
+                per_label_runs.setdefault(label, []).append(curve)
+
+        style_group_axis(ax, group.label, len(group.runs))
+        ax.set_xlabel("selection rate")
+        ax.set_ylabel(ylabel)
+
+        if x_ref is None or not per_label_runs:
+            ax.text(0.5, 0.5, "no chi-square data", transform=ax.transAxes, ha="center", va="center")
+            continue
+
+        for label, curves in sorted(per_label_runs.items(), key=lambda kv: kv[0]):
+            mean, std = mean_std_curves([c.tolist() for c in curves])
+            plot_with_band(ax, x_ref, mean, std, f"{label} (n={len(curves)})")
+
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(fontsize=7)
 
     for ax in axes[len(groups):]:
         ax.set_visible(False)
@@ -394,7 +505,14 @@ def main() -> None:
     out_root = args.output_dir or OUT_ROOT
     out_root.mkdir(parents=True, exist_ok=True)
 
+    # Keep overview output flat: remove legacy subfolders from older scripts.
+    for child in out_root.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child)
+
     plot_loss_overview(groups, out_root / "loss_overview.png", ncols=args.ncols)
+    plot_chi_square_overview(groups, out_root / "chi_square_overview.png", ncols=args.ncols, metric="chi_square")
+    plot_chi_square_overview(groups, out_root / "cramers_v_overview.png", ncols=args.ncols, metric="cramers_v")
     plot_spearman_overview(groups, out_root / "spearman_overview.png", ncols=args.ncols)
 
     print(f"Saved overview figures to {out_root}")

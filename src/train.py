@@ -29,6 +29,7 @@ from .utils import (
     save_combined_loss_history,
     load_combined_loss_history,
     selection_rate_matrix_to_table,
+    build_chi_square_payload,
     start_run_metrics_capture,
     write_metrics_artifacts,
 )
@@ -271,6 +272,17 @@ class SelectorTrainer:
         selections_path.write_text(json.dumps(selections_data, indent=2), encoding="utf-8")
         self.logger.info("Saved eval selections to %s", selections_path)
 
+    def _save_eval_chi_square(self, counts_pred: list, counts_gold: list, selection_rates: list) -> None:
+        """Save chi-square and Cramer's V data from evaluation counts."""
+        if counts_pred is None or counts_gold is None:
+            return
+
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        chi_square_path = self.data_dir / "chi_square.json"
+        chi_square_data = build_chi_square_payload(counts_pred, counts_gold, selection_rates)
+        chi_square_path.write_text(json.dumps(chi_square_data, indent=2), encoding="utf-8")
+        self.logger.info("Saved eval chi-square data to %s", chi_square_path)
+
     def forward_pass(self, batch: dict, examples_count: int, total_loss: float , rhos: list | None = None):
         ids = batch["ids"]
         attn = batch["attn_mask"]
@@ -389,6 +401,7 @@ class SelectorTrainer:
         
         # Save selections data (per-example selections from eval)
         self._save_eval_selections(counts_pred, counts_gold, selection_rates)
+        self._save_eval_chi_square(counts_pred, counts_gold, selection_rates)
         
         if bool(self.cfg.runtime.eval.get("skip_stsb", False)):
             self.logger.info("Skipping STS-B sweep (runtime.eval.skip_stsb=true).")

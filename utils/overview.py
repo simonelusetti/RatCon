@@ -165,6 +165,7 @@ class RunData:
     eval_history: list[dict[str, float]]
     chi_square: dict[str, Any] | None
     stsb: dict[str, Any] | None
+    selections: dict[str, Any] | None
 
 
 def load_run(sig_dir: Path) -> RunData:
@@ -172,6 +173,7 @@ def load_run(sig_dir: Path) -> RunData:
     loss_history_path = sig_dir / "data" / "loss_history.json"
     chi_square_path = sig_dir / "data" / "chi_square.json"
     stsb_path = sig_dir / "data" / "stsb.json"
+    selections_path = sig_dir / "data" / "selections.json"
     if not argv_path.exists():
         raise FileNotFoundError(f"Missing {argv_path}")
 
@@ -179,6 +181,7 @@ def load_run(sig_dir: Path) -> RunData:
     loss_data = load_json(loss_history_path) if loss_history_path.exists() else {}
     chi_square = load_json(chi_square_path) if chi_square_path.exists() else None
     stsb = load_json(stsb_path) if stsb_path.exists() else None
+    selections = load_json(selections_path) if selections_path.exists() else None
 
     # Load loss histories from dedicated loss_history.json
     train_history = loss_data.get("train", []) if isinstance(loss_data, dict) else []
@@ -195,6 +198,7 @@ def load_run(sig_dir: Path) -> RunData:
         eval_history=[{str(k): float(v) for k, v in d.items()} for d in eval_history],
         chi_square=chi_square,
         stsb=stsb,
+        selections=selections,
     )
 
 
@@ -385,6 +389,64 @@ def extract_chi_square_curves(chi_square: dict[str, Any], metric: str) -> tuple[
     return x, curves
 
 
+def extract_selection_rate_curves(selections: dict[str, Any]) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    rows = selections.get("selections_by_rho") if isinstance(selections, dict) else None
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("Invalid selections.json format: expected non-empty selections_by_rho list")
+
+    labels: set[str] = set()
+    for row in rows:
+        pred_counts = row.get("pred_counts", {})
+        gold_counts = row.get("gold_counts", {})
+        if isinstance(pred_counts, dict):
+            labels.update(str(label) for label in pred_counts.keys())
+        if isinstance(gold_counts, dict):
+            labels.update(str(label) for label in gold_counts.keys())
+
+    sorted_labels = sorted(labels)
+    rho_values: list[float] = []
+    label_points: dict[str, list[float]] = {label: [] for label in sorted_labels}
+
+    for row in rows:
+        rho_values.append(float(row.get("rho")))
+        pred_counts_raw = row.get("pred_counts", {})
+        gold_counts_raw = row.get("gold_counts", {})
+
+        pred_counts = {str(k): float(v) for k, v in pred_counts_raw.items()} if isinstance(pred_counts_raw, dict) else {}
+        gold_counts = {str(k): float(v) for k, v in gold_counts_raw.items()} if isinstance(gold_counts_raw, dict) else {}
+
+        for label in sorted_labels:
+            kept = pred_counts.get(label, 0.0)
+            total = gold_counts.get(label, 0.0)
+            value = (kept / total) if total > 0 else 0.0
+            label_points[label].append(value)
+
+    x = np.asarray(rho_values, dtype=float)
+    curves = {label: np.asarray(values, dtype=float) for label, values in label_points.items()}
+    return x, curves
+
+
+def is_negative_label(label: str) -> bool:
+    normalized = label.strip().lower()
+    if normalized in {"o", "0", "false", "non_entity", "none", "negative", "neg"}:
+        return True
+    return False
+
+
+def filter_negative_label_curves(chi_square: dict[str, Any], curves: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    negative_label_raw = chi_square.get("negative_label") if isinstance(chi_square, dict) else None
+    negative_label = str(negative_label_raw).strip() if negative_label_raw is not None else None
+
+    filtered: dict[str, np.ndarray] = {}
+    for label, curve in curves.items():
+        if negative_label is not None and label.strip() == negative_label:
+            continue
+        if is_negative_label(label):
+            continue
+        filtered[label] = curve
+    return filtered
+
+
 def plot_chi_square_overview(groups: list[GroupData], out_path: Path, ncols: int, metric: str) -> None:
     ylabel = "-log10(p)" if metric == "chi_square" else "Cramer's V"
     fig, axes = make_axes(len(groups), ncols)
@@ -396,6 +458,7 @@ def plot_chi_square_overview(groups: list[GroupData], out_path: Path, ncols: int
             if run.chi_square is None:
                 continue
             x, label_curves = extract_chi_square_curves(run.chi_square, metric=metric)
+            label_curves = filter_negative_label_curves(run.chi_square, label_curves)
             if x_ref is None:
                 x_ref = x
             elif x_ref.shape != x.shape or not np.allclose(x_ref, x, atol=1e-8, rtol=1e-8):
@@ -409,6 +472,50 @@ def plot_chi_square_overview(groups: list[GroupData], out_path: Path, ncols: int
 
         if x_ref is None or not per_label_runs:
             ax.text(0.5, 0.5, "no chi-square data", transform=ax.transAxes, ha="center", va="center")
+            continue
+
+        for label, curves in sorted(per_label_runs.items(), key=lambda kv: kv[0]):
+            mean, std = mean_std_curves([c.tolist() for c in curves])
+            plot_with_band(ax, x_ref, mean, std, f"{label} (n={len(curves)})")
+
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(fontsize=7)
+
+    for ax in axes[len(groups):]:
+        ax.set_visible(False)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_selection_rates_overview(groups: list[GroupData], out_path: Path, ncols: int) -> None:
+    fig, axes = make_axes(len(groups), ncols)
+    for ax, group in zip(axes, groups):
+        x_ref: np.ndarray | None = None
+        per_label_runs: dict[str, list[np.ndarray]] = {}
+
+        for run in group.runs:
+            if run.selections is None:
+                continue
+            x, label_curves = extract_selection_rate_curves(run.selections)
+            if x_ref is None:
+                x_ref = x
+            elif x_ref.shape != x.shape or not np.allclose(x_ref, x, atol=1e-8, rtol=1e-8):
+                raise ValueError(f"Selection-rate rho grid mismatch inside group: {group.label}")
+
+            for label, curve in label_curves.items():
+                per_label_runs.setdefault(label, []).append(curve)
+
+        style_group_axis(ax, group.label, len(group.runs))
+        ax.set_xlabel("effective selection rate (rho)")
+        ax.set_ylabel("selection rate")
+        ax.set_ylim(0.0, 1.05)
+
+        if x_ref is None or not per_label_runs:
+            ax.text(0.5, 0.5, "no selections data", transform=ax.transAxes, ha="center", va="center")
             continue
 
         for label, curves in sorted(per_label_runs.items(), key=lambda kv: kv[0]):
@@ -444,6 +551,51 @@ def build_groups(runs: list[RunData], exclude_patterns: list[str]) -> list[Group
     return out
 
 
+def load_overrides_for_sig(sig_dir: Path) -> list[str] | None:
+    argv_path = sig_dir / ".argv.json"
+    if not argv_path.exists():
+        return None
+    payload = load_json(argv_path)
+    if not isinstance(payload, list):
+        return None
+    return [str(item) for item in payload]
+
+
+def filter_sig_dirs_by_group_size(
+    sig_dirs: list[Path],
+    exclude_patterns: list[str],
+    min_group_runs: int,
+) -> list[Path]:
+    if min_group_runs <= 1:
+        return sig_dirs
+
+    grouped: dict[tuple[str, ...], list[Path]] = {}
+    skipped = 0
+    for sig_dir in sig_dirs:
+        overrides = load_overrides_for_sig(sig_dir)
+        if overrides is None:
+            skipped += 1
+            continue
+        key = group_key(overrides, exclude_patterns)
+        grouped.setdefault(key, []).append(sig_dir)
+
+    kept: list[Path] = []
+    for members in grouped.values():
+        if len(members) >= min_group_runs:
+            kept.extend(members)
+
+    kept_set = set(kept)
+    ordered_kept = [sig_dir for sig_dir in sig_dirs if sig_dir in kept_set]
+
+    print(
+        "Signature filter by group size: "
+        f"kept {len(ordered_kept)}/{len(sig_dirs)} signatures "
+        f"with min_group_runs={min_group_runs}" +
+        (f" (skipped {skipped} without .argv.json)" if skipped else "")
+    )
+    return ordered_kept
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Render grouped overview figures (loss, chi-square, spearman) as mean+-std across runs."
@@ -454,10 +606,26 @@ def main() -> None:
     parser.add_argument("--skip-auto-eval", action="store_true", help="Skip automatic eval for missing data.")
     parser.add_argument("--ncols", type=int, default=4, help="Grid columns for overview figures.")
     parser.add_argument("--output-dir", type=Path, default=None, help="Custom output directory.")
+    parser.add_argument(
+        "--min-group-runs",
+        type=int,
+        default=1,
+        help="Keep only groups with at least this many runs (after Dora excludes and run key filtering).",
+    )
+    parser.add_argument(
+        "--only-multi-run-groups",
+        action="store_true",
+        help="Convenience flag for --min-group-runs=2.",
+    )
     args = parser.parse_args()
 
     if args.dry_run_eval and not args.rerun_eval:
         raise ValueError("--dry-run-eval requires --rerun-eval")
+
+    if args.min_group_runs < 1:
+        raise ValueError("--min-group-runs must be >= 1")
+
+    min_group_runs = max(args.min_group_runs, 2) if args.only_multi_run_groups else args.min_group_runs
 
     if args.sigs:
         sig_dirs = [XPS_DIR / sig for sig in args.sigs]
@@ -467,6 +635,11 @@ def main() -> None:
     for sig_dir in sig_dirs:
         if not sig_dir.exists():
             raise FileNotFoundError(f"Missing signature directory: {sig_dir}")
+
+    exclude_patterns = load_dora_exclude()
+    sig_dirs = filter_sig_dirs_by_group_size(sig_dirs, exclude_patterns, min_group_runs)
+    if not sig_dirs:
+        raise ValueError("No signatures left after group-size filtering.")
 
     # Auto-trigger eval for runs with missing data (unless skipped)
     if not args.skip_auto_eval:
@@ -497,7 +670,6 @@ def main() -> None:
     if not runs:
         raise ValueError("No valid runs found after loading signatures.")
 
-    exclude_patterns = load_dora_exclude()
     groups = build_groups(runs, exclude_patterns)
     if not groups:
         raise ValueError("No experiment groups found.")
@@ -511,6 +683,7 @@ def main() -> None:
             shutil.rmtree(child)
 
     plot_loss_overview(groups, out_root / "loss_overview.png", ncols=args.ncols)
+    plot_selection_rates_overview(groups, out_root / "selection_rates_overview.png", ncols=args.ncols)
     plot_chi_square_overview(groups, out_root / "chi_square_overview.png", ncols=args.ncols, metric="chi_square")
     plot_chi_square_overview(groups, out_root / "cramers_v_overview.png", ncols=args.ncols, metric="cramers_v")
     plot_spearman_overview(groups, out_root / "spearman_overview.png", ncols=args.ncols)

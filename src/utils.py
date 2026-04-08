@@ -335,6 +335,27 @@ def _contingency_2x2_one_vs_rest(
     return np.array([[tp, fn], [fp, tn]], dtype=np.int64)
 
 
+def _contingency_2x2_vs_negative_label(
+    pred: Any,
+    gold: Any,
+    positive_label: Any,
+    negative_label: Any,
+) -> np.ndarray:
+    tp = _get_count(pred, positive_label)
+    fn = _get_count(gold, positive_label) - tp
+    fp = _get_count(pred, negative_label)
+    tn = _get_count(gold, negative_label) - fp
+
+    if fn < 0 or tn < 0:
+        raise ValueError(
+            "Invalid counts in pos-vs-negative table for "
+            f"label={positive_label!r}, negative={negative_label!r}: "
+            f"tp={tp}, fn={fn}, fp={fp}, tn={tn}"
+        )
+
+    return np.array([[tp, fn], [fp, tn]], dtype=np.int64)
+
+
 def _chi_square_stats(table_2x2: np.ndarray) -> tuple[float, float, float]:
     """
     Safe chi-square computation.
@@ -372,11 +393,27 @@ def build_chi_square_payload(
         key=_label_sort_key,
     )
 
+    negative_label: Any | None = None
+    try:
+        negative_label = _infer_non_entity_label(labels)
+    except ValueError:
+        negative_label = None
+
+    if negative_label is not None:
+        effective_labels = [label for label in labels if label != negative_label]
+        mode = "vs_negative_label"
+    else:
+        effective_labels = labels
+        mode = "one_vs_rest"
+
     rows: list[dict[str, Any]] = []
     for rate, pred, gold in zip(selection_rates, counts_pred, counts_gold):
         label_rows: list[dict[str, Any]] = []
-        for label in labels:
-            table = _contingency_2x2_one_vs_rest(pred, gold, label)
+        for label in effective_labels:
+            if negative_label is not None:
+                table = _contingency_2x2_vs_negative_label(pred, gold, label, negative_label)
+            else:
+                table = _contingency_2x2_one_vs_rest(pred, gold, label)
             chi2, p_value, cramers_v = _chi_square_stats(table)
             label_rows.append(
                 {
@@ -396,8 +433,9 @@ def build_chi_square_payload(
         )
 
     return {
-        "mode": "one_vs_rest",
-        "labels": [str(label) for label in labels],
+        "mode": mode,
+        "negative_label": None if negative_label is None else str(negative_label),
+        "labels": [str(label) for label in effective_labels],
         "rows": rows,
     }
 

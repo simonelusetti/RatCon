@@ -14,3 +14,5 @@ exploration/__pycache__/
 exploration/data/*
 exploration/decomp/
 beir_datasets/
+linearize.log
+rank linearized.md

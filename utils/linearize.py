@@ -43,8 +43,8 @@ DEFAULT_CFG = {
         "encoder": {"family": "sbert", "name": None},
     },
     "runtime": {
-        "threads": 48,
-        "interop_threads": 4,
+        "threads": 24,
+        "interop_threads": 1,
         "device": "cpu",
         "data": {
             "rebuild": False,

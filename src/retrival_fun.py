@@ -8,7 +8,7 @@ from scipy.stats import spearmanr
 from tqdm import tqdm
 from numpy import linspace
 
-from .utils import should_disable_tqdm
+from .utils import should_disable_tqdm, plot_stsb_sweep
 
 
 def build_non_special_mask(tokenizer, input_ids, attention_mask, device):
@@ -256,26 +256,6 @@ def eval_random_sweep(loader, encoder, tokenizer, eval_cfg, device, keep_special
     return {rho: sum(v) / len(v) for rho, v in acc.items()}
 
 
-def plot(base, ours, rand, out_path: str = "spearman_vs_rho.png"):
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    rhos = list(ours.keys())
-
-    plt.figure(figsize=(7, 5))
-    plt.plot(rhos, [base] * len(rhos), "--", label="Baseline")
-    plt.plot(rhos, [ours[r] for r in rhos], "o-", label="Trained selector")
-    plt.plot(rhos, [rand[r] for r in rhos], "x-", label="Random selector")
-    plt.xlabel("Selection rate (ρ)")
-    plt.ylabel("Spearman correlation (STS-B)")
-    plt.grid(True, linestyle=":")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=300)
-    plt.close()
-
-
 @torch.no_grad()
 def run_stsb_sweep(cfg, device, encoder, tokenizer, selector, out_path: str = "spearman_vs_rho.png"):
     hf_ds = load_dataset("glue", "stsb", split=cfg.runtime.eval.split)
@@ -316,6 +296,6 @@ def run_stsb_sweep(cfg, device, encoder, tokenizer, selector, out_path: str = "s
         keep_special=keep_special,
     )
 
-    plot(base, ours, rand, out_path=out_path)
+    plot_stsb_sweep(base, ours, rand, out_path=out_path)
 
     return base, ours, rand

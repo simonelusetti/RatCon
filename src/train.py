@@ -96,6 +96,7 @@ class SelectorTrainer:
             loss_cfg=cfg.model.loss,
             selector_cfg=cfg.model.get("selector", None),
             sent_encoder=self.sent_encoder,
+            bf16=self.bf16,
         ).to(self.device)
 
         if cfg.runtime.get("compile", False):

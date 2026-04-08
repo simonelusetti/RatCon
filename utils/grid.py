@@ -86,8 +86,6 @@ def run_and_capture_signature(cmd: list[str], pbar: tqdm, run_pbar: tqdm | None 
                     run_pbar.total = total_i
                 if current_i > run_pbar.n:
                     run_pbar.update(current_i - run_pbar.n)
-                    run_pbar.refresh()
-                    pbar.refresh()
             except ValueError:
                 pbar.write(line)
             continue
@@ -104,6 +102,9 @@ def run_and_capture_signature(cmd: list[str], pbar: tqdm, run_pbar: tqdm | None 
         raise subprocess.CalledProcessError(returncode, cmd)
     return signature
 
+def shorten_key(key: str, keep_parts: int = 1) -> str:
+    parts = key.split(".")
+    return ".".join(parts[-keep_parts:])
 
 def main() -> None:
     try:
@@ -117,7 +118,7 @@ def main() -> None:
     summary_rows = []
 
     total_runs = len(sweep)
-    with tqdm(total=total_runs, desc="Grid sweep", unit="run", position=0, leave=True, dynamic_ncols=True) as pbar:
+    with tqdm(total=total_runs, desc="Grid sweep", unit="run", leave=True, dynamic_ncols=True) as pbar:
         for overrides in sweep:
             setting_overrides = list(baseline) + list(overrides)
             setting_label = " ".join(overrides) if overrides else "<no overrides>"
@@ -130,12 +131,11 @@ def main() -> None:
             cmd = ["dora", "run"] + setting_overrides
             signatures = []
             failures = 0
-            run_desc = f"Training {setting_label}"
+            run_desc = f"Training {shorten_key(setting_label)}"
             with tqdm(
                 total=train_epochs,
                 desc=run_desc,
                 unit="epoch",
-                position=1,
                 leave=False,
                 dynamic_ncols=True,
             ) as run_pbar:

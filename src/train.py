@@ -4,7 +4,6 @@ import re
 import sys
 import torch
 
-from datasets import DatasetDict
 from logging import Logger
 from pathlib import Path
 from torch.utils.data import DataLoader
@@ -16,7 +15,6 @@ from transformers import AutoTokenizer
 from numpy import linspace
 
 from .metrics import Counts
-from .dynamic_batch import DynamicBatchController
 from .sentence import SentenceEncoder
 from .selector import RationaleSelectorModel
 from .data import PAD_TAG, SPECIAL_TAG, initialize_data
@@ -32,25 +30,15 @@ from .utils import (
     build_chi_square_payload,
     start_run_metrics_capture,
     write_metrics_artifacts,
+    should_disable_tqdm,
 )
 from .retrival_fun import run_stsb_sweep
-
-
-def should_disable_tqdm(short_log: bool, grid_mode: bool = False) -> bool:
-    if short_log:
-        return True
-    if grid_mode:
-        return True
-    if not sys.stderr.isatty():
-        return True
-    return False
 
 
 class SelectorTrainer:
     def __init__(
         self,
         cfg: DictConfig,
-        ds: DatasetDict,
         train_dl: DataLoader,
         test_dl: DataLoader,
         sent_encoder: SentenceEncoder,
@@ -125,15 +113,6 @@ class SelectorTrainer:
         self.plots_dir.mkdir(parents=True, exist_ok=True)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.train_loss_history, self.eval_loss_history = load_combined_loss_history(self.loss_history_path)
-        # Backward-compatible alias used by older checkpoint payloads.
-        self.loss_history = self.eval_loss_history
-        self.batch_controller = DynamicBatchController(
-            cfg.runtime.data,
-            ds=ds,
-            logger=logger,
-            device=self.device,
-            shuffle=bool(cfg.data.shuffle),
-        )
 
     def checkpoint_path(self, epoch: int) -> Path:
         return self.models_dir / f"model_{epoch}.pth"
@@ -174,7 +153,6 @@ class SelectorTrainer:
                 "meta": {
                     "sig": self.xp.sig,
                     "epoch": epoch,
-                    **self.batch_controller.checkpoint_meta(),
                 },
                 "loss_history": self.eval_loss_history,
                 "eval_loss_history": self.eval_loss_history,
@@ -215,24 +193,18 @@ class SelectorTrainer:
                 {str(k): float(v) for k, v in item.items()}
                 for item in checkpoint.get("train_loss_history", [])
             ]
-        self.loss_history = self.eval_loss_history
-        restored_loaders = self.batch_controller.load_checkpoint_meta(meta)
-        if restored_loaders is not None:
-            self.train_dl, self.test_dl = restored_loaders
         loaded_epoch = int(meta.get("epoch", resolved_epoch or 0))
         self.completed_epochs = max(self.completed_epochs, loaded_epoch)
         self.logger.info(
-            "Loaded checkpoint from %s with signature %s at epoch %d (batch size %d)",
+            "Loaded checkpoint from %s with signature %s at epoch %d",
             resolved_path,
             meta.get("sig", "unknown"),
             loaded_epoch,
-            self.batch_controller.batch_size,
         )
         return loaded_epoch
 
     def record_eval_losses(self, eval_losses: dict) -> None:
         self.eval_loss_history.append({str(k): float(v) for k, v in eval_losses.items()})
-        self.loss_history = self.eval_loss_history
         save_combined_loss_history(self.train_loss_history, self.eval_loss_history, self.loss_history_path)
 
     def record_train_losses(self, train_losses: dict) -> None:
@@ -247,41 +219,6 @@ class SelectorTrainer:
         loss_path = self.plots_dir / "loss.png"
         save_train_eval_loss_plot(self.train_loss_history, self.eval_loss_history, str(loss_path))
         self.logger.info("Saved loss plot to %s", loss_path)
-
-    def _save_eval_selections(self, counts_pred: list, counts_gold: list, selection_rates: list) -> None:
-        """Save per-example selections from evaluation."""
-        if counts_pred is None or counts_gold is None:
-            return
-        
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        selections_path = self.data_dir / "selections.json"
-        
-        # Convert Counts objects to serializable format
-        selections_data = {
-            "selection_rates": [float(r) for r in selection_rates],
-            "selections_by_rho": []
-        }
-        
-        for rate, pred, gold in zip(selection_rates, counts_pred, counts_gold):
-            selections_data["selections_by_rho"].append({
-                "rho": float(rate),
-                "pred_counts": dict(pred.data),
-                "gold_counts": dict(gold.data),
-            })
-        
-        selections_path.write_text(json.dumps(selections_data, indent=2), encoding="utf-8")
-        self.logger.info("Saved eval selections to %s", selections_path)
-
-    def _save_eval_chi_square(self, counts_pred: list, counts_gold: list, selection_rates: list) -> None:
-        """Save chi-square and Cramer's V data from evaluation counts."""
-        if counts_pred is None or counts_gold is None:
-            return
-
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        chi_square_path = self.data_dir / "chi_square.json"
-        chi_square_data = build_chi_square_payload(counts_pred, counts_gold, selection_rates)
-        chi_square_path.write_text(json.dumps(chi_square_data, indent=2), encoding="utf-8")
-        self.logger.info("Saved eval chi-square data to %s", chi_square_path)
 
     def forward_pass(self, batch: dict, examples_count: int, total_loss: float , rhos: list | None = None):
         ids = batch["ids"]
@@ -398,11 +335,26 @@ class SelectorTrainer:
             self.record_eval_losses(eval_losses)
         self.logger.info("Final evaluation: eval_loss=%.4f", eval_losses.get("eval_loss", 0.0))
         self.write_loss_plot()
-        
-        # Save selections data (per-example selections from eval)
-        self._save_eval_selections(counts_pred, counts_gold, selection_rates)
-        self._save_eval_chi_square(counts_pred, counts_gold, selection_rates)
-        
+
+        if counts_pred is not None and counts_gold is not None:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+
+            selections_path = self.data_dir / "selections.json"
+            selections_data = {
+                "selection_rates": [float(r) for r in selection_rates],
+                "selections_by_rho": [
+                    {"rho": float(rate), "pred_counts": dict(pred.data), "gold_counts": dict(gold.data)}
+                    for rate, pred, gold in zip(selection_rates, counts_pred, counts_gold)
+                ],
+            }
+            selections_path.write_text(json.dumps(selections_data, indent=2), encoding="utf-8")
+            self.logger.info("Saved eval selections to %s", selections_path)
+
+            chi_square_path = self.data_dir / "chi_square.json"
+            chi_square_data = build_chi_square_payload(counts_pred, counts_gold, selection_rates)
+            chi_square_path.write_text(json.dumps(chi_square_data, indent=2), encoding="utf-8")
+            self.logger.info("Saved eval chi-square data to %s", chi_square_path)
+
         if bool(self.cfg.runtime.eval.get("skip_stsb", False)):
             self.logger.info("Skipping STS-B sweep (runtime.eval.skip_stsb=true).")
             return
@@ -466,7 +418,6 @@ class SelectorTrainer:
         )
 
         for epoch in epoch_bar:
-            epoch_start_stats = self.batch_controller.sample_memory()
             self.model.train()
             total_loss = 0.0
             examples_count = 0
@@ -496,22 +447,13 @@ class SelectorTrainer:
             eval_losses = self.short_evaluate()
             self.record_eval_losses(eval_losses)
 
-            # Always log epoch details (for audit trail)
             self.logger.info(
-                "Epoch %d/%d | train_loss=%.4f | eval_loss=%.4f | batch_size=%d",
+                "Epoch %d/%d | train_loss=%.4f | eval_loss=%.4f",
                 epoch + 1,
                 self.epochs,
                 train_losses.get("train_loss", 0.0),
                 eval_losses.get("eval_loss", 0.0),
-                self.batch_controller.batch_size,
             )
-            epoch_end_stats = self.batch_controller.sample_memory()
-            new_loaders = self.batch_controller.maybe_reduce_after_epoch(
-                epoch_start_stats,
-                epoch_end_stats,
-            )
-            if new_loaders is not None:
-                self.train_dl, self.test_dl = new_loaders
             self.completed_epochs = epoch + 1
             print("\a", end="", flush=True, file=sys.stderr)
             self.save_checkpoint(epoch + 1)
@@ -544,7 +486,7 @@ def main(cfg: DictConfig) -> None:
     if changed_device:
         logger.warning("CUDA requested but unavailable, using CPU.")
 
-    train_dl, test_dl, encoder, tokenizer, labels_set, ds = initialize_data(
+    train_dl, test_dl, encoder, tokenizer, labels_set, _ = initialize_data(
         cfg.data,
         cfg.runtime.data,
         logger,
@@ -553,7 +495,7 @@ def main(cfg: DictConfig) -> None:
     )
 
     trainer = SelectorTrainer(
-        cfg, ds, train_dl, test_dl, encoder, tokenizer, labels_set, logger, xp, start_capture
+        cfg, train_dl, test_dl, encoder, tokenizer, labels_set, logger, xp, start_capture
     )
 
     if cfg.train.no_train:

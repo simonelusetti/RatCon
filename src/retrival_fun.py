@@ -1,4 +1,3 @@
-import os
 import sys
 
 import torch
@@ -9,13 +8,7 @@ from scipy.stats import spearmanr
 from tqdm import tqdm
 from numpy import linspace
 
-
-def should_disable_tqdm() -> bool:
-    if os.environ.get("DISABLE_TQDM"):
-        return True
-    if not sys.stderr.isatty():
-        return True
-    return False
+from .utils import should_disable_tqdm
 
 
 def build_non_special_mask(tokenizer, input_ids, attention_mask, device):

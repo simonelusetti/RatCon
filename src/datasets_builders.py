@@ -1,7 +1,7 @@
 import gzip, csv, re, nltk, random
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable, List, Tuple, Dict
+from typing import Callable
 from dora import to_absolute_path
 from urllib.request import urlretrieve
 from conllu import parse_incr
@@ -49,10 +49,11 @@ def _read_csv(
                     dataset_name = "twitter"
             words = row[RATIONALE_DS_FIELD[dataset_name]["tokens"]].split()
             rationale = [0] * len(words)
-            iter = row[RATIONALE_DS_FIELD[dataset_name]["rationale"]].split()
             if dataset_name == "mr":
-                iter = extract_sentences(row[RATIONALE_DS_FIELD[dataset_name]["rationale"]])
-            for phrase in iter:
+                phrases = extract_sentences(row[RATIONALE_DS_FIELD[dataset_name]["rationale"]])
+            else:
+                phrases = row[RATIONALE_DS_FIELD[dataset_name]["rationale"]].split()
+            for phrase in phrases:
                 s, e = find_sublist(words, phrase.split())
                 if s is not None:
                     rationale[s:e] = [1] * (e - s)
@@ -434,7 +435,7 @@ def build_shape(original: DatasetDict, rate: float, tokenizer: AutoTokenizer | N
                 
     return original["train"].train_test_split(test_size=0.2, seed=42)
 
-def extract_spans(labels: List[str]) -> List[Tuple[int, int, str]]:
+def extract_spans(labels: list[str]) -> list[tuple[int, int, str]]:
     spans, i, n = [], 0, len(labels)
     types = {1: "PER", 3: "ORG", 5: "LOC"}
 
@@ -453,7 +454,7 @@ def extract_spans(labels: List[str]) -> List[Tuple[int, int, str]]:
     return spans
 
 
-def build_entity_bank(dataset: Dataset) -> Dict[str, List[List[str]]]:
+def build_entity_bank(dataset: Dataset) -> dict[str, list[list[str]]]:
     bank = defaultdict(list)
 
     for ex in tqdm(dataset, desc="Building entity bank"):
@@ -469,11 +470,11 @@ def build_entity_bank(dataset: Dataset) -> Dict[str, List[List[str]]]:
 
 
 def choose_replacement(
-    candidates: List[List[str]],
-    original: List[str],
+    candidates: list[list[str]],
+    original: list[str],
     rng: random.Random,
     max_tries: int = 20,
-) -> List[str]:
+) -> list[str]:
     if len(candidates) == 0:
         return original
     if len(candidates) == 1:
@@ -486,7 +487,7 @@ def choose_replacement(
     return repl
 
 
-def swap_entities(example: dict, bank: Dict[str, List[List[str]]], rng: random.Random) -> dict:
+def swap_entities(example: dict, bank: dict[str, list[list[str]]], rng: random.Random) -> dict:
     tokens = example["tokens"]
     labels = example["labels"]
     types = {"PER": 1, "ORG": 3, "LOC": 5}

@@ -16,3 +16,4 @@ exploration/decomp/
 beir_datasets/
 linearize.log
 rank linearized.md
+.claude/

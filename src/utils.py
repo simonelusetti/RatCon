@@ -4,26 +4,15 @@ import os
 import sys
 import time
 import resource
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import (
-    Any,
-    Dict,
-    Iterable,
-    List,
-    Mapping,
-    Optional,
-    Sequence,
-    Tuple,
-    TextIO,
-    TYPE_CHECKING,
-)
+from typing import Any, TYPE_CHECKING
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn.functional as F
 from dora import XP
 from prettytable import PrettyTable
 from scipy.stats import chi2_contingency
@@ -76,7 +65,7 @@ def _write_json(path: str, payload: dict) -> None:
 
 
 def write_metrics_artifacts(
-    cfg: Dict,
+    cfg: dict,
     xp: XP,
     train_loss_history: Sequence[Mapping[str, float]],
     eval_loss_history: Sequence[Mapping[str, float]],
@@ -131,7 +120,7 @@ def write_metrics_artifacts(
         _write_json(metrics_file, compact_metrics)
 
 
-def configure_runtime(runtime_cfg: Dict) -> Tuple[Dict, bool]:
+def configure_runtime(runtime_cfg: dict) -> tuple[dict, bool]:
     changed_device = False
 
     if "threads" in runtime_cfg and runtime_cfg["threads"] is not None:
@@ -146,44 +135,23 @@ def configure_runtime(runtime_cfg: Dict) -> Tuple[Dict, bool]:
     return runtime_cfg, changed_device
 
 
-def to_device(device: torch.device, batch: Dict) -> Dict:
-    out: Dict[str, Any] = {}
+def to_device(device: torch.device, batch: dict) -> dict:
+    out: dict[str, Any] = {}
     for k, v in batch.items():
         out[k] = v.to(device) if isinstance(v, torch.Tensor) else v
     return out
 
 
-def open_selection_writer(xp: XP, epoch: int) -> TextIO:
-    out_dir = xp.folder / "selections"
-    out_dir.mkdir(exist_ok=True)
-    path = out_dir / f"eval_epoch_{epoch:03d}.json"
-    return open(path, "w")
-
-
-def full_conf_matrix(
-    logger: logging.Logger,
-    counts_gold_history: Sequence["Counts"],
-    counts_pred_history: Sequence["Counts"],
-    labels_present: bool,
-) -> None:
-    if not labels_present:
-        return
-
-    txt = ""
-    new_txt = ""
-
-    for epoch, (gold, pred) in enumerate(zip(counts_gold_history, counts_pred_history)):
-        new_txt = gold.conf_matrix(pred, epoch)
-        if new_txt is None:
-            return
-        txt += new_txt
-
-    out = "confusion_matrix.txt"
-    with open(out, "w") as f:
-        f.write(txt)
-
-    logger.info("Last epoch confusion matrix:\n%s", new_txt)
-    logger.info("Saved confusion matrix to %s", out)
+def should_disable_tqdm(short_log: bool = False, grid_mode: bool = False) -> bool:
+    if short_log:
+        return True
+    if grid_mode:
+        return True
+    if os.environ.get("DISABLE_TQDM"):
+        return True
+    if not sys.stderr.isatty():
+        return True
+    return False
 
 
 class TqdmLoggingHandler(logging.Handler):
@@ -235,7 +203,7 @@ def dict_to_table(losses: Mapping[str, float]) -> PrettyTable:
 
 def format_dict(d: Mapping[str, int | float | str], new_liners: set[str] | None = None) -> str:
     extra_newline_after = new_liners or set()
-    lines: List[str] = []
+    lines: list[str] = []
     for k, v in d.items():
         if isinstance(v, (int, float)):
             v = f"{v:.5f}"
@@ -259,38 +227,6 @@ def _label_sort_key(label: Any) -> tuple[int, Any]:
             except ValueError:
                 return 2, label
     return 3, str(label)
-
-
-def tkns_to_words(
-    gates: torch.Tensor,
-    attn_mask: torch.Tensor,
-    word_ids: torch.Tensor,
-    labels: list[list[str]],
-    threshold: float = 0.0,
-) -> tuple[torch.Tensor, torch.Tensor, list[list[str]]]:
-    device = gates.device
-    B, T = gates.shape
-    sel = (gates > threshold) & attn_mask.bool()
-    W = int(word_ids.max().item()) + 1
-    word_onehot = torch.zeros(B, T, W, device=device, dtype=torch.bool)
-    valid = word_ids >= 0
-    word_onehot[valid] = F.one_hot(word_ids[valid], num_classes=W).bool()
-    word_pred = (sel.unsqueeze(-1) & word_onehot).any(dim=1)
-    word_attn = (attn_mask.bool().unsqueeze(-1) & word_onehot).any(dim=1)
-    word_labels: List[List[str]] = []
-
-    for b in range(B):
-        label_by_wid: Dict[int, str] = {}
-        for t, wid in enumerate(word_ids[b].tolist()):
-            if wid == -100:
-                continue
-            if wid not in label_by_wid:
-                label_by_wid[wid] = labels[b][t]
-
-        wids_sorted = sorted(label_by_wid.keys())
-        word_labels.append([label_by_wid[wid] for wid in wids_sorted])
-
-    return word_pred, word_attn, word_labels
 
 
 # ---------------------------------------------------------------------
@@ -373,31 +309,6 @@ def selection_rate_matrix_to_table(
     return make_table(headers, rows)
 
 
-def _contingency_2x2_from_pred_gold(
-    pred: Any,
-    gold: Any,
-    label: Any,
-    non_entity_label: Any,
-) -> np.ndarray:
-    tp = _get_count(pred, label)
-    tot_pos = _get_count(gold, label)
-
-    fp = _get_count(pred, non_entity_label)
-    tot_neg = _get_count(gold, non_entity_label)
-
-    fn = tot_pos - tp
-    tn = tot_neg - fp
-
-    if fn < 0 or tn < 0:
-        raise ValueError(
-            f"Invalid counts: selected cannot exceed total. "
-            f"label={label!r}: tp={tp}, tot_pos={tot_pos}; "
-            f"non_entity={non_entity_label!r}: fp={fp}, tot_neg={tot_neg}"
-        )
-
-    return np.array([[tp, fn], [fp, tn]], dtype=np.int64)
-
-
 def _contingency_2x2_one_vs_rest(
     pred: Any,
     gold: Any,
@@ -424,7 +335,7 @@ def _contingency_2x2_one_vs_rest(
     return np.array([[tp, fn], [fp, tn]], dtype=np.int64)
 
 
-def _chi_square_stats(table_2x2: np.ndarray) -> Tuple[float, float, float]:
+def _chi_square_stats(table_2x2: np.ndarray) -> tuple[float, float, float]:
     """
     Safe chi-square computation.
     Returns (chi2, p_value, cramers_v).
@@ -492,35 +403,55 @@ def build_chi_square_payload(
 
 
 # ---------------------------------------------------------------------
-# Individual Plotters (square figures, saved individually)
+# Loss history persistence
 # ---------------------------------------------------------------------
-def save_loss_plot(loss_history: Sequence[Mapping[str, float]], out_path: str) -> None:
-    if not loss_history:
-        return
-
-    fig, ax = plt.subplots(figsize=(8, 8))
-    ax.set_title("Losses Across Epochs")
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Loss")
-
-    epochs = range(1, len(loss_history) + 1)
-    loss_keys = list(loss_history[0].keys())
-
-    for key in loss_keys:
-        ys = [loss[key] for loss in loss_history]
-        ax.plot(epochs, ys, label=key)
-
-    ax.legend(fontsize="small")
-
-    all_values = [v for loss in loss_history for v in loss.values()]
-    if all_values:
-        ax.set_ylim(min(all_values), max(all_values) * 1.2)
-
-    fig.tight_layout()
-    fig.savefig(out_path, bbox_inches="tight")
-    plt.close(fig)
+def save_combined_loss_history(
+    train_history: Sequence[Mapping[str, float]],
+    eval_history: Sequence[Mapping[str, float]],
+    out_path: Path,
+) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    combined = {
+        "train": [dict(item) for item in train_history],
+        "eval": [dict(item) for item in eval_history],
+    }
+    with out_path.open("w", encoding="utf-8") as f:
+        json.dump(combined, f, indent=2)
 
 
+def load_combined_loss_history(path: Path) -> tuple[list[dict[str, float]], list[dict[str, float]]]:
+    if not path.exists():
+        return [], []
+
+    with path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected a dict in {path}, found {type(payload).__name__}.")
+
+    train_history: list[dict[str, float]] = []
+    eval_history: list[dict[str, float]] = []
+
+    for key in ["train", "eval"]:
+        history_list = payload.get(key, [])
+        if not isinstance(history_list, list):
+            raise ValueError(f"Expected a list for '{key}' in {path}, found {type(history_list).__name__}.")
+
+        for item in history_list:
+            if not isinstance(item, Mapping):
+                raise ValueError(f"Expected mapping entries in '{key}' in {path}, found {type(item).__name__}.")
+
+        if key == "train":
+            train_history = [{str(k): float(v) for k, v in item.items()} for item in history_list]
+        else:
+            eval_history = [{str(k): float(v) for k, v in item.items()} for item in history_list]
+
+    return train_history, eval_history
+
+
+# ---------------------------------------------------------------------
+# Loss plots
+# ---------------------------------------------------------------------
 def save_train_eval_loss_plot(
     train_loss_history: Sequence[Mapping[str, float]],
     eval_loss_history: Sequence[Mapping[str, float]],
@@ -576,71 +507,3 @@ def save_train_eval_loss_plot(
     fig.tight_layout()
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
-
-
-def save_loss_history(loss_history: Sequence[Mapping[str, float]], out_path: Path) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w", encoding="utf-8") as f:
-        json.dump([dict(item) for item in loss_history], f, indent=2)
-
-
-def load_loss_history(path: Path) -> list[dict[str, float]]:
-    if not path.exists():
-        return []
-
-    with path.open("r", encoding="utf-8") as f:
-        payload = json.load(f)
-
-    if not isinstance(payload, list):
-        raise ValueError(f"Expected a list in {path}, found {type(payload).__name__}.")
-
-    history: list[dict[str, float]] = []
-    for item in payload:
-        if not isinstance(item, Mapping):
-            raise ValueError(f"Expected mapping entries in {path}, found {type(item).__name__}.")
-        history.append({str(k): float(v) for k, v in item.items()})
-    return history
-
-
-def save_combined_loss_history(
-    train_history: Sequence[Mapping[str, float]],
-    eval_history: Sequence[Mapping[str, float]],
-    out_path: Path,
-) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    combined = {
-        "train": [dict(item) for item in train_history],
-        "eval": [dict(item) for item in eval_history],
-    }
-    with out_path.open("w", encoding="utf-8") as f:
-        json.dump(combined, f, indent=2)
-
-
-def load_combined_loss_history(path: Path) -> tuple[list[dict[str, float]], list[dict[str, float]]]:
-    if not path.exists():
-        return [], []
-
-    with path.open("r", encoding="utf-8") as f:
-        payload = json.load(f)
-
-    if not isinstance(payload, dict):
-        raise ValueError(f"Expected a dict in {path}, found {type(payload).__name__}.")
-
-    train_history: list[dict[str, float]] = []
-    eval_history: list[dict[str, float]] = []
-
-    for key in ["train", "eval"]:
-        history_list = payload.get(key, [])
-        if not isinstance(history_list, list):
-            raise ValueError(f"Expected a list for '{key}' in {path}, found {type(history_list).__name__}.")
-        
-        for item in history_list:
-            if not isinstance(item, Mapping):
-                raise ValueError(f"Expected mapping entries in '{key}' in {path}, found {type(item).__name__}.")
-        
-        if key == "train":
-            train_history = [{str(k): float(v) for k, v in item.items()} for item in history_list]
-        else:
-            eval_history = [{str(k): float(v) for k, v in item.items()} for item in history_list]
-
-    return train_history, eval_history

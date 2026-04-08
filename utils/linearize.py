@@ -51,13 +51,6 @@ DEFAULT_CFG = {
             "test_subset": None,
             "batch_size": 16,
             "num_workers": 0,
-            "dynamic_batch": {
-                "enabled": False,
-                "min_batch_size": 16,
-                "reduce_factor": 0.5,
-                "min_available_ratio": 0.10,
-                "max_swap_growth_mb": 128,
-            },
         },
     },
     "linearize": {
@@ -182,7 +175,7 @@ def save_selection_loss_plot(
     means: list[float],
     stds: list[float],
     out_path: Path,
-) -> tuple[list[float], list[float]]:
+) -> None:
 
     fig, ax = plt.subplots(figsize=(8, 8))
     ax.set_title("Selected Mask Drift vs Rho")
@@ -206,8 +199,6 @@ def save_selection_loss_plot(
     fig.tight_layout()
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
-
-    return means, stds
 
 
 def save_spearman_plot(rhos: list[float], mean_losses: list[float], out_path: Path) -> float:
@@ -393,8 +384,6 @@ def main() -> None:
     real_sumsq = torch.zeros(n_rhos, dtype=torch.float64)
     real_count = torch.zeros(n_rhos, dtype=torch.float64)
     approx_sum = torch.zeros(n_rhos, dtype=torch.float64)
-    approx_sumsq = torch.zeros(n_rhos, dtype=torch.float64)
-    approx_count = torch.zeros(n_rhos, dtype=torch.float64)
     rho_eff_sum = torch.zeros(n_rhos, dtype=torch.float64)
 
     counts_pred = [Counts(labels=labels_set) for _ in rhos] if labels_set is not None else None
@@ -405,9 +394,9 @@ def main() -> None:
     seed = int(cfg.linearize.get("seed", 1234))
     jacobian_vectorize = bool(cfg.linearize.get("jacobian_vectorize", False))
     rhos_t = torch.tensor(rhos, device=device, dtype=torch.float32)
+    rho_idx = torch.arange(n_rhos, device=device)
 
     evaluated = 0
-    masks_evaluated = 0
 
     def _safe_name(value: object) -> str:
         return str(value).replace("/", "_").replace(" ", "_")
@@ -463,10 +452,11 @@ def main() -> None:
                 vectorize_jacobian=jacobian_vectorize,
             )
 
+            attn_i_float = attn_i.float()
             valid_end_i = int(valid_end_b[bi].item())
             k_r = k_br[bi]
             candidate_masks_rm = build_random_candidate_masks_per_rho(
-                attn_i.float(),
+                attn_i_float,
                 valid_start,
                 valid_end_i,
                 k_r,
@@ -477,23 +467,15 @@ def main() -> None:
             if candidate_masks_rm.numel() == 0:
                 continue
 
-            delta = candidate_masks_rm.to(dtype=torch.float32) - attn_i.float().view(1, 1, -1)
-            approx_delta = torch.einsum("rml,dl->rmd", delta, orth_component)
+            delta = candidate_masks_rm.to(dtype=torch.float32) - attn_i_float.view(1, 1, -1)
+            approx_delta = delta @ orth_component.T  # [n_rhos, max_masks, d]
             approx_scores = torch.linalg.vector_norm(approx_delta, dim=2)
             best_idx = torch.argmin(approx_scores, dim=1)
 
-            selected_masks[bi] = candidate_masks_rm[
-                torch.arange(n_rhos, device=device),
-                best_idx,
-            ]
+            selected_masks[bi] = candidate_masks_rm[rho_idx, best_idx]
 
-            best_approx = approx_scores[
-                torch.arange(n_rhos, device=device),
-                best_idx,
-            ].to(torch.float64).cpu()
+            best_approx = approx_scores[rho_idx, best_idx].to(torch.float64).cpu()
             approx_sum += best_approx
-            approx_sumsq += best_approx.square()
-            approx_count += 1.0
 
         selected_masks = selected_masks * valid_sentence_mask.view(bs, 1, 1).to(attn_f_b.dtype)
 
@@ -516,18 +498,17 @@ def main() -> None:
         rho_eff_batch = (selected_valid.sum(dim=2).to(torch.float32) / L_eff_valid.unsqueeze(1)).sum(dim=0)
         rho_eff_sum += rho_eff_batch.to(torch.float64).cpu()
 
-        for ridx in range(n_rhos):
-            if counts_pred is not None and counts_gold is not None and labels_b is not None:
-                for bi in valid_idx.tolist():
-                    labels_i = labels_b[bi]
-                    flat_attn = attn_b[bi].bool().cpu()
+        if counts_pred is not None and counts_gold is not None and labels_b is not None:
+            for bi in valid_idx.tolist():
+                labels_i = labels_b[bi]
+                flat_attn = attn_b[bi].bool().cpu()
+                gold_counts_i = Counts(labels_i, flat_attn)
+                for ridx in range(n_rhos):
                     flat_preds = selected_masks[bi, ridx].bool().cpu()
                     counts_pred[ridx] += Counts(labels_i, flat_attn, flat_preds)
-                    counts_gold[ridx] += Counts(labels_i, flat_attn)
+                    counts_gold[ridx] += gold_counts_i
 
         evaluated += int(valid_sentence_mask.sum().item())
-
-        masks_evaluated += int(valid_sentence_mask.sum().item()) * len(rhos) * max_masks_per_sentence
 
     if evaluated == 0:
         raise RuntimeError(
@@ -548,12 +529,7 @@ def main() -> None:
     std_losses = std_losses_t.tolist()
 
     loss_path = run_dir / "selected_mask_drift.png"
-    mean_losses, std_losses = save_selection_loss_plot(
-        rhos,
-        mean_losses,
-        std_losses,
-        loss_path,
-    )
+    save_selection_loss_plot(rhos, mean_losses, std_losses, loss_path)
     logger.info("Saved selection loss plot to %s", loss_path)
 
     spearman_path = run_dir / "spearman_vs_rho.png"
@@ -563,11 +539,7 @@ def main() -> None:
     finite_mean = mean_losses_t[torch.isfinite(mean_losses_t)]
     eval_loss = float(finite_mean.mean().item()) if int(finite_mean.numel()) > 0 else float("nan")
 
-    approx_means_t = torch.where(
-        approx_count > 0,
-        approx_sum / approx_count,
-        torch.full_like(approx_sum, float("nan")),
-    )
+    approx_means_t = approx_sum / evaluated if evaluated > 0 else torch.full_like(approx_sum, float("nan"))
     approx_means = approx_means_t.tolist()
 
     summary = {
@@ -579,7 +551,6 @@ def main() -> None:
         "max_masks_per_sentence": int(max_masks_per_sentence),
         "exclude_special": bool(exclude_special),
         "evaluated_sentences": int(evaluated),
-        "masks_evaluated": int(masks_evaluated),
         "selection_rates": [float(rate) for rate in selection_rates],
         "eval_loss": float(eval_loss),
         "eval_loss_by_rho": {f"{rho:.6f}": float(loss) for rho, loss in zip(rhos, mean_losses)},
@@ -607,7 +578,7 @@ def main() -> None:
                     "pred_counts": dict(pred.data),
                     "gold_counts": dict(gold.data),
                 }
-                for rate, pred, gold in zip(rhos, counts_pred, counts_gold)
+                for rate, pred, gold in zip(selection_rates, counts_pred, counts_gold)
             ],
         }
         selections_path.write_text(json.dumps(selections_data, indent=2), encoding="utf-8")
@@ -627,7 +598,6 @@ def main() -> None:
         save_label_plots(counts_pred, counts_gold, selection_rates, chi_square_data, run_dir, logger)
 
     logger.info("Evaluated samples: %d", evaluated)
-    logger.info("Total masks evaluated: %d", masks_evaluated)
     logger.info("Done.")
 
 

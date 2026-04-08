@@ -173,8 +173,6 @@ def collate(batch: list[TokenizedExample]) -> CollatedBatch:
             for x in scnd_labels
         ]
         
-    assert not torch.isnan(out["ids"]).any(), "Collated IDs contain NaNs"
-
     return out
 
 
@@ -273,16 +271,15 @@ def encode_examples(
 
         return out
 
+    cols = ["ids", "attn_mask", "tokens", "word_ids"]
+    if labels_present:
+        cols.append("labels")
+        if scnd_labels_map is not None:
+            cols.append("scnd_labels")
+
     out = DatasetDict()
     template_features = None
     for split, d in ds.items():
-        cols = ["ids", "attn_mask", "tokens", "word_ids"]
-        
-        if labels_present:
-            cols.append("labels")
-            if scnd_labels_map is not None:
-                cols.append("scnd_labels")
-
         if len(d) == 0:
             if template_features is None:
                 continue
@@ -301,18 +298,11 @@ def encode_examples(
         if template_features is None:
             template_features = mapped.features
 
-    for split, d in ds.items():
-        if split in out:
-            continue
-        cols = ["ids", "attn_mask", "tokens", "word_ids"]
-        if labels_present:
-            cols.append("labels")
-            if scnd_labels_map is not None:
-                cols.append("scnd_labels")
-        if template_features is None:
-            out[split] = Dataset.from_dict({c: [] for c in cols})
-        else:
-            out[split] = Dataset.from_dict({c: [] for c in cols}, features=template_features)
+    # Add empty datasets for any splits that were skipped (empty with no features established yet)
+    for split in ds:
+        if split not in out:
+            kw = {"features": template_features} if template_features is not None else {}
+            out[split] = Dataset.from_dict({c: [] for c in cols}, **kw)
 
     return out
 

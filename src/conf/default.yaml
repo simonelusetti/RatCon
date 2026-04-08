@@ -45,12 +45,6 @@ runtime:
     test_subset: null
     batch_size: 64
     num_workers: 4
-    dynamic_batch:
-      enabled: false
-      min_batch_size: 16
-      reduce_factor: 0.5
-      min_available_ratio: 0.10
-      max_swap_growth_mb: 128
   eval:
     short_log: false
     skip_stsb: false

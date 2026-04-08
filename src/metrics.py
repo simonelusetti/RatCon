@@ -2,97 +2,88 @@ from __future__ import annotations
 
 import torch
 
-from typing import Tuple
 from .data import PAD_TAG
 from .utils import dict_to_table, format_dict
 
-class Counts(dict):
+
+class Counts:
     def __init__(
-        self, labels: list | None = None, mask: torch.Tensor | None = None, \
-        pred_mask: torch.Tensor | None = None, pad: str = PAD_TAG,
+        self,
+        labels: list | None = None,
+        mask: torch.Tensor | None = None,
+        pred_mask: torch.Tensor | None = None,
+        pad: str = PAD_TAG,
     ) -> None:
-        super().__init__()
         self.data = {}
         self.pad = pad
-        
-        if labels is None: 
-            return # Fully empty Counts
-        
+
+        if labels is None:
+            return  # Fully empty Counts
+
         self.data = dict.fromkeys(set(labels) - {self.pad}, 0)
-        
+
         if mask is None:
-            return # Labels but all set to 0
-        
+            return  # Labels but all set to 0
+
         if pred_mask is not None:
-            mask = mask.bool() & pred_mask.bool() # Pred counts
-            
+            mask = mask.bool() & pred_mask.bool()  # Pred counts
+
         mask = mask.tolist()
         for c in self.data.keys():
-            self.data[c] = sum([1 if yi and xi == c else 0 for xi, yi in zip(labels, mask)])
-                        
+            self.data[c] = sum(1 if yi and xi == c else 0 for xi, yi in zip(labels, mask))
+
     def __add__(self, other: Counts) -> Counts:
         if not isinstance(other, Counts):
             raise ValueError("Can only add Counts to Counts.")
-
         result = Counts()
-        result.data = dict.fromkeys(self.data.keys() | other.data.keys(), 0)
-        for c in self.data.keys():
-            if c in other.data:
-                result.data[c] = self.data[c] + other.data[c]
-            else:
-                result.data[c] = self.data[c]
-        only_in_other = set(other.data.keys()) - set(self.data.keys())
-        for c in only_in_other:
-            result.data[c] = other.data[c]
+        result.data = {
+            c: self.data.get(c, 0) + other.data.get(c, 0)
+            for c in self.data.keys() | other.data.keys()
+        }
         return result
-    
+
     def __truediv__(self, other: Counts) -> Counts:
         if not isinstance(other, Counts):
             raise ValueError("Can only divide Counts by Counts.")
-        
         result = Counts()
-        result.data = dict.fromkeys(self.data.keys() | other.data.keys(), 0)
-        for c in self.data.keys():
-            if c in other.data:
+        result.data = {}
+        for c in self.data.keys() | other.data.keys():
+            if c in self.data and c in other.data:
                 result.data[c] = self.data[c] / other.data[c] if other.data[c] != 0 else 0.0
-            else:
+            elif c in self.data:
                 result.data[c] = self.data[c]
-        only_in_other = set(other.data.keys()) - set(self.data.keys())
-        for c in only_in_other:
-            result.data[c] = other.data[c]
+            else:
+                result.data[c] = other.data[c]
         return result
-    
+
+    def _sorted_data(self) -> dict:
+        return dict(sorted(self.data.items(), key=lambda x: x[1], reverse=True))
+
     def __str__(self) -> str:
-        data_dict = {
-            **{f"{k}": v for k, v in self.data.items()},
-        }
-        sorted_dict = dict(sorted(data_dict.items(), key=lambda x: x[1], reverse=True))
-        return format_dict(sorted_dict)
-    
+        return format_dict(self._sorted_data())
+
     def to_table(self) -> str:
-        data_dict = {
-            **{f"{k}": v for k, v in self.data.items()},
-        }
-        sorted_dict = dict(sorted(data_dict.items(), key=lambda x: x[1], reverse=True))
-        return dict_to_table(sorted_dict)
-    
+        return dict_to_table(self._sorted_data())
+
     def preferences_over_total(self, total: int) -> Counts:
         result = Counts()
-        result.data = dict.fromkeys(self.data.keys(), 0)
-        for c in self.data.keys():
-            if c != self.pad:
-                result.data[c] = self.data[c] / total if total > 0 else 0.0
+        result.data = {
+            c: self.data[c] / total if total > 0 else 0.0
+            for c in self.data.keys()
+            if c != self.pad
+        }
         return result
-    
+
     def preferences(self) -> Counts:
         result = Counts()
-        result.data = dict.fromkeys(self.data.keys(), 0)
-        total = sum(self.data[c] for c in self.data.keys() if c != self.pad)
-        for c in self.data.keys():
-            if c != self.pad:
-                result.data[c] = self.data[c] / total if total > 0 else 0.0
+        total = sum(v for c, v in self.data.items() if c != self.pad)
+        result.data = {
+            c: self.data[c] / total if total > 0 else 0.0
+            for c in self.data.keys()
+            if c != self.pad
+        }
         return result
-    
+
     def confusion_with(self, pred: Counts, positive_label: str | None = None) -> tuple[int, int, int, int, str]:
         if not isinstance(pred, Counts):
             raise ValueError("pred must be a Counts instance")
@@ -117,7 +108,7 @@ class Counts(dict):
                     f"Cannot infer positive label automatically from {labels}. "
                     "Please specify positive_label explicitly."
                 )
-                
+
         if positive_label not in labels:
             raise ValueError(f"positive_label {positive_label} not in labels {labels}")
 
@@ -136,18 +127,18 @@ class Counts(dict):
         FN = gold_pos - TP
 
         return int(TP), int(FP), int(FN), int(TN), positive_label
-    
+
     def conf_matrix(self, counts_pred: Counts, epoch: int | None = None, positive_label: str | None = None) -> str | None:
         TP, FP, FN, TN, positive_label = self.confusion_with(
             counts_pred,
             positive_label=positive_label,
         )
-                
+
         if TP == -1:
             return None
-        
+
         header = f"Confusion Matrix for Epoch {epoch}" if epoch is not None else "Confusion Matrix"
-        
+
         return (
             header + "\n"
             f"Positive label: {positive_label}\n\n"
@@ -155,12 +146,3 @@ class Counts(dict):
             f"Gold +     |   {TP:<8}   {FN:<8}\n"
             f"Gold -     |   {FP:<8}   {TN:<8}\n\n"
         )
-
-def counts(
-    pred_mask: torch.Tensor,
-    gold_mask: torch.Tensor,
-) -> Tuple[int, int, int]:
-    tp = (pred_mask & gold_mask).sum().item()
-    fp = (pred_mask & (~gold_mask)).sum().item()
-    fn = ((~pred_mask) & gold_mask).sum().item()
-    return tp, fp, fn

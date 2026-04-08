@@ -151,7 +151,9 @@ class SentenceEncoder(nn.Module):
         raise NotImplementedError
 
     def pool(self, token_emb: torch.Tensor, pool_mask: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
+        mask = pool_mask.unsqueeze(-1).type_as(token_emb)
+        sent_emb = (token_emb * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-6)
+        return F.normalize(sent_emb, dim=-1) if self.normalize else sent_emb
 
 
 # -----------------------------------------------------------------------------
@@ -159,9 +161,9 @@ class SentenceEncoder(nn.Module):
 # -----------------------------------------------------------------------------
 
 class FrozenSBERT(SentenceEncoder):
-    def __init__(self, model_name: str, normalize: bool, device: str) -> None:
+    def __init__(self, model_name: str, normalize: bool) -> None:
         super().__init__(normalize)
-        self.model = SentenceTransformer(model_name, device=device)
+        self.model = SentenceTransformer(model_name)
         self.backbone = self.model[0].auto_model
 
         self.model.eval()
@@ -170,11 +172,6 @@ class FrozenSBERT(SentenceEncoder):
 
     def token_embeddings(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         return bert_token_embeddings(self.backbone, input_ids, attention_mask)
-
-    def pool(self, token_emb: torch.Tensor, pool_mask: torch.Tensor) -> torch.Tensor:
-        mask = pool_mask.unsqueeze(-1).type_as(token_emb)
-        sent_emb = (token_emb * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-6)
-        return F.normalize(sent_emb, dim=-1) if self.normalize else sent_emb
 
 
 class _FrozenHFEncoder(SentenceEncoder):
@@ -191,11 +188,6 @@ class FrozenE5(_FrozenHFEncoder):
     def token_embeddings(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         return bert_token_embeddings(self.model, input_ids, attention_mask)
 
-    def pool(self, token_emb: torch.Tensor, pool_mask: torch.Tensor) -> torch.Tensor:
-        mask = pool_mask.unsqueeze(-1).type_as(token_emb)
-        sent_emb = (token_emb * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-6)
-        return F.normalize(sent_emb, dim=-1) if self.normalize else sent_emb
-
 
 class FrozenBGE(_FrozenHFEncoder):
     def token_embeddings(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
@@ -210,11 +202,6 @@ class FrozenBGE(_FrozenHFEncoder):
 class FrozenLLMEncoder(_FrozenHFEncoder):
     def token_embeddings(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         return gpt_token_embeddings(self.model, input_ids, attention_mask)
-
-    def pool(self, token_emb: torch.Tensor, pool_mask: torch.Tensor) -> torch.Tensor:
-        mask = pool_mask.unsqueeze(-1).type_as(token_emb)
-        sent_emb = (token_emb * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-6)
-        return F.normalize(sent_emb, dim=-1) if self.normalize else sent_emb
 
 
 # -----------------------------------------------------------------------------
@@ -235,10 +222,10 @@ def build_sentence_encoder(
     tokenizer = resolve_tokenizer(family)
 
     if family == "sbert":
-        encoder = FrozenSBERT(encoder_name, normalize=False, device=device)
-    elif family in {"e5", "retrieval", "gte"}:
+        encoder = FrozenSBERT(encoder_name, normalize=False)
+    elif family == "e5":
         encoder = FrozenE5(encoder_name, normalize=False)
-    elif family in {"bge", "late"}:
+    elif family == "bge":
         encoder = FrozenBGE(encoder_name, normalize=False)
     elif family == "llm":
         encoder = FrozenLLMEncoder(encoder_name, normalize=False)

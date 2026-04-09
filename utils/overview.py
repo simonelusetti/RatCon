@@ -9,7 +9,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.utils import (
+from src.view import (
     plot_chi_square_overview,
     plot_loss_overview,
     plot_selection_rates_overview,
@@ -36,8 +36,6 @@ def main() -> None:
     )
     parser.add_argument("--sigs", nargs="*", default=None, help="Optional list of signatures to include.")
     parser.add_argument("--rerun-eval", action="store_true", help="Force re-run eval on each selected signature.")
-    parser.add_argument("--dry-run-eval", action="store_true", help="Print eval commands only.")
-    parser.add_argument("--skip-auto-eval", action="store_true", help="Skip automatic eval for missing data.")
     parser.add_argument("--ncols", type=int, default=4, help="Grid columns for overview figures.")
     parser.add_argument("--output-dir", type=Path, default=None, help="Custom output directory.")
     parser.add_argument(
@@ -53,8 +51,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.dry_run_eval and not args.rerun_eval:
-        raise ValueError("--dry-run-eval requires --rerun-eval")
     if args.min_group_runs < 1:
         raise ValueError("--min-group-runs must be >= 1")
 
@@ -74,27 +70,33 @@ def main() -> None:
     if not sig_dirs:
         raise ValueError("No signatures left after group-size filtering.")
 
-    if not args.skip_auto_eval:
-        missing_eval = [sd for sd in sig_dirs if needs_eval(sd)]
-        if missing_eval:
-            print(f"Found {len(missing_eval)} runs with missing evaluation data.")
-            print("Auto-triggering evaluation...")
-            for sig_dir in missing_eval:
-                rerun_eval(sig_dir.name, sig_dir, expected_checkpoint(sig_dir), dry_run=args.dry_run_eval)
-            print()
-
     if args.rerun_eval:
         print(f"Force re-running evaluation for all {len(sig_dirs)} selected signatures...")
         for sig_dir in sig_dirs:
-            rerun_eval(sig_dir.name, sig_dir, expected_checkpoint(sig_dir), dry_run=args.dry_run_eval)
+            rerun_eval(sig_dir.name, sig_dir, expected_checkpoint(sig_dir), dry_run=False)
         print()
+    else:
+        missing_eval = [sd for sd in sig_dirs if needs_eval(sd)]
+        if missing_eval:
+            print(f"Found {len(missing_eval)} runs with missing evaluation artifacts.")
+            print("Auto-triggering evaluation...")
+            for sig_dir in missing_eval:
+                rerun_eval(sig_dir.name, sig_dir, expected_checkpoint(sig_dir), dry_run=False)
+            print()
 
     runs = []
+    skipped_missing_eval = 0
     for sig_dir in sig_dirs:
+        if needs_eval(sig_dir):
+            skipped_missing_eval += 1
+            continue
         try:
             runs.append(load_run(sig_dir))
         except FileNotFoundError as exc:
             print(f"Skipping {sig_dir.name}: {exc}")
+
+    if skipped_missing_eval:
+        print(f"Skipped {skipped_missing_eval} runs still missing evaluation artifacts.")
 
     if not runs:
         raise ValueError("No valid runs found after loading signatures.")

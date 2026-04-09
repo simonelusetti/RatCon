@@ -6,7 +6,6 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import yaml
 
@@ -149,16 +148,28 @@ def needs_eval(sig_dir: Path) -> bool:
     if expected_checkpoint(sig_dir) is None:
         return False  # no final checkpoint — training incomplete, skip
 
-    data_dir = sig_dir / "data"
-    stsb_path = data_dir / "stsb.json"
-    selections_path = data_dir / "selections.json"
-    chi_square_path = data_dir / "chi_square.json"
+    overrides = load_overrides_for_sig(sig_dir)
+    if overrides is not None and any(str(item).strip() == "runtime.eval.skip=true" for item in overrides):
+        return False  # explicitly configured to skip evaluation
 
-    if not stsb_path.exists():
+    data_dir = sig_dir / "data"
+    spearman_artifact = data_dir / "spearman_curves.json"
+    if not spearman_artifact.exists():
         return True
-    if selections_path.exists() and not chi_square_path.exists():
-        return True
-    return False
+
+    count_artifacts = (
+        data_dir / "selection_rate_curves.json",
+        data_dir / "chi_square_curves.json",
+        data_dir / "cramers_v_curves.json",
+    )
+    count_exists = [path.exists() for path in count_artifacts]
+
+    # Unlabeled datasets may not produce count-based artifacts at all.
+    if not any(count_exists):
+        return False
+
+    # If one exists, all should exist; otherwise the run is partially evaluated.
+    return not all(count_exists)
 
 
 def rerun_eval(sig: str, sig_dir: Path, ckpt: Path | None, dry_run: bool) -> bool:
@@ -170,7 +181,7 @@ def rerun_eval(sig: str, sig_dir: Path, ckpt: Path | None, dry_run: bool) -> boo
         "train.no_train=true",
         f"train.checkpoint_path={ckpt.name}",
         "runtime.grid=false",
-        "runtime.eval.skip_stsb=false",
+        "runtime.eval.skip=false",
         "runtime.eval.sweep_range=[0.1,1.0,10]",
     ]
     if dry_run:
@@ -195,11 +206,6 @@ class RunData:
     sig_dir: Path
     overrides: list[str]
     run_id: int | None
-    train_history: list[dict[str, float]]
-    eval_history: list[dict[str, float]]
-    chi_square: dict[str, Any] | None
-    stsb: dict[str, Any] | None
-    selections: dict[str, Any] | None
 
 
 def load_run(sig_dir: Path) -> RunData:
@@ -207,32 +213,13 @@ def load_run(sig_dir: Path) -> RunData:
     if not argv_path.exists():
         raise FileNotFoundError(f"Missing {argv_path}")
 
-    data_dir = sig_dir / "data"
     overrides = [str(x) for x in load_json(argv_path)]
-    loss_history_path = next(
-        (p for p in [data_dir / "loss_history.json", sig_dir / "state" / "loss_history.json"] if p.exists()),
-        None,
-    )
-    loss_data = load_json(loss_history_path) if loss_history_path is not None else {}
-    chi_square = load_json(data_dir / "chi_square.json") if (data_dir / "chi_square.json").exists() else None
-    stsb = load_json(data_dir / "stsb.json") if (data_dir / "stsb.json").exists() else None
-    selections = load_json(data_dir / "selections.json") if (data_dir / "selections.json").exists() else None
-
-    train_history = loss_data.get("train", []) if isinstance(loss_data, dict) else []
-    eval_history = loss_data.get("eval", []) if isinstance(loss_data, dict) else []
-    if not isinstance(train_history, list) or not isinstance(eval_history, list):
-        raise ValueError(f"Invalid history format in {loss_history_path}")
 
     return RunData(
         sig=sig_dir.name,
         sig_dir=sig_dir,
         overrides=overrides,
         run_id=parse_run_id(overrides),
-        train_history=[{str(k): float(v) for k, v in d.items()} for d in train_history],
-        eval_history=[{str(k): float(v) for k, v in d.items()} for d in eval_history],
-        chi_square=chi_square,
-        stsb=stsb,
-        selections=selections,
     )
 
 

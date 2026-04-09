@@ -8,7 +8,7 @@ from scipy.stats import spearmanr
 from tqdm import tqdm
 from numpy import linspace
 
-from .utils import should_disable_tqdm, plot_stsb_sweep
+from .utils import should_disable_tqdm
 
 
 def build_non_special_mask(tokenizer, input_ids, attention_mask, device):
@@ -257,7 +257,7 @@ def eval_random_sweep(loader, encoder, tokenizer, eval_cfg, device, keep_special
 
 
 @torch.no_grad()
-def run_stsb_sweep(cfg, device, encoder, tokenizer, selector, out_path: str = "spearman_vs_rho.png"):
+def run_stsb_sweep(cfg, device, encoder, tokenizer, selector):
     hf_ds = load_dataset("glue", "stsb", split=cfg.runtime.eval.split)
     ds = STSBDataset(hf_ds)
 
@@ -295,7 +295,5 @@ def run_stsb_sweep(cfg, device, encoder, tokenizer, selector, out_path: str = "s
         device,
         keep_special=keep_special,
     )
-
-    plot_stsb_sweep(base, ours, rand, out_path=out_path)
 
     return base, ours, rand

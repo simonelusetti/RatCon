@@ -17,12 +17,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.data import initialize_data
+from src.eval import build_chi_square_payload
 from src.metrics import Counts
 from src.utils import (
     configure_runtime,
-    build_chi_square_payload,
     get_logger,
-    selection_rate_matrix_to_table,
 )
 
 
@@ -591,10 +590,6 @@ def main() -> None:
 
         logger.info("Configured rho grid: %s", ", ".join(f"{rho:.3f}" for rho in rhos))
         logger.info("Effective selected-token rates: %s", ", ".join(f"{rate:.3f}" for rate in selection_rates))
-        logger.info(
-            "\nLabel selection matrix (selected masks):\n%s",
-            selection_rate_matrix_to_table(counts_pred, counts_gold, selection_rates),
-        )
         save_label_plots(counts_pred, counts_gold, selection_rates, chi_square_data, run_dir, logger)
 
     logger.info("Evaluated samples: %d", evaluated)

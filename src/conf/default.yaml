@@ -47,7 +47,7 @@ runtime:
     num_workers: 4
   eval:
     short_log: false
-    skip_stsb: false
+    skip: false
     split: "validation"
     sweep_range: [0.1, 1.0, 20]
     random_selector:

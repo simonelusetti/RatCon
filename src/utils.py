@@ -28,6 +28,10 @@ if TYPE_CHECKING:
 tqdm._instances.clear()
 
 
+_CHI_SQUARE_PVALUE_THRESHOLD = 0.05
+_CHI2_CRITICAL_DF1_P05 = 3.841458820694124
+
+
 @dataclass(frozen=True)
 class RunStartCapture:
     started_perf: float
@@ -611,6 +615,30 @@ def extract_chi_square_curves(chi_square: dict[str, Any], metric: str) -> tuple[
     return x, curves
 
 
+def extract_chi_square_baseline(chi_square: dict[str, Any], metric: str) -> float | None:
+    if metric == "chi_square":
+        return -math.log10(_CHI_SQUARE_PVALUE_THRESHOLD)
+
+    rows = chi_square.get("rows") if isinstance(chi_square, dict) else None
+    if not isinstance(rows, list) or not rows:
+        return None
+
+    for row in rows:
+        labels = row.get("labels", [])
+        if not isinstance(labels, list):
+            continue
+        for item in labels:
+            contingency = item.get("contingency")
+            if not isinstance(contingency, list):
+                continue
+            table = np.asarray(contingency, dtype=float)
+            total = float(table.sum())
+            if total > 0.0:
+                return float(np.sqrt(_CHI2_CRITICAL_DF1_P05 / total))
+
+    return None
+
+
 def extract_selection_rate_curves(selections: dict[str, Any]) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     rows = selections.get("selections_by_rho") if isinstance(selections, dict) else None
     if not isinstance(rows, list) or not rows:
@@ -722,6 +750,7 @@ def plot_spearman_overview(groups: Sequence[Any], out_path: Path, ncols: int) ->
         selector_curves: list[np.ndarray] = []
         random_curves: list[np.ndarray] = []
         x_ref: np.ndarray | None = None
+        accepted_sigs: list[tuple[str, np.ndarray]] = []
 
         for run in group.runs:
             if run.stsb is None:
@@ -731,8 +760,20 @@ def plot_spearman_overview(groups: Sequence[Any], out_path: Path, ncols: int) ->
             _, y_random = extract_spearman_curve(run.stsb, ("random_by_rho", "random"))
             if x_ref is None:
                 x_ref = x
+                accepted_sigs.append((run.sig, x))
             elif x_ref.shape != x.shape or not np.allclose(x_ref, x, atol=1e-8, rtol=1e-8):
-                raise ValueError(f"Spearman rho grid mismatch inside group: {group.label}")
+                def _fmt_grid(arr: np.ndarray) -> str:
+                    return f"[{arr[0]:.3g}..{arr[-1]:.3g}] n={len(arr)}"
+                print(
+                    f"Skipping {run.sig}: rho grid mismatch in group '{group.label}'\n"
+                    f"  this run : {_fmt_grid(x)}\n"
+                    f"  accepted :"
+                )
+                for sig, ax_arr in accepted_sigs:
+                    print(f"    {sig}  {_fmt_grid(ax_arr)}")
+                continue
+            else:
+                accepted_sigs.append((run.sig, x))
             selector_curves.append(y_selector)
             random_curves.append(y_random)
 
@@ -769,12 +810,16 @@ def plot_chi_square_overview(groups: Sequence[Any], out_path: Path, ncols: int, 
     for ax, group in zip(axes, groups):
         x_ref: np.ndarray | None = None
         per_label_runs: dict[str, list[np.ndarray]] = {}
+        baselines: list[float] = []
 
         for run in group.runs:
             if run.chi_square is None:
                 continue
             x, label_curves = extract_chi_square_curves(run.chi_square, metric=metric)
             label_curves = filter_negative_label_curves(run.chi_square, label_curves)
+            baseline = extract_chi_square_baseline(run.chi_square, metric=metric)
+            if baseline is not None:
+                baselines.append(baseline)
             if x_ref is None:
                 x_ref = x
             elif x_ref.shape != x.shape or not np.allclose(x_ref, x, atol=1e-8, rtol=1e-8):
@@ -793,6 +838,10 @@ def plot_chi_square_overview(groups: Sequence[Any], out_path: Path, ncols: int, 
         for label, curves in sorted(per_label_runs.items(), key=lambda kv: kv[0]):
             mean, std = mean_std_curves([c.tolist() for c in curves])
             plot_with_band(ax, x_ref, mean, std, f"{label} (n={len(curves)})")
+
+        if baselines:
+            baseline = float(np.mean(baselines))
+            ax.axhline(baseline, linestyle="--", linewidth=1.5, color="0.35", label="p=0.05")
 
         handles, _ = ax.get_legend_handles_labels()
         if handles:
@@ -833,6 +882,8 @@ def plot_selection_rates_overview(groups: Sequence[Any], out_path: Path, ncols: 
         if x_ref is None or not per_label_runs:
             ax.text(0.5, 0.5, "no selections data", transform=ax.transAxes, ha="center", va="center")
             continue
+
+        ax.plot(x_ref, x_ref, linestyle="--", linewidth=1.5, color="0.35", label="baseline (y=x)")
 
         for label, curves in sorted(per_label_runs.items(), key=lambda kv: kv[0]):
             mean, std = mean_std_curves([c.tolist() for c in curves])

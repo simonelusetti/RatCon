@@ -49,7 +49,7 @@ DEFAULT_CFG = {
         "data": {
             "rebuild": False,
             "test_subset": None,
-            "batch_size": 32,
+            "batch_size": 64,
             "num_workers": 0,
         },
     },

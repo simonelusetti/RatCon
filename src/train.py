@@ -57,7 +57,6 @@ class SelectorTrainer:
         self.grid_mode = bool(cfg.runtime.grid)
         self.device = cfg.runtime.device
         self.rhos = linspace(cfg.model.loss.sweep_range[0], cfg.model.loss.sweep_range[1], cfg.model.loss.sweep_range[2])
-        self.bf16 = bool(cfg.runtime.get("bf16", False))
 
         self._tqdm_disabled = should_disable_tqdm(self.short_log, self.grid_mode)
 
@@ -94,7 +93,6 @@ class SelectorTrainer:
             loss_cfg=cfg.model.loss,
             selector_cfg=cfg.model.get("selector", None),
             sent_encoder=self.sent_encoder,
-            bf16=self.bf16,
         ).to(self.device)
 
         if cfg.runtime.get("compile", False):
@@ -229,11 +227,7 @@ class SelectorTrainer:
 
         # Keep selector optimization in FP32 for stability; BF16 is only used for
         # the frozen first-pass token embedding extraction.
-        if self.bf16:
-            with torch.autocast("cpu", dtype=torch.bfloat16, enabled=True):
-                with torch.no_grad():
-                    tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
-        else:
+        with torch.autocast(ids.device.type, dtype=torch.bfloat16, enabled=True):
             with torch.no_grad():
                 tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
 
@@ -296,11 +290,11 @@ class SelectorTrainer:
         ):
             batch = to_device(self.device, batch)
 
-            attn, g_masks, _, examples_count, total_loss \
+            attn, g, z, examples_count, total_loss \
                 = self.forward_pass(batch, examples_count, total_loss, rhos=self.rhos)
 
             L_eff = attn.float().sum(-1)                        # [B]
-            for i, g_i in enumerate(g_masks):
+            for i, g_i in enumerate(g):
                 rho_eff_sum[i] += (g_i.sum(-1) / L_eff.clamp(min=1)).sum().item()
 
             if self.labels_set is not None:
@@ -316,7 +310,7 @@ class SelectorTrainer:
                         for lbl, is_att, wid in zip(flat_labels, flat_attn.tolist(), flat_word_ids)
                     ]
 
-                for i, g_i in enumerate(g_masks):
+                for i, g_i in enumerate(g):
                     flat_preds = g_i.cpu().view(-1)
                     counts_pred[i] += Counts(flat_labels, flat_attn, flat_preds)
                     counts_gold[i] += Counts(flat_labels, flat_attn)

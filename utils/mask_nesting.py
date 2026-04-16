@@ -30,10 +30,8 @@ from tqdm import tqdm
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data import canonical_name, encode_examples, resolve_dataset, TEXT_FIELD, collate
+from src.data import initialize_data, collate
 from src.selector import RationaleSelectorModel
-from src.sentence import build_sentence_encoder, DEFAULT_MODEL_NAMES
-from src.utils import load_json
 from utils.dora_utils import XPS_DIR, expected_checkpoint, load_overrides_for_sig
 
 
@@ -48,7 +46,7 @@ def load_xp_cfg(sig_dir: Path) -> OmegaConf:
 
     overrides = load_overrides_for_sig(sig_dir) or []
     # Filter out runtime.* and train.* keys that don't affect model/data structure
-    skip_prefixes = ("runtime.", "train.", "slurm.", "run=")
+    skip_prefixes = ("runtime.", "train.", "run=")
     filtered = [o for o in overrides if not any(o.startswith(p) for p in skip_prefixes)]
 
     patch = OmegaConf.from_dotlist(filtered)
@@ -113,29 +111,22 @@ def main() -> None:
     print(f"Encoder   : {cfg.data.encoder.family}")
     print(f"Rhos ({len(rhos)}): {[round(r, 3) for r in rhos]}")
 
-    # ---- encoder + tokenizer ----
-    family = cfg.data.encoder.family
-    encoder_name = cfg.data.encoder.get("name") or DEFAULT_MODEL_NAMES.get(family)
-    encoder, tokenizer = build_sentence_encoder(family, encoder_name, args.device)
+    runtime_data_cfg = OmegaConf.create({
+        "rebuild": False,
+        "test_subset": None,
+        "batch_size": args.batch_size,
+        "num_workers": args.num_workers,
+    })
+    data_cfg = OmegaConf.create(OmegaConf.to_container(cfg.data, resolve=True))
+    data_cfg.subset = 1.0
+    _, _, encoder, _, _, ds = initialize_data(
+        data_cfg,
+        runtime_data_cfg,
+        device=args.device,
+        keep_special=bool(cfg.model.get("keep_special", True)),
+    )
     encoder.eval()
 
-    # ---- dataset ----
-    data_cfg = OmegaConf.create({
-        "dataset": cfg.data.dataset,
-        "subset": 1.0,
-        "max_length": cfg.data.get("max_length", 512),
-        "encoder": {"family": family, "name": encoder_name},
-        "config": cfg.data.get("config"),
-    })
-    name = canonical_name(data_cfg.dataset)
-    text_field = TEXT_FIELD.get(name, "tokens")
-    ds = resolve_dataset(name, text_field=text_field, config=data_cfg.get("config"))
-
-    drop_cols = {"labels", "scnd_labels"} & set(ds["train"].column_names)
-    if drop_cols:
-        ds = ds.remove_columns(list(drop_cols))
-
-    ds = encode_examples(data_cfg, ds, tokenizer)
     available_splits = list(ds.keys())
     split = args.split
     if split not in available_splits:

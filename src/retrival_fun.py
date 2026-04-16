@@ -2,6 +2,7 @@ import sys
 
 import torch
 import torch.nn.functional as F
+from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, DataLoader
 from datasets import load_dataset
 from scipy.stats import spearmanr
@@ -47,7 +48,29 @@ class STSBDataset(Dataset):
         }
 
 
-def build_stsb_collate(tokenizer, device, max_length):
+def build_stsb_collate(tokenizer, device, max_length, keep_special: bool = True):
+    def strip_special(toks):
+        ids = toks["input_ids"]
+        attn = toks["attention_mask"]
+        if keep_special:
+            return toks
+
+        kept_ids = []
+        kept_attn = []
+        for ids_i, attn_i in zip(ids, attn):
+            keep = ~torch.tensor(
+                tokenizer.get_special_tokens_mask(ids_i.tolist(), already_has_special_tokens=True),
+                dtype=torch.bool,
+            )
+            keep &= attn_i.bool()
+            kept_ids.append(ids_i[keep])
+            kept_attn.append(attn_i[keep])
+
+        return {
+            "input_ids": pad_sequence(kept_ids, batch_first=True, padding_value=tokenizer.pad_token_id),
+            "attention_mask": pad_sequence(kept_attn, batch_first=True, padding_value=0),
+        }
+
     def collate_fn(batch):
         s1 = [x["sentence1"] for x in batch]
         s2 = [x["sentence2"] for x in batch]
@@ -68,6 +91,8 @@ def build_stsb_collate(tokenizer, device, max_length):
             max_length=max_length,
             return_tensors="pt",
         )
+        t1 = strip_special(t1)
+        t2 = strip_special(t2)
 
         return {
             "t1": {k: v.to(device) for k, v in t1.items()},
@@ -224,9 +249,16 @@ def eval_random_sweep(loader, encoder, tokenizer, eval_cfg, device, keep_special
     runs = eval_cfg.random_selector.runs
 
     acc = {rho: [] for rho in rhos}
+    cached = []
+
+    for batch in loader:
+        t1, t2 = batch["t1"], batch["t2"]
+        a2 = t2["attention_mask"]
+        e2_full = encoder.token_embeddings(t2["input_ids"], a2)
+        cached.append((t1, encoder.pool(e2_full, a2), batch["labels"]))
 
     with tqdm(
-        total=runs * len(loader),
+        total=runs * len(cached),
         desc="STS-B random selector",
         leave=False,
         dynamic_ncols=True,
@@ -241,14 +273,22 @@ def eval_random_sweep(loader, encoder, tokenizer, eval_cfg, device, keep_special
                 device,
                 keep_special=keep_special,
             )
+            sims = {rho: [] for rho in rhos}
+            labels = []
 
-            out = eval_sweep(
-                loader,
-                encoder,
-                rand_mask_gen,
-                eval_cfg,
-                progress_bar=pbar,
-            )
+            for t1, z2, batch_labels in cached:
+                a1 = t1["attention_mask"]
+                new_a1_sweep = rand_mask_gen(t1, a1, rhos)
+
+                for rho, new_a1 in zip(rhos, new_a1_sweep):
+                    e1_masked = encoder.token_embeddings(t1["input_ids"], new_a1)
+                    z1 = encoder.pool(e1_masked, new_a1)
+                    sims[rho].extend(F.cosine_similarity(z1, z2).cpu().tolist())
+
+                labels.extend(batch_labels.tolist())
+                pbar.update(1)
+
+            out = {rho: float(spearmanr(sims[rho], labels)[0]) for rho in rhos}
 
             for rho in rhos:
                 acc[rho].append(out[rho])
@@ -265,6 +305,7 @@ def run_stsb_sweep(cfg, device, encoder, tokenizer, selector):
         tokenizer,
         device,
         cfg.data.max_length,
+        keep_special=bool(cfg.model.get("keep_special", True)),
     )
 
     loader = DataLoader(

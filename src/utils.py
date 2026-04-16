@@ -103,7 +103,6 @@ def write_metrics_artifacts(
         },
         "runtime": {
             "device": str(runtime_cfg.get("device", "")),
-            "bf16": bool(runtime_cfg.get("bf16", False)),
             "compile": bool(runtime_cfg.get("compile", False)),
             "batch_size": int(runtime_data_cfg.get("batch_size", 0) or 0),
             "num_workers": int(runtime_data_cfg.get("num_workers", 0) or 0),

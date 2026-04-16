@@ -26,7 +26,7 @@ class Counts:
             return  # Labels but all set to 0
 
         if pred_mask is not None:
-            mask = mask.bool() & pred_mask.bool()  # Pred counts
+            mask = mask.bool() * pred_mask # Pred counts
 
         mask = mask.tolist()
         for c in self.data.keys():

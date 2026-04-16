@@ -8,7 +8,7 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 from transformers import PreTrainedTokenizerBase
 
-from .sentence import resolve_tokenizer_group, build_sentence_encoder, SentenceEncoder
+from .sentence import ALIAS_TO_CANON, resolve_tokenizer_group, build_sentence_encoder, SentenceEncoder
 
 from .datasets_builders import (
     build_both_parasci,
@@ -92,8 +92,16 @@ def canonical_name(name: str) -> str:
     raise ValueError(f"Unknown dataset name: {name}")
 
 
-def dataset_path(name: str, tokenizer_group: str, config: dict | None) -> Path:
-    suffix = f"_tok={tokenizer_group}"
+def dataset_path(
+    name: str,
+    tokenizer_group: str,
+    max_length: int,
+    encoder_name: str | None,
+    config: dict | None,
+) -> Path:
+    suffix = f"_tok={tokenizer_group}_len={max_length}"
+    if encoder_name:
+        suffix += f"_enc={encoder_name.replace('/', '__')}"
     if config:
         suffix += "_" + "_".join(str(v) for v in config.values())
     return Path(to_absolute_path(f"./data/cache/{name}{suffix}"))
@@ -315,7 +323,13 @@ def get_dataset(
 ) -> DatasetDict:
     tokenizer_group = resolve_tokenizer_group(data_cfg.encoder.family)
     name = canonical_name(data_cfg.dataset)
-    path = dataset_path(name, tokenizer_group, data_cfg.get("config"))
+    path = dataset_path(
+        name,
+        tokenizer_group,
+        int(data_cfg.max_length),
+        data_cfg.encoder.get("name"),
+        data_cfg.get("config"),
+    )
 
     text_field = TEXT_FIELD.get(name, "tokens")
     if path.exists() and not runtime_cfg.rebuild:
@@ -348,36 +362,25 @@ def get_dataset(
     return ds_tok
 
 
-def filter_special_tokens(
+def strip_special_tokens(
     ds: DatasetDict,
+    tokenizer: PreTrainedTokenizerBase,
     logger: logging.Logger | None = None,
 ) -> DatasetDict:
-    """
-    Remove all examples that contain SPECIAL_TAG from the dataset.
-    Used when keep_special=False to exclude special tokens entirely.
-    """
-    def has_special(labels: list[str]) -> bool:
-        return SPECIAL_TAG in labels
-
-    filtered = {}
+    stripped = {}
     for split, dataset in ds.items():
-        old_len = len(dataset)
-        filtered_dataset = dataset.filter(
-            lambda ex: not has_special(ex["labels"]),
-            desc=f"Filtering {split}",
+        stripped_dataset = dataset.map(
+            lambda ex: {
+                key: [value[i] for i, is_special in enumerate(tokenizer.get_special_tokens_mask(ex["ids"], already_has_special_tokens=True)) if not is_special]
+                for key, value in ex.items()
+            },
+            desc=f"Stripping {split}",
         )
-        new_len = len(filtered_dataset)
-        if logger is not None and old_len != new_len:
-            logger.info(
-                "Filtered %s split: removed %d examples with SPECIAL_TAG (%d -> %d samples)",
-                split,
-                old_len - new_len,
-                old_len,
-                new_len,
-            )
-        filtered[split] = filtered_dataset
+        if logger is not None:
+            logger.info("Stripped special tokens from %s split", split)
+        stripped[split] = stripped_dataset
 
-    return DatasetDict(filtered)
+    return DatasetDict(stripped)
 
 
 def initialize_data(
@@ -387,6 +390,9 @@ def initialize_data(
     device: str = "cpu",
     keep_special: bool = True,
 ) -> tuple[DataLoader, DataLoader, SentenceEncoder, PreTrainedTokenizerBase, set[str] | None, DatasetDict]:
+    family = ALIAS_TO_CANON[data_cfg.encoder.family.lower()]
+    assert keep_special or family != "bge", "keep_special=false is not supported for BGE."
+
     encoder, tokenizer = build_sentence_encoder(
         family=data_cfg.encoder.family,
         encoder_name=data_cfg.encoder.name,
@@ -395,9 +401,6 @@ def initialize_data(
 
     ds = get_dataset(data_cfg, runtime_cfg, tokenizer, logger)
     ds = shuffle_and_subset(ds, data_cfg.subset, data_cfg.shuffle)
-
-    if not keep_special and "labels" in ds["train"].column_names:
-        ds = filter_special_tokens(ds, logger)
 
     test_subset = runtime_cfg.get("test_subset", None)
     if test_subset is not None and "test" in ds:
@@ -410,6 +413,9 @@ def initialize_data(
                 old_test_len,
                 len(ds["test"]),
             )
+
+    if not keep_special:
+        ds = strip_special_tokens(ds, tokenizer, logger)
 
     ds_train, ds_test = build_dataloaders(
         ds,

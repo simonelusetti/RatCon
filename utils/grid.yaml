@@ -1,21 +1,13 @@
 baseline:
   - "runtime.grid=true"
+  - "model.selector.condition_on_rho=true"
+  - "model.selector.use_hard=true"
+  - "data.subset=0.1"
+  - "data.dataset=wikiann"
 sweep:
-  #- ["data.dataset=conll03"]
-  #- ["data.dataset=conll03","run=1"]
-  #- ["data.dataset=conll03","run=2"]
-  #- ["data.dataset=conll00"]
-  - ["data.dataset=conll00","run=1", "train.continue=true"]
-  - ["data.dataset=conll00","run=2", "train.continue=true"]
-  - ["data.dataset=twitter"]
-  - ["data.dataset=twitter","run=1"]
-  - ["data.dataset=twitter","run=2"]
-#  - ["data.encoder.family=llm"]
-#  - ["data.encoder.family=llm", "run=1"]
-#  - ["data.encoder.family=llm", "run=2"]
-#  - ["data.encoder.family=e5"]
-#  - ["data.encoder.family=e5", "run=1"]
-#  - ["data.encoder.family=e5", "run=2"]
-#  - ["data.encoder.family=bge"]
-#  - ["data.encoder.family=bge", "run=1"]
-#  - ["data.encoder.family=bge", "run=2"]
+  #- []
+  - ["run=1", "train.continue=true"]
+  - ["run=2"]
+  - ["model.keep_special=true"]
+  - ["model.keep_special=true", "run=1"]
+  - ["model.keep_special=true", "run=2"]

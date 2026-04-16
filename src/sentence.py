@@ -1,4 +1,3 @@
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -113,34 +112,7 @@ def gpt_token_embeddings(
     Returns last hidden states [B, T, D] for GPT-style encoders.
     Uses attention_mask only as a standard padding mask (0/1).
     """
-    hidden_states = model.embed_in(input_ids)
-    bsz, seq_len, _ = hidden_states.size()
-
-    num_heads = model.config.num_attention_heads
-    head_dim = model.config.hidden_size // num_heads
-    key_mask = attention_mask[:, None, None, :].to(dtype=hidden_states.dtype).clamp(min=0.0)
-
-    for block in model.layers:
-        ln_out = block.input_layernorm(hidden_states)
-
-        qkv = block.attention.query_key_value(ln_out)
-        qkv = qkv.view(bsz, seq_len, num_heads, 3 * head_dim).permute(0, 2, 1, 3)
-        q, k, v = torch.split(qkv, head_dim, dim=-1)
-
-        scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(head_dim)
-        scores = scores + torch.log(key_mask.clamp(min=1e-9))
-
-        probs = torch.softmax(scores, dim=-1)
-        context = torch.matmul(probs, v)
-
-        context = context.permute(0, 2, 1, 3).contiguous()
-        context = context.view(bsz, seq_len, num_heads * head_dim)
-
-        hidden_states = hidden_states + block.attention.dense(context)
-        hidden_states = hidden_states + block.mlp(block.post_attention_layernorm(hidden_states))
-        hidden_states = block.post_attention_layernorm(hidden_states)
-
-    return hidden_states
+    return model(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
 
 
 # -----------------------------------------------------------------------------

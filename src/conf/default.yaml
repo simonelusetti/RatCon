@@ -35,16 +35,15 @@ train:
 
 runtime:
   grid: false
-  threads: 48
-  interop_threads: 4
+  threads: 24
+  interop_threads: 1
   device: "cpu"
-  bf16: true      # BF16 autocast (big win on Sapphire Rapids / AMX CPUs)
   compile: false   # torch.compile the selector model (first epoch slower)
   data:
     rebuild: false
     test_subset: null
     batch_size: 64
-    num_workers: 4
+    num_workers: 2
   eval:
     short_log: false
     skip: false
@@ -56,26 +55,9 @@ runtime:
 
 dora:
   exclude:
-    - "slurm.*"
     - "runtime.*"
     - "train.no_train"
     - "train.continue"
     - "train.checkpoint_path"
 
 run: 0
-
-slurm:
-  partition: "boost_usr_prod"
-  gpus: 1
-  mem_per_gpu: 32
-  time: 240
-  cpus_per_gpu: 8
-  setup:
-    - "module load python/3.11.7"
-    - "source $HOME/RatCon/.venv/bin/activate"
-    - "export SLURM_CPU_BIND=none"
-    - "export HF_HOME=$HOME/hf-cache"
-    - "export TRANSFORMERS_CACHE=$HF_HOME/transformers"
-    - "export HF_DATASETS_CACHE=$HF_HOME/datasets"
-    - "export HF_HUB_OFFLINE=1"
-    - "export TRANSFORMERS_OFFLINE=1"

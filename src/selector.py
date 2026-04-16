@@ -2,7 +2,6 @@ from typing import Sequence
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint as grad_checkpoint
 
 from src.sentence import SentenceEncoder
 
@@ -90,7 +89,6 @@ class RationaleSelectorModel(nn.Module):
         sent_encoder: SentenceEncoder | None = None,
         loss_cfg: dict | None = None,
         selector_cfg: dict | None = None,
-        bf16: bool = False,
     ) -> None:
         super().__init__()
 
@@ -112,7 +110,6 @@ class RationaleSelectorModel(nn.Module):
         self.sent_encoder = sent_encoder
         self.loss_cfg = loss_cfg
 
-        self.bf16 = bf16
         self.tau_rank = float(selector_cfg.get("tau_rank", 0.05))
         self.gamma_rank = float(selector_cfg.get("gamma_rank", 2.0))
         self.tau_gate = float(selector_cfg.get("tau_gate", 0.2))
@@ -195,14 +192,11 @@ class RationaleSelectorModel(nn.Module):
         attn_rep = effective_attns.reshape(R * B, L)
 
         def _reencode(ids_r, attn_r):
-            with torch.autocast("cpu", dtype=torch.bfloat16, enabled=self.bf16):
+            with torch.autocast(ids_r.device.type, dtype=torch.bfloat16, enabled=True):
                 tok = self.sent_encoder.token_embeddings(ids_r, attn_r)
                 return self.sent_encoder.pool(tok, attn_r)
 
-        if self.training:
-            pred_rep = grad_checkpoint(_reencode, ids_rep, attn_rep, use_reentrant=False)
-        else:
-            pred_rep = _reencode(ids_rep, attn_rep)
+        pred_rep = _reencode(ids_rep, attn_rep)
         pred_rep = pred_rep.view(R, B, -1)
 
         full_rep_exp = full_rep.unsqueeze(0).expand(R, B, -1)

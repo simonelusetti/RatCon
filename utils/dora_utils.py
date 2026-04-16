@@ -182,7 +182,6 @@ def rerun_eval(sig: str, sig_dir: Path, ckpt: Path | None, dry_run: bool) -> boo
         f"train.checkpoint_path={ckpt.name}",
         "runtime.grid=false",
         "runtime.eval.skip=false",
-        "runtime.eval.sweep_range=[0.1,1.0,10]",
     ]
     if dry_run:
         print("DRY-RUN:", " ".join(cmd))

@@ -4,8 +4,8 @@ defaults:
 model:
   keep_special: false
   selector:
-    condition_on_rho: false
-    use_hard: false
+    condition_on_rho: true
+    hard: false
     tau_rank: 0.05
     gamma_rank: 2.0
     tau_gate: 0.2
@@ -45,13 +45,13 @@ runtime:
     batch_size: 64
     num_workers: 2
   eval:
+    hard: false
     short_log: false
     skip: false
-    split: "validation"
     sweep_range: [0.1, 1.0, 20]
     random_selector:
       runs: 5
-      seed: 1234  
+      seed: 314
 
 dora:
   exclude:

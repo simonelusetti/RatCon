@@ -182,17 +182,20 @@ def build_selector_mask_generator(
     encoder,
     tokenizer,
     device,
+    hard: bool = False,
     keep_special: bool = True,
 ):
     @torch.no_grad()
     def mask_generator(t1, a1, rhos):
         e1_full = encoder.token_embeddings(t1["input_ids"], a1)
-        _, g_sweep, _ = selector(
+        z, g, _ = selector(
             t1["input_ids"],
             e1_full,
             a1,
             rhos=rhos,
         )
+        
+        pred = g if hard else z
 
         non_special = (
             build_non_special_mask(tokenizer, t1["input_ids"], a1, device)
@@ -201,9 +204,9 @@ def build_selector_mask_generator(
         )
 
         new_a1_sweep = []
-        for g in g_sweep:
+        for pred_i in pred:
             if non_special is not None:
-                g = g * non_special.float()
+                selection_rates = selection_rates * non_special.float()
             new_a1_sweep.append(g * a1)
 
         return new_a1_sweep
@@ -324,6 +327,7 @@ def run_stsb_sweep(cfg, device, encoder, tokenizer, selector):
         encoder,
         tokenizer,
         device,
+        hard=bool(cfg.runtime.eval.get("hard", False)),
         keep_special=keep_special,
     )
     

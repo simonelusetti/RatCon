@@ -267,16 +267,15 @@ class SelectorTrainer:
 
     @torch.no_grad()
     def evaluate(
-        self
-    ) -> tuple[dict, list | None, list | None, list[float] | None]:
+        self, soft: bool = False
+    ) -> tuple[dict, list | None, list | None]:
         self.model.eval()
-        
+
         examples_count = 0
         total_loss = 0.0
 
         counts_pred, counts_gold = None, None
         sweep_range = len(self.rhos)
-        rho_eff_sum = [0.0 for _ in range(sweep_range)]
         counts_pred = [Counts(labels=self.labels_set) for _ in range(sweep_range)]
         counts_gold = [Counts(labels=self.labels_set) for _ in range(sweep_range)]
 
@@ -292,10 +291,8 @@ class SelectorTrainer:
 
             attn, g, z, examples_count, total_loss \
                 = self.forward_pass(batch, examples_count, total_loss, rhos=self.rhos)
-
-            L_eff = attn.float().sum(-1)                        # [B]
-            for i, g_i in enumerate(g):
-                rho_eff_sum[i] += (g_i.sum(-1) / L_eff.clamp(min=1)).sum().item()
+                
+            pred_mask = z if soft else g
 
             if self.labels_set is not None:
                 labels = batch["labels"]
@@ -310,23 +307,17 @@ class SelectorTrainer:
                         for lbl, is_att, wid in zip(flat_labels, flat_attn.tolist(), flat_word_ids)
                     ]
 
-                for i, g_i in enumerate(g):
-                    flat_preds = g_i.cpu().view(-1)
+                for i, pred_mask_i in enumerate(pred_mask):
+                    flat_preds = pred_mask_i.cpu().view(-1)
                     counts_pred[i] += Counts(flat_labels, flat_attn, flat_preds)
                     counts_gold[i] += Counts(flat_labels, flat_attn)
 
         total_loss /= max(1, examples_count)
 
         if self.labels_set is not None:
-            selection_rates: list[float] = [value / max(examples_count, 1) for value in rho_eff_sum]
-            self.logger.info(
-                "Mean effective selection rates by rho: %s",
-                ", ".join(f"{rate:.3f}" for rate in selection_rates),
-            )
+            return {"eval_loss": total_loss}, counts_pred, counts_gold
 
-            return {"eval_loss": total_loss}, counts_pred, counts_gold, selection_rates
-
-        return {"eval_loss": total_loss}, None, None, None
+        return {"eval_loss": total_loss}, None, None
 
     @torch.no_grad()
     def final_eval(self, record_eval_history: bool = True) -> None:
@@ -334,7 +325,10 @@ class SelectorTrainer:
             self.logger.info("Skipping full evaluation (runtime.eval.skip=true).")
             return
 
-        eval_losses, counts_pred, counts_gold, selection_rates = self.evaluate()
+        eval_losses, counts_pred, counts_gold = self.evaluate(
+            soft=self.cfg.runtime.eval.get("hard", False)
+        )
+        
         if record_eval_history:
             self.record_eval_losses(eval_losses)
         self.logger.info("Final evaluation: eval_loss=%.4f", eval_losses.get("eval_loss", 0.0))
@@ -351,6 +345,7 @@ class SelectorTrainer:
             tokenizer=self.tokenizer,
             selector=self.model,
         )
+        
         stsb_data = {
             "base": float(base),
             "ours_by_rho": {str(float(k)): float(v) for k, v in ours.items()},
@@ -361,7 +356,7 @@ class SelectorTrainer:
         artifact_paths = save_eval_artifacts(
             counts_pred=counts_pred,
             counts_gold=counts_gold,
-            selection_rates=selection_rates,
+            rhos=self.rhos,
             stsb=stsb_data,
         )
         for metric_name, artifact_path in artifact_paths.items():
@@ -376,25 +371,29 @@ class SelectorTrainer:
 
         if self.resume_training:
             latest = self.latest_checkpoint()
+            
             if latest is None:
                 self.logger.info("No checkpoint found to resume from. Starting from epoch 1.")
-            else:
-                _, checkpoint_path = latest
-                start_epoch = self.load_checkpoint(checkpoint_path)
-                if start_epoch >= self.epochs:
-                    self.completed_epochs = self.epochs
-                    self.logger.info(
-                        "Checkpoint epoch %d already reaches the target of %d epochs. Running final evaluation only.",
-                        start_epoch,
-                        self.epochs,
-                    )
-                    self.final_eval()
-                    return
+                return
+            
+            _, checkpoint_path = latest
+            start_epoch = self.load_checkpoint(checkpoint_path)
+            
+            if start_epoch >= self.epochs:
+                self.completed_epochs = self.epochs
                 self.logger.info(
-                    "Resuming training from epoch %d of %d.",
-                    start_epoch + 1,
+                    "Checkpoint epoch %d already reaches the target of %d epochs. Running final evaluation only.",
+                    start_epoch,
                     self.epochs,
                 )
+                self.final_eval()
+                return
+            
+            self.logger.info(
+                "Resuming training from epoch %d of %d.",
+                start_epoch + 1,
+                self.epochs,
+            )
 
         epoch_bar = tqdm(
             range(start_epoch, self.epochs),

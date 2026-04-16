@@ -97,8 +97,8 @@ class RationaleSelectorModel(nn.Module):
 
         selector_cfg = selector_cfg or {}
         self.condition_on_rho = bool(selector_cfg.get("condition_on_rho", True))
-        self.use_hard_for_reencode = bool(
-            selector_cfg.get("use_hard", selector_cfg.get("use_hard_mask_for_reencode", False))
+        self.hard = bool(
+            selector_cfg.get("hard", False)
         )
 
         self.selector = SelectorMLP(
@@ -184,20 +184,18 @@ class RationaleSelectorModel(nn.Module):
 
         g_st = g + (z - z.detach())
 
-        if self.use_hard_for_reencode:
+        if self.hard:
             effective_attns = attn_f[None] * g_st
         else:
             effective_attns = attn_f[None] * z
+        
         ids_rep = ids[None].expand(R, B, L).reshape(R * B, L)
         attn_rep = effective_attns.reshape(R * B, L)
 
-        def _reencode(ids_r, attn_r):
-            with torch.autocast(ids_r.device.type, dtype=torch.bfloat16, enabled=True):
-                tok = self.sent_encoder.token_embeddings(ids_r, attn_r)
-                return self.sent_encoder.pool(tok, attn_r)
-
-        pred_rep = _reencode(ids_rep, attn_rep)
-        pred_rep = pred_rep.view(R, B, -1)
+        with torch.autocast(ids_rep.device.type, dtype=torch.bfloat16, enabled=True):
+            tok = self.sent_encoder.token_embeddings(ids_rep, attn_rep)
+            pred_rep = self.sent_encoder.pool(tok, attn_rep)
+            pred_rep = pred_rep.view(R, B, -1)
 
         full_rep_exp = full_rep.unsqueeze(0).expand(R, B, -1)
         per_sample = 1.0 - F.cosine_similarity(pred_rep, full_rep_exp, dim=-1)

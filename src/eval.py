@@ -107,15 +107,15 @@ def _chi_square_stats(table_2x2: np.ndarray) -> tuple[float, float, float]:
 def _build_selections_payload(
     counts_pred: Sequence[Any] | None,
     counts_gold: Sequence[Any] | None,
-    selection_rates: Sequence[float] | None,
+    rhos: Sequence[float] | None,
 ) -> dict[str, Any] | None:
-    if counts_pred is None or counts_gold is None or selection_rates is None:
+    if counts_pred is None or counts_gold is None or rhos is None:
         return None
     return {
-        "selection_rates": [float(r) for r in selection_rates],
+        "selection_rates": [float(r) for r in rhos],
         "selections_by_rho": [
-            {"rho": float(rate), "pred_counts": dict(pred.data), "gold_counts": dict(gold.data)}
-            for rate, pred, gold in zip(selection_rates, counts_pred, counts_gold)
+            {"rho": float(rho), "pred_counts": dict(pred.data), "gold_counts": dict(gold.data)}
+            for rho, pred, gold in zip(rhos, counts_pred, counts_gold)
         ],
     }
 
@@ -123,9 +123,9 @@ def _build_selections_payload(
 def _build_chi_square_payload(
     counts_pred: Sequence[Any] | None,
     counts_gold: Sequence[Any] | None,
-    selection_rates: Sequence[float] | None,
+    rhos: Sequence[float] | None,
 ) -> dict[str, Any] | None:
-    if counts_pred is None or counts_gold is None or selection_rates is None:
+    if counts_pred is None or counts_gold is None or rhos is None:
         return None
     if not counts_pred or not counts_gold:
         return {
@@ -153,7 +153,7 @@ def _build_chi_square_payload(
         mode = "one_vs_rest"
 
     rows: list[dict[str, Any]] = []
-    for rate, pred, gold in zip(selection_rates, counts_pred, counts_gold):
+    for rate, pred, gold in zip(rhos, counts_pred, counts_gold):
         label_rows: list[dict[str, Any]] = []
         for label in effective_labels:
             if negative_label is not None:
@@ -184,9 +184,9 @@ def _build_chi_square_payload(
 def build_chi_square_payload(
     counts_pred: Sequence[Any],
     counts_gold: Sequence[Any],
-    selection_rates: Sequence[float],
+    rhos: Sequence[float],
 ) -> dict[str, Any]:
-    payload = _build_chi_square_payload(counts_pred, counts_gold, selection_rates)
+    payload = _build_chi_square_payload(counts_pred, counts_gold, rhos)
     if payload is None:
         return {
             "mode": "one_vs_rest",
@@ -358,15 +358,15 @@ def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
 def save_eval_artifacts(
     counts_pred: Sequence[Any] | None,
     counts_gold: Sequence[Any] | None,
-    selection_rates: Sequence[float] | None,
+    rhos: Sequence[float] | None,
     stsb: Mapping[str, Any] | None,
     selection_rate_out_path: str | Path = _DEFAULT_SELECTION_RATE_CURVES_PATH,
     chi_square_out_path: str | Path = _DEFAULT_CHI_SQUARE_CURVES_PATH,
     cramers_v_out_path: str | Path = _DEFAULT_CRAMERS_V_CURVES_PATH,
     spearman_out_path: str | Path = _DEFAULT_SPEARMAN_CURVES_PATH,
 ) -> dict[str, Path]:
-    selections = _build_selections_payload(counts_pred, counts_gold, selection_rates)
-    chi_square = _build_chi_square_payload(counts_pred, counts_gold, selection_rates)
+    selections = _build_selections_payload(counts_pred, counts_gold, rhos)
+    chi_square = _build_chi_square_payload(counts_pred, counts_gold, rhos)
 
     selection_rate_payload = _build_selection_rate_curves_payload(selections)
     chi_square_payload = _build_chi_square_curves_payload(chi_square)

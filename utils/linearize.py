@@ -17,8 +17,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.data import initialize_data
-from src.eval import build_chi_square_payload
-from src.metrics import Counts
 from src.utils import (
     configure_runtime,
     get_logger,
@@ -54,10 +52,11 @@ DEFAULT_CFG = {
     },
     "linearize": {
         "exclude_special": True,
-        "max_masks_per_sentence": 1024,
+        "max_masks_per_sentence": 64,
         "seed": 1234,
         "jacobian_vectorize": False,
-        "plots_dir": "outputs/utils/linearize",
+        "plots_dir": "outputs/linearize",
+        "eval_chunk": 256,
     },
 }
 
@@ -83,7 +82,6 @@ def spearman_torch(x: torch.Tensor, y: torch.Tensor) -> float:
     if x.numel() != y.numel() or x.numel() < 2:
         return float("nan")
 
-    # Rank transform (average ties not needed for these continuous curves).
     rx = torch.argsort(torch.argsort(x)).to(torch.float64)
     ry = torch.argsort(torch.argsort(y)).to(torch.float64)
 
@@ -169,29 +167,137 @@ def compute_sentence_linearization_basis(
     return baseline_hat, orth_component
 
 
-def save_selection_loss_plot(
+def compute_all_candidate_losses(
+    ids_i: torch.Tensor,
+    full_rep_i: torch.Tensor,
+    encoder,
+    candidate_masks: torch.Tensor,
+    chunk: int = 256,
+) -> torch.Tensor:
+    """Compute actual reconstruction loss for every candidate mask.
+
+    Args:
+        ids_i:           [1, L] token ids for one sentence
+        full_rep_i:      [d] full sentence pooled representation
+        encoder:         SentenceEncoder
+        candidate_masks: [n_rhos, max_masks, L]
+        chunk:           max encoder batch size to avoid OOM
+
+    Returns:
+        losses: [n_rhos, max_masks] float64
+    """
+    n_rhos, max_masks, seq_len = candidate_masks.shape
+    total = n_rhos * max_masks
+    ids_rep = ids_i.expand(total, seq_len)
+    flat_masks = candidate_masks.reshape(total, seq_len)
+    full_rep_rep = full_rep_i.unsqueeze(0).expand(total, -1)
+
+    losses = torch.empty(total, dtype=torch.float64, device=ids_i.device)
+    with torch.inference_mode():
+        for start in range(0, total, chunk):
+            end = min(start + chunk, total)
+            tok = encoder.token_embeddings(ids_rep[start:end], flat_masks[start:end])
+            pred = encoder.pool(tok, flat_masks[start:end])
+            losses[start:end] = (
+                1.0 - F.cosine_similarity(pred, full_rep_rep[start:end], dim=-1)
+            ).to(torch.float64)
+    return losses.view(n_rhos, max_masks)
+
+
+# ---------------------------------------------------------------------------
+# Plots
+# ---------------------------------------------------------------------------
+
+
+def save_spearman_ranking_plot(
     rhos: list[float],
     means: list[float],
     stds: list[float],
     out_path: Path,
 ) -> None:
+    """Plot mean Spearman(approx_ranking, actual_ranking) per rho."""
+    x = torch.tensor(rhos, dtype=torch.float64)
+    y = torch.tensor(means, dtype=torch.float64)
+    s = torch.tensor(stds, dtype=torch.float64)
+    valid = torch.isfinite(x) & torch.isfinite(y)
+
+    overall = float("nan")
+    if int(valid.sum().item()) >= 1:
+        overall = float(y[valid].mean().item())
 
     fig, ax = plt.subplots(figsize=(8, 8))
-    ax.set_title("Selected Mask Drift vs Rho")
+    ax.set_title("Ranking Agreement: Spearman(approx, actual) vs Rho")
     ax.set_xlabel("rho")
-    ax.set_ylabel("Mean cosine drift")
+    ax.set_ylabel("Spearman correlation")
+    ax.axhline(0.0, color="gray", linewidth=0.8, linestyle="--")
+    ax.axhline(1.0, color="gray", linewidth=0.8, linestyle=":")
 
-    x_t = torch.tensor(rhos, dtype=torch.float64)
-    y_t = torch.tensor(means, dtype=torch.float64)
-    s_t = torch.tensor(stds, dtype=torch.float64)
+    if bool(valid.any().item()):
+        xv, yv, sv = x[valid], y[valid], s[valid]
+        ax.plot(xv.tolist(), yv.tolist(), marker="o", linewidth=2.0, label="mean Spearman")
+        band = torch.isfinite(sv)
+        if bool(band.any().item()):
+            ax.fill_between(
+                xv[band].tolist(),
+                (yv[band] - sv[band]).tolist(),
+                (yv[band] + sv[band]).tolist(),
+                alpha=0.15,
+            )
 
-    ax.plot(x_t.tolist(), y_t.tolist(), marker="o", linewidth=2.0, label="mean selected drift")
-    mask = torch.isfinite(y_t) & torch.isfinite(s_t)
-    if bool(mask.any().item()):
-        xm = x_t[mask]
-        ym = y_t[mask]
-        sm = s_t[mask]
-        ax.fill_between(xm.tolist(), (ym - sm).tolist(), (ym + sm).tolist(), alpha=0.15)
+    ax.grid(True, alpha=0.2)
+    ax.legend(fontsize="small")
+    label = f"mean={overall:.4f}" if math.isfinite(overall) else "mean=nan"
+    ax.text(0.02, 0.98, label, transform=ax.transAxes, va="top", ha="left")
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_loss_comparison_plot(
+    rhos: list[float],
+    linear_means: list[float],
+    linear_stds: list[float],
+    oracle_means: list[float],
+    oracle_stds: list[float],
+    random_means: list[float],
+    random_stds: list[float],
+    out_path: Path,
+) -> None:
+    """Plot actual reconstruction loss for linearized / oracle / random vs rho.
+
+    Random baseline = mean loss over all candidate masks (no selection).
+    Oracle          = min loss over all candidates (best possible from the pool).
+    Linearized      = loss of the mask chosen by min approx score.
+    """
+    x = torch.tensor(rhos, dtype=torch.float64)
+    curves = [
+        (random_means,  random_stds,  "random (mean)",       "tab:gray"),
+        (linear_means,  linear_stds,  "linearized selection", "tab:blue"),
+        (oracle_means,  oracle_stds,  "oracle (best)",        "tab:green"),
+    ]
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.set_title("Reconstruction Loss: Linearized vs Oracle vs Random")
+    ax.set_xlabel("rho")
+    ax.set_ylabel("1 − cos_sim  (reconstruction loss)")
+
+    for means, stds, label, color in curves:
+        y = torch.tensor(means, dtype=torch.float64)
+        s = torch.tensor(stds, dtype=torch.float64)
+        valid = torch.isfinite(x) & torch.isfinite(y)
+        if not bool(valid.any().item()):
+            continue
+        xv, yv, sv = x[valid], y[valid], s[valid]
+        ax.plot(xv.tolist(), yv.tolist(), marker="o", linewidth=2.0, label=label, color=color)
+        band = torch.isfinite(sv)
+        if bool(band.any().item()):
+            ax.fill_between(
+                xv[band].tolist(),
+                (yv[band] - sv[band]).tolist(),
+                (yv[band] + sv[band]).tolist(),
+                alpha=0.12,
+                color=color,
+            )
 
     ax.grid(True, alpha=0.2)
     ax.legend(fontsize="small")
@@ -200,114 +306,18 @@ def save_selection_loss_plot(
     plt.close(fig)
 
 
-def save_spearman_plot(rhos: list[float], mean_losses: list[float], out_path: Path) -> float:
-    x = torch.tensor(rhos, dtype=torch.float64)
-    y = torch.tensor(mean_losses, dtype=torch.float64)
-    valid = torch.isfinite(x) & torch.isfinite(y)
-
-    rho_val = float("nan")
-    if int(valid.sum().item()) >= 2:
-        rho_val = spearman_torch(x[valid], y[valid])
-
-    fig, ax = plt.subplots(figsize=(8, 8))
-    ax.set_title("Spearman of Rho vs Selected Drift")
-    ax.set_xlabel("rho")
-    ax.set_ylabel("Mean cosine drift")
-    if bool(valid.any().item()):
-        ax.plot(x[valid].tolist(), y[valid].tolist(), marker="o", linewidth=2.0)
-    ax.grid(True, alpha=0.2)
-
-    title = f"spearman={rho_val:.4f}" if math.isfinite(rho_val) else "spearman=nan"
-    ax.text(0.02, 0.98, title, transform=ax.transAxes, va="top", ha="left")
-
-    fig.tight_layout()
-    fig.savefig(out_path, bbox_inches="tight")
-    plt.close(fig)
-    return rho_val
-
-
-def save_label_plots(
-    counts_pred,
-    counts_gold,
-    selection_rates: list[float],
-    chi_square_data: dict,
-    plots_dir: Path,
-    logger,
-) -> None:
-    plots_dir.mkdir(parents=True, exist_ok=True)
-
-    labels = sorted({label for c in counts_gold for label in c.data.keys()})
-    x = torch.tensor(selection_rates, dtype=torch.float64)
-
-    # Plot per-label selection rates across effective rho values.
-    selection_rates_path = plots_dir / "selection_rates.png"
-    fig, ax = plt.subplots(figsize=(8, 8))
-    ax.set_title("Per-label selection rate vs effective rho")
-    ax.set_xlabel("effective rho")
-    ax.set_ylabel("selection rate")
-    for label in labels:
-        ys = []
-        for pred, gold in zip(counts_pred, counts_gold):
-            tot = float(gold.data.get(label, 0))
-            kept = float(pred.data.get(label, 0))
-            ys.append((kept / tot) if tot > 0 else 0.0)
-        ax.plot(x.tolist(), ys, marker="o", linewidth=1.8, label=str(label))
-    ax.grid(True, alpha=0.2)
-    if labels:
-        ax.legend(fontsize="x-small", ncol=2)
-    fig.tight_layout()
-    fig.savefig(selection_rates_path, bbox_inches="tight")
-    plt.close(fig)
-    logger.info("Saved selection rates plot to %s", selection_rates_path)
-
-    # Plot mean chi-square over labels for each effective rho.
-    chi_square_path = plots_dir / "chi_square.png"
-    fig, ax = plt.subplots(figsize=(8, 8))
-    ax.set_title("Mean chi-square vs effective rho")
-    ax.set_xlabel("effective rho")
-    ax.set_ylabel("mean chi-square")
-    chi_means = []
-    rows = chi_square_data.get("rows", []) if isinstance(chi_square_data, dict) else []
-    for row in rows:
-        label_rows = row.get("labels", [])
-        vals = [float(item.get("chi2", 0.0)) for item in label_rows]
-        chi_means.append(sum(vals) / len(vals) if vals else 0.0)
-    if chi_means:
-        ax.plot(x[: len(chi_means)].tolist(), chi_means, marker="o", linewidth=2.0)
-    ax.grid(True, alpha=0.2)
-    fig.tight_layout()
-    fig.savefig(chi_square_path, bbox_inches="tight")
-    plt.close(fig)
-    logger.info("Saved chi-square plot to %s", chi_square_path)
-
-
-# ---------------------------------------------------------------------------------------
-
-
-def evaluate_selected_masks_batched(
-    ids_b: torch.Tensor,
-    full_rep_b: torch.Tensor,
-    encoder,
-    selected_masks: torch.Tensor,
-) -> torch.Tensor:
-    # ids_b: [B, L], selected_masks: [B, R, L] -> losses: [B, R]
-    if selected_masks.numel() == 0:
-        return torch.empty(0, device=ids_b.device, dtype=full_rep_b.dtype)
-
-    bsz, n_rhos, seq_len = selected_masks.shape
-    with torch.inference_mode():
-        ids_rep = ids_b.unsqueeze(1).expand(bsz, n_rhos, seq_len).reshape(bsz * n_rhos, seq_len)
-        eff_attn = selected_masks.reshape(bsz * n_rhos, seq_len)
-        tok = encoder.token_embeddings(ids_rep, eff_attn)
-        pred = encoder.pool(tok, eff_attn)
-        full_rep_rep = full_rep_b.unsqueeze(1).expand(bsz, n_rhos, full_rep_b.size(-1)).reshape(bsz * n_rhos, -1)
-        losses = 1.0 - F.cosine_similarity(pred, full_rep_rep, dim=-1)
-    return losses.view(bsz, n_rhos)
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Exploratory linearized mask utility: score random masks from one baseline forward pass, then measure the real drift of the selected mask."
+        description=(
+            "Linearized mask analysis: "
+            "(1) Spearman between approx and actual mask rankings per rho, "
+            "(2) reconstruction-loss comparison of linearized / oracle / random selection."
+        )
     )
     parser.add_argument("--dataset", type=str, default=None)
     parser.add_argument("--subset", type=float, default=None)
@@ -317,13 +327,15 @@ def main() -> None:
     parser.add_argument("--encoder-name", type=str, default=None)
     parser.add_argument("--keep-special", action="store_true")
     parser.add_argument("--drop-special", action="store_true")
-    parser.add_argument("--max-masks-per-sentence", type=int, default=None, help="Random masks tested per sentence/rho.")
-    parser.add_argument("--seed", type=int, default=None, help="Random seed for random mask fallback.")
-    parser.add_argument("--jacobian-vectorize", action="store_true", help="Use vectorized Jacobian (faster but less interrupt-friendly).")
+    parser.add_argument("--max-masks-per-sentence", type=int, default=None,
+                        help="Candidate masks per sentence/rho (default 64; more = better Spearman but slower).")
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--jacobian-vectorize", action="store_true",
+                        help="Use vectorized Jacobian (faster but less interrupt-friendly).")
     parser.add_argument(
         "overrides",
         nargs="*",
-        help="Optional OmegaConf dotlist overrides, e.g. data.dataset=wikiann runtime.data.batch_size=64",
+        help="Optional OmegaConf dotlist overrides, e.g. data.dataset=wikiann",
     )
     args = parser.parse_args()
 
@@ -356,7 +368,7 @@ def main() -> None:
     cfg = load_cfg(override_list)
 
     logger = get_logger(logfile="linearize.log")
-    logger.info("Exploratory linearized mask utility run (no Dora experiment)")
+    logger.info("Linearized mask analysis run")
     logger.info(repr(cfg))
     logger.info("Work dir: %s", Path.cwd())
 
@@ -371,7 +383,7 @@ def main() -> None:
         device=cfg.runtime.device,
         keep_special=bool(cfg.model.get("keep_special", True)),
     )
-    del train_dl, tokenizer, ds
+    del train_dl, tokenizer, labels_set, ds
 
     device = torch.device(cfg.runtime.device)
     encoder = encoder.to(device)
@@ -379,219 +391,170 @@ def main() -> None:
 
     rhos = linspace_rhos(cfg)
     n_rhos = len(rhos)
-    real_sum = torch.zeros(n_rhos, dtype=torch.float64)
-    real_sumsq = torch.zeros(n_rhos, dtype=torch.float64)
-    real_count = torch.zeros(n_rhos, dtype=torch.float64)
-    approx_sum = torch.zeros(n_rhos, dtype=torch.float64)
-    rho_eff_sum = torch.zeros(n_rhos, dtype=torch.float64)
-
-    counts_pred = [Counts(labels=labels_set) for _ in rhos] if labels_set is not None else None
-    counts_gold = [Counts(labels=labels_set) for _ in rhos] if labels_set is not None else None
+    rho_idx = torch.arange(n_rhos, device=device)
+    rhos_t = torch.tensor(rhos, device=device, dtype=torch.float32)
 
     exclude_special = bool(cfg.linearize.get("exclude_special", True))
-    max_masks_per_sentence = max(1, int(cfg.linearize.get("max_masks_per_sentence", 4096)))
+    max_masks_per_sentence = max(1, int(cfg.linearize.get("max_masks_per_sentence", 64)))
     seed = int(cfg.linearize.get("seed", 1234))
     jacobian_vectorize = bool(cfg.linearize.get("jacobian_vectorize", False))
-    rhos_t = torch.tensor(rhos, device=device, dtype=torch.float32)
-    rho_idx = torch.arange(n_rhos, device=device)
+    eval_chunk = int(cfg.linearize.get("eval_chunk", 256))
 
-    evaluated = 0
+    # Per-rho accumulators ------------------------------------------------
+    # Task 1: Spearman between approx and actual rankings
+    spearman_sum   = torch.zeros(n_rhos, dtype=torch.float64)
+    spearman_sq    = torch.zeros(n_rhos, dtype=torch.float64)
+    spearman_n     = torch.zeros(n_rhos, dtype=torch.float64)
 
-    def _safe_name(value: object) -> str:
-        return str(value).replace("/", "_").replace(" ", "_")
+    # Task 2: reconstruction loss (actual) for each selection strategy
+    linear_sum     = torch.zeros(n_rhos, dtype=torch.float64)
+    linear_sumsq   = torch.zeros(n_rhos, dtype=torch.float64)
+    oracle_sum     = torch.zeros(n_rhos, dtype=torch.float64)
+    oracle_sumsq   = torch.zeros(n_rhos, dtype=torch.float64)
+    random_sum     = torch.zeros(n_rhos, dtype=torch.float64)
+    random_sumsq   = torch.zeros(n_rhos, dtype=torch.float64)
+    count          = torch.zeros(n_rhos, dtype=torch.float64)
+    # ---------------------------------------------------------------------
 
-    plots_root = Path(str(cfg.linearize.get("plots_dir", "outputs/utils/linearize")))
+    plots_root = Path(str(cfg.linearize.get("plots_dir", "outputs/linearize")))
     if not plots_root.is_absolute():
         plots_root = Path.cwd() / plots_root
-    run_dir = plots_root / "__".join(
-        [
-            _safe_name(cfg.data.dataset),
-            _safe_name(cfg.data.encoder.family),
-            _safe_name(cfg.data.encoder.name or "default"),
-            f"seed={seed}",
-        ]
-    )
-    run_dir.mkdir(parents=True, exist_ok=True)
-    logger.info("Artifacts will be written to %s", run_dir)
+    plots_root.mkdir(parents=True, exist_ok=True)
+    logger.info("Artifacts will be written to %s", plots_root)
 
+    evaluated = 0
     pbar = tqdm(test_dl, desc="Dataset batches", dynamic_ncols=True, unit="batch", position=0)
 
     for batch in pbar:
-        ids_b = batch["ids"].to(device)
+        ids_b  = batch["ids"].to(device)
         attn_b = batch["attn_mask"].to(device)
-        labels_b = batch.get("labels", None)
 
-        bs = ids_b.size(0)
-
-        seq_len = int(ids_b.size(1))
         attn_f_b = attn_b.float()
         with torch.inference_mode():
             full_token_emb_b = encoder.token_embeddings(ids_b, attn_b)
-            full_rep_b = encoder.pool(full_token_emb_b, attn_f_b)
+            full_rep_b       = encoder.pool(full_token_emb_b, attn_f_b)
 
         valid_start, valid_end_b, n_valid_b = compute_valid_span(attn_b, exclude_special)
         valid_sentence_mask = n_valid_b > 0
         if not bool(valid_sentence_mask.any().item()):
             continue
 
-        k_br = torch.round(n_valid_b.to(torch.float32).unsqueeze(1) * rhos_t.unsqueeze(0)).to(torch.long)
+        k_br = torch.round(n_valid_b.float().unsqueeze(1) * rhos_t.unsqueeze(0)).long()
         k_br = torch.minimum(k_br, n_valid_b.unsqueeze(1))
-        k_br = torch.where(n_valid_b.unsqueeze(1) > 0, torch.clamp(k_br, min=1), torch.zeros_like(k_br))
-        selected_masks = torch.zeros((bs, n_rhos, seq_len), device=device, dtype=attn_f_b.dtype)
+        k_br = torch.where(n_valid_b.unsqueeze(1) > 0, k_br.clamp(min=1), torch.zeros_like(k_br))
 
         valid_idx = torch.nonzero(valid_sentence_mask, as_tuple=False).squeeze(1)
+
         for bi in valid_idx.tolist():
-            ids_i = ids_b[bi : bi + 1]
-            attn_i = attn_b[bi]
+            ids_i      = ids_b[bi: bi + 1]
+            attn_i     = attn_b[bi]
+            full_rep_i = full_rep_b[bi]
 
             _, orth_component = compute_sentence_linearization_basis(
-                ids_i,
-                attn_i,
-                encoder,
-                vectorize_jacobian=jacobian_vectorize,
+                ids_i, attn_i, encoder, vectorize_jacobian=jacobian_vectorize,
             )
 
             attn_i_float = attn_i.float()
-            valid_end_i = int(valid_end_b[bi].item())
-            k_r = k_br[bi]
-            candidate_masks_rm = build_random_candidate_masks_per_rho(
-                attn_i_float,
-                valid_start,
-                valid_end_i,
-                k_r,
-                max_masks_per_sentence,
-                seed + evaluated * 1000 + bi,
-            )
+            valid_end_i  = int(valid_end_b[bi].item())
+            k_r          = k_br[bi]
 
+            candidate_masks_rm = build_random_candidate_masks_per_rho(
+                attn_i_float, valid_start, valid_end_i, k_r,
+                max_masks_per_sentence, seed + evaluated * 1000 + bi,
+            )
             if candidate_masks_rm.numel() == 0:
                 continue
 
-            delta = candidate_masks_rm.to(dtype=torch.float32) - attn_i_float.view(1, 1, -1)
-            approx_delta = delta @ orth_component.T  # [n_rhos, max_masks, d]
+            # Linearized (approx) scores [n_rhos, max_masks]
+            delta         = candidate_masks_rm.float() - attn_i_float.view(1, 1, -1)
+            approx_delta  = delta @ orth_component.T
             approx_scores = torch.linalg.vector_norm(approx_delta, dim=2)
-            best_idx = torch.argmin(approx_scores, dim=1)
 
-            selected_masks[bi] = candidate_masks_rm[rho_idx, best_idx]
+            # Actual reconstruction losses for ALL candidates [n_rhos, max_masks]
+            actual_losses = compute_all_candidate_losses(
+                ids_i, full_rep_i, encoder, candidate_masks_rm, chunk=eval_chunk,
+            )  # float64, on device
 
-            best_approx = approx_scores[rho_idx, best_idx].to(torch.float64).cpu()
-            approx_sum += best_approx
+            # Task 2: per-strategy losses
+            best_approx_idx = torch.argmin(approx_scores, dim=1)          # [n_rhos]
+            linear_losses   = actual_losses[rho_idx, best_approx_idx]     # [n_rhos] actual loss of linearized pick
+            oracle_losses   = actual_losses.min(dim=1).values              # [n_rhos] best achievable from pool
+            random_losses   = actual_losses.mean(dim=1)                    # [n_rhos] expected loss of a random pick
 
-        selected_masks = selected_masks * valid_sentence_mask.view(bs, 1, 1).to(attn_f_b.dtype)
+            linear_cpu = linear_losses.cpu()
+            oracle_cpu = oracle_losses.cpu()
+            random_cpu = random_losses.cpu()
 
-        selected_real_losses = evaluate_selected_masks_batched(
-            ids_b,
-            full_rep_b,
-            encoder,
-            selected_masks,
-        )
+            linear_sum   += linear_cpu;  linear_sumsq  += linear_cpu.square()
+            oracle_sum   += oracle_cpu;  oracle_sumsq  += oracle_cpu.square()
+            random_sum   += random_cpu;  random_sumsq  += random_cpu.square()
+            count        += 1.0
 
-        selected_valid = selected_masks[valid_idx]
-        losses_valid = selected_real_losses[valid_idx]
-        L_eff_valid = attn_b[valid_idx].sum(dim=1).to(torch.float32).clamp(min=1.0)
-
-        losses_valid_cpu = losses_valid.to(torch.float64).cpu()
-        real_sum += losses_valid_cpu.sum(dim=0)
-        real_sumsq += losses_valid_cpu.square().sum(dim=0)
-        real_count += float(losses_valid_cpu.size(0))
-
-        rho_eff_batch = (selected_valid.sum(dim=2).to(torch.float32) / L_eff_valid.unsqueeze(1)).sum(dim=0)
-        rho_eff_sum += rho_eff_batch.to(torch.float64).cpu()
-
-        if counts_pred is not None and counts_gold is not None and labels_b is not None:
-            for bi in valid_idx.tolist():
-                labels_i = labels_b[bi]
-                flat_attn = attn_b[bi].bool().cpu()
-                gold_counts_i = Counts(labels_i, flat_attn)
-                for ridx in range(n_rhos):
-                    flat_preds = selected_masks[bi, ridx].bool().cpu()
-                    counts_pred[ridx] += Counts(labels_i, flat_attn, flat_preds)
-                    counts_gold[ridx] += gold_counts_i
+            # Task 1: Spearman(approx_ranking, actual_ranking) per rho
+            for r in range(n_rhos):
+                rho_sp = spearman_torch(
+                    approx_scores[r].to(torch.float64).cpu(),
+                    actual_losses[r].cpu(),
+                )
+                if math.isfinite(rho_sp):
+                    spearman_sum[r] += rho_sp
+                    spearman_sq[r]  += rho_sp * rho_sp
+                    spearman_n[r]   += 1.0
 
         evaluated += int(valid_sentence_mask.sum().item())
 
     if evaluated == 0:
-        raise RuntimeError(
-            "No samples evaluated. Try lowering max_length/subset, or increase --max-masks-per-sentence."
-        )
+        raise RuntimeError("No samples evaluated. Try increasing --subset or --max-masks-per-sentence.")
 
-    selection_rates = (rho_eff_sum / float(evaluated)).tolist()
+    def _mean_std(s, ssq, n):
+        mean = torch.where(n > 0, s / n, torch.full_like(s, float("nan")))
+        var  = torch.where(n > 0, ssq / n - mean.square(), torch.full_like(s, float("nan")))
+        std  = torch.sqrt(torch.clamp(var, min=0.0))
+        return mean.tolist(), std.tolist()
 
-    mean_losses_t = torch.where(real_count > 0, real_sum / real_count, torch.full_like(real_sum, float("nan")))
-    var_losses_t = torch.where(
-        real_count > 0,
-        real_sumsq / real_count - mean_losses_t.square(),
-        torch.full_like(real_sum, float("nan")),
+    spearman_means, spearman_stds = _mean_std(spearman_sum, spearman_sq,   spearman_n)
+    linear_means,   linear_stds   = _mean_std(linear_sum,   linear_sumsq,  count)
+    oracle_means,   oracle_stds   = _mean_std(oracle_sum,   oracle_sumsq,  count)
+    random_means,   random_stds   = _mean_std(random_sum,   random_sumsq,  count)
+
+    # Plot 1: Spearman ranking agreement vs rho
+    spearman_path = plots_root / "spearman_ranking_vs_rho.png"
+    save_spearman_ranking_plot(rhos, spearman_means, spearman_stds, spearman_path)
+    logger.info("Saved Spearman ranking plot to %s", spearman_path)
+
+    # Plot 2: loss comparison vs rho
+    comparison_path = plots_root / "loss_comparison_vs_rho.png"
+    save_loss_comparison_plot(
+        rhos,
+        linear_means, linear_stds,
+        oracle_means,  oracle_stds,
+        random_means,  random_stds,
+        comparison_path,
     )
-    std_losses_t = torch.sqrt(torch.clamp(var_losses_t, min=0.0))
+    logger.info("Saved loss comparison plot to %s", comparison_path)
 
-    mean_losses = mean_losses_t.tolist()
-    std_losses = std_losses_t.tolist()
-
-    loss_path = run_dir / "selected_mask_drift.png"
-    save_selection_loss_plot(rhos, mean_losses, std_losses, loss_path)
-    logger.info("Saved selection loss plot to %s", loss_path)
-
-    spearman_path = run_dir / "spearman_vs_rho.png"
-    rho_s = save_spearman_plot(rhos, mean_losses, spearman_path)
-    logger.info("Saved Spearman plot to %s (rho=%.4f)", spearman_path, rho_s)
-
-    finite_mean = mean_losses_t[torch.isfinite(mean_losses_t)]
-    eval_loss = float(finite_mean.mean().item()) if int(finite_mean.numel()) > 0 else float("nan")
-
-    approx_means_t = approx_sum / evaluated if evaluated > 0 else torch.full_like(approx_sum, float("nan"))
-    approx_means = approx_means_t.tolist()
-
+    # Summary JSON
     summary = {
-        "dataset": str(cfg.data.dataset),
-        "encoder_family": str(cfg.data.encoder.family),
-        "encoder_name": None if cfg.data.encoder.name in {None, "None", "null", "NULL"} else str(cfg.data.encoder.name),
-        "subset": float(cfg.data.subset),
-        "seed": int(seed),
+        "dataset":                str(cfg.data.dataset),
+        "encoder_family":         str(cfg.data.encoder.family),
+        "encoder_name":           (
+            None if cfg.data.encoder.name in {None, "None", "null", "NULL"}
+            else str(cfg.data.encoder.name)
+        ),
+        "subset":                 float(cfg.data.subset),
+        "seed":                   int(seed),
         "max_masks_per_sentence": int(max_masks_per_sentence),
-        "exclude_special": bool(exclude_special),
-        "evaluated_sentences": int(evaluated),
-        "selection_rates": [float(rate) for rate in selection_rates],
-        "eval_loss": float(eval_loss),
-        "eval_loss_by_rho": {f"{rho:.6f}": float(loss) for rho, loss in zip(rhos, mean_losses)},
-        "eval_loss_std_by_rho": {f"{rho:.6f}": float(std) for rho, std in zip(rhos, std_losses)},
-        "linearized_loss_by_rho": {f"{rho:.6f}": float(loss) for rho, loss in zip(rhos, approx_means)},
-        "loss_gap_by_rho": {
-            f"{rho:.6f}": (float(loss) - float(approx)) if math.isfinite(loss) and math.isfinite(approx) else float("nan")
-            for rho, loss, approx in zip(rhos, mean_losses, approx_means)
-        },
-        "spearman_rho_vs_loss": float(rho_s),
-        "artifacts_dir": str(run_dir),
+        "exclude_special":        bool(exclude_special),
+        "evaluated_sentences":    int(evaluated),
+        "spearman_ranking_by_rho":     {f"{rho:.6f}": float(m) for rho, m in zip(rhos, spearman_means)},
+        "spearman_ranking_std_by_rho": {f"{rho:.6f}": float(s) for rho, s in zip(rhos, spearman_stds)},
+        "linear_loss_by_rho":    {f"{rho:.6f}": float(m) for rho, m in zip(rhos, linear_means)},
+        "oracle_loss_by_rho":    {f"{rho:.6f}": float(m) for rho, m in zip(rhos, oracle_means)},
+        "random_loss_by_rho":    {f"{rho:.6f}": float(m) for rho, m in zip(rhos, random_means)},
     }
-
-    summary_path = run_dir / "summary.json"
+    summary_path = plots_root / "summary.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     logger.info("Saved summary to %s", summary_path)
-
-    if counts_pred is not None and counts_gold is not None:
-        selections_path = run_dir / "selections.json"
-        selections_data = {
-            "selection_rates": [float(r) for r in selection_rates],
-            "selections_by_rho": [
-                {
-                    "rho": float(rate),
-                    "pred_counts": dict(pred.data),
-                    "gold_counts": dict(gold.data),
-                }
-                for rate, pred, gold in zip(selection_rates, counts_pred, counts_gold)
-            ],
-        }
-        selections_path.write_text(json.dumps(selections_data, indent=2), encoding="utf-8")
-        logger.info("Saved selection counts to %s", selections_path)
-
-        chi_square_path = run_dir / "chi_square.json"
-        chi_square_data = build_chi_square_payload(counts_pred, counts_gold, selection_rates)
-        chi_square_path.write_text(json.dumps(chi_square_data, indent=2), encoding="utf-8")
-        logger.info("Saved chi-square data to %s", chi_square_path)
-
-        logger.info("Configured rho grid: %s", ", ".join(f"{rho:.3f}" for rho in rhos))
-        logger.info("Effective selected-token rates: %s", ", ".join(f"{rate:.3f}" for rate in selection_rates))
-        save_label_plots(counts_pred, counts_gold, selection_rates, chi_square_data, run_dir, logger)
-
     logger.info("Evaluated samples: %d", evaluated)
     logger.info("Done.")
 

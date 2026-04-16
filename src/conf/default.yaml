@@ -2,10 +2,10 @@ defaults:
   - _self_
 
 model:
-  keep_special: true
+  keep_special: false
   selector:
-    condition_on_rho: true
-    use_hard: true
+    condition_on_rho: false
+    use_hard: false
     tau_rank: 0.05
     gamma_rank: 2.0
     tau_gate: 0.2
@@ -20,7 +20,7 @@ model:
 data:
   shuffle: false
   max_length: 512
-  dataset: "mr"
+  dataset: "wikiann"
   config: null
   subset: 1.0
   encoder:

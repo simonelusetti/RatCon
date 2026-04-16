@@ -1,9 +1,21 @@
 baseline:
   - "runtime.grid=true"
-  - "runtime.data.batch_size=256"
-  - "runtime.bf16=true"
-  - "data.dataset=wikiann"
-  - "train.continue=true"
 sweep:
-  - ["model.selector.use_hard=false","model.selector.condition_on_rho=false","run=1"]
-  - ["model.selector.use_hard=false","model.selector.condition_on_rho=false","run=2"]
+  #- ["data.dataset=conll03"]
+  #- ["data.dataset=conll03","run=1"]
+  #- ["data.dataset=conll03","run=2"]
+  #- ["data.dataset=conll00"]
+  - ["data.dataset=conll00","run=1", "train.continue=true"]
+  - ["data.dataset=conll00","run=2", "train.continue=true"]
+  - ["data.dataset=twitter"]
+  - ["data.dataset=twitter","run=1"]
+  - ["data.dataset=twitter","run=2"]
+#  - ["data.encoder.family=llm"]
+#  - ["data.encoder.family=llm", "run=1"]
+#  - ["data.encoder.family=llm", "run=2"]
+#  - ["data.encoder.family=e5"]
+#  - ["data.encoder.family=e5", "run=1"]
+#  - ["data.encoder.family=e5", "run=2"]
+#  - ["data.encoder.family=bge"]
+#  - ["data.encoder.family=bge", "run=1"]
+#  - ["data.encoder.family=bge", "run=2"]

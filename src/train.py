@@ -16,7 +16,7 @@ from numpy import linspace
 from .metrics import Counts
 from .sentence import SentenceEncoder
 from .selector import RationaleSelectorModel
-from .data import PAD_TAG, SPECIAL_TAG, initialize_data
+from .data import SPECIAL_TAG, initialize_data
 from .eval import save_eval_artifacts
 from .utils import (
     get_logger,
@@ -307,6 +307,14 @@ class SelectorTrainer:
                 labels = batch["labels"]
                 flat_labels = [label for seq in labels for label in seq]
                 flat_attn = attn.bool().view(-1).cpu()
+
+                word_ids = batch.get("word_ids")
+                if word_ids is not None:
+                    flat_word_ids = word_ids.view(-1).cpu().tolist()
+                    flat_labels = [
+                        SPECIAL_TAG if (is_att and wid < 0 and lbl == "-100") else lbl
+                        for lbl, is_att, wid in zip(flat_labels, flat_attn.tolist(), flat_word_ids)
+                    ]
 
                 for i, g_i in enumerate(g_masks):
                     flat_preds = g_i.cpu().view(-1)

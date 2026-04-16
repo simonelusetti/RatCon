@@ -52,7 +52,18 @@ def resolve_tokenizer_group(family: str) -> str:
 
 def resolve_tokenizer(family: str) -> AutoTokenizer:
     group = resolve_tokenizer_group(family)
-    return AutoTokenizer.from_pretrained(CANONICAL_TOKENIZERS[group], use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(CANONICAL_TOKENIZERS[group], use_fast=True)
+
+    if tokenizer.pad_token is None:
+        fallback = tokenizer.eos_token or tokenizer.bos_token or tokenizer.unk_token
+        if fallback is None:
+            raise ValueError(
+                f"Tokenizer {tokenizer.name_or_path} has no pad/eos/bos/unk token available for padding."
+            )
+        tokenizer.pad_token = fallback
+
+    tokenizer.padding_side = "right"
+    return tokenizer
 
 
 # -----------------------------------------------------------------------------

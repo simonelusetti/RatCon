@@ -41,6 +41,28 @@ _METRIC_TO_PLOT_PATH = {
     "spearman": _DEFAULT_SPEARMAN_PLOT_PATH,
 }
 
+
+def _legend_in_right_panel(
+    ax,
+    fontsize: float = 7,
+    ncol: int = 1,
+    width_ratio: float = 0.72,
+) -> None:
+    handles, labels = ax.get_legend_handles_labels()
+    if not handles:
+        return
+    pos = ax.get_position()
+    ax.set_position([pos.x0, pos.y0, pos.width * width_ratio, pos.height])
+    ax.legend(
+        handles,
+        labels,
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        borderaxespad=0.0,
+        fontsize=fontsize,
+        ncol=ncol,
+    )
+
 def _plot_metric_from_artifact(metric_name: str, ylabel: str) -> Path:
     data_path = _METRIC_TO_DATA_PATH[metric_name]
     out_path = _METRIC_TO_PLOT_PATH[metric_name]
@@ -80,10 +102,10 @@ def _plot_metric_from_artifact(metric_name: str, ylabel: str) -> Path:
     ax.set_xlabel("Selection rate (rho)")
     ax.set_ylabel(ylabel)
     ax.grid(True, linestyle=":")
-    ax.legend()
+    ax.legend(fontsize=8)
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=300)
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
     return out_path
 
@@ -214,9 +236,10 @@ def plot_with_band(
         ax.fill_between(xb, yb - sb, yb + sb, alpha=alpha, color=line.get_color())
 
 
-def _build_overview_figure(n_groups: int, ncols: int, width: float = 5.2, height: float = 4.2):
+def _build_overview_figure(n_groups: int, ncols: int, width: float = 5.8, height: float = 4.6):
     nrows = max(1, math.ceil(n_groups / ncols))
     fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * width, nrows * height))
+    fig.subplots_adjust(wspace=35, hspace=5)
     return fig, np.asarray(axes).reshape(-1)
 
 
@@ -232,7 +255,7 @@ def _setup_overview_axis(ax, label: str, n_runs: int, xlabel: str, ylabel: str, 
 def _finalize_overview_figure(fig, axes: np.ndarray, n_groups: int, out_path: Path, dpi: int = 180) -> None:
     for ax in axes[n_groups:]:
         ax.set_visible(False)
-    fig.tight_layout()
+    fig.tight_layout(pad=1.1, w_pad=2.2, h_pad=2.2)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
@@ -329,12 +352,12 @@ def plot_loss_overview(groups: Sequence[Any], out_path: Path, ncols: int) -> Non
 
     n = len(groups)
     nrows = max(1, math.ceil(n / ncols))
-    fig = plt.figure(figsize=(ncols * 5.2, nrows * 8.0))
-    outer_gs = fig.add_gridspec(nrows, ncols, hspace=0.5, wspace=0.35)
+    fig = plt.figure(figsize=(ncols * 6.0, nrows * 8.8))
+    outer_gs = fig.add_gridspec(nrows, ncols, hspace=0.7, wspace=0.5)
 
     for i, group in enumerate(groups):
         row, col = divmod(i, ncols)
-        inner_gs = GridSpecFromSubplotSpec(2, 1, subplot_spec=outer_gs[row, col], hspace=0.35)
+        inner_gs = GridSpecFromSubplotSpec(2, 1, subplot_spec=outer_gs[row, col], hspace=0.45)
         train_ax = fig.add_subplot(inner_gs[0])
         eval_ax = fig.add_subplot(inner_gs[1])
         loaded_histories = [_load_loss_histories_for_run(run.sig_dir) for run in group.runs]
@@ -397,7 +420,7 @@ def plot_spearman_overview(groups: Sequence[Any], out_path: Path, ncols: int) ->
 
 def plot_chi_square_overview(groups: Sequence[Any], out_path: Path, ncols: int, metric: str) -> None:
     ylabel = "-log10(p)" if metric == "chi_square" else "Cramer's V"
-    fig, axes = _build_overview_figure(len(groups), ncols)
+    fig, axes = _build_overview_figure(len(groups), ncols, width=7.2)
 
     for ax, group in zip(axes, groups):
         _setup_overview_axis(ax, group.label, len(group.runs), "selection rate", ylabel)
@@ -433,15 +456,13 @@ def plot_chi_square_overview(groups: Sequence[Any], out_path: Path, ncols: int, 
 
         if baselines:
             ax.axhline(float(np.mean(baselines)), linestyle="--", linewidth=1.5, color="0.35", label="p=0.05")
-        handles, _ = ax.get_legend_handles_labels()
-        if handles:
-            ax.legend(fontsize=7)
+        _legend_in_right_panel(ax, fontsize=6)
 
     _finalize_overview_figure(fig, axes, len(groups), out_path)
 
 
 def plot_selection_rates_overview(groups: Sequence[Any], out_path: Path, ncols: int) -> None:
-    fig, axes = _build_overview_figure(len(groups), ncols)
+    fig, axes = _build_overview_figure(len(groups), ncols, width=7.2)
 
     for ax, group in zip(axes, groups):
         _setup_overview_axis(ax, group.label, len(group.runs), "effective selection rate (rho)", "selection rate", ylim=(0.0, 1.05))
@@ -473,9 +494,7 @@ def plot_selection_rates_overview(groups: Sequence[Any], out_path: Path, ncols: 
         if show_identity_baseline:
             ax.plot(x_ref, x_ref, linestyle="--", linewidth=1.5, color="0.35", label="baseline (y=x)")
         _plot_group_label_curves(ax, x_ref, per_label_runs)
-        handles, _ = ax.get_legend_handles_labels()
-        if handles:
-            ax.legend(fontsize=7)
+        _legend_in_right_panel(ax, fontsize=6)
 
     _finalize_overview_figure(fig, axes, len(groups), out_path)
 

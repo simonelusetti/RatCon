@@ -39,7 +39,7 @@ def main() -> None:
     parser.add_argument("--ncols", type=int, default=4, help="Grid columns for overview figures.")
     parser.add_argument("--output-dir", type=Path, default=None, help="Custom output directory.")
     parser.add_argument(
-        "--min-group-runs",
+        "--min-runs",
         type=int,
         default=1,
         help="Keep only groups with at least this many runs (after Dora excludes and run key filtering).",
@@ -47,14 +47,14 @@ def main() -> None:
     parser.add_argument(
         "--only-multi-run-groups",
         action="store_true",
-        help="Convenience flag for --min-group-runs=2.",
+        help="Convenience flag for --min-runs=2.",
     )
     args = parser.parse_args()
 
-    if args.min_group_runs < 1:
-        raise ValueError("--min-group-runs must be >= 1")
+    if args.min_runs < 1:
+        raise ValueError("--min-runs must be >= 1")
 
-    min_group_runs = max(args.min_group_runs, 2) if args.only_multi_run_groups else args.min_group_runs
+    min_group_runs = max(args.min_runs, 2) if args.only_multi_run_groups else args.min_runs
 
     if args.sigs:
         sig_dirs = [XPS_DIR / sig for sig in args.sigs]

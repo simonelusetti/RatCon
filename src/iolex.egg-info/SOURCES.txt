@@ -1,0 +1,7 @@
+setup.cfg
+setup.py
+src/iolex.egg-info/PKG-INFO
+src/iolex.egg-info/SOURCES.txt
+src/iolex.egg-info/dependency_links.txt
+src/iolex.egg-info/requires.txt
+src/iolex.egg-info/top_level.txt

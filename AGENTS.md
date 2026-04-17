@@ -1,4 +1,4 @@
-# RatCon Project Guidelines
+# Iolex Project Guidelines
 
 ## Agent Usage
 - Use the architectural expert for project-wide understanding, minimal-change planning, and cross-file design.

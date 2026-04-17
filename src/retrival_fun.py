@@ -301,7 +301,7 @@ def eval_random_sweep(loader, encoder, tokenizer, eval_cfg, device, keep_special
 
 @torch.no_grad()
 def run_stsb_sweep(cfg, device, encoder, tokenizer, selector):
-    hf_ds = load_dataset("glue", "stsb", split=cfg.runtime.eval.split)
+    hf_ds = load_dataset("glue", "stsb", "validation")
     ds = STSBDataset(hf_ds)
 
     collate_fn = build_stsb_collate(

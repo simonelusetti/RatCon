@@ -14,6 +14,7 @@ _DEFAULT_SELECTION_RATE_CURVES_PATH = Path("data") / "selection_rate_curves.json
 _DEFAULT_CHI_SQUARE_CURVES_PATH = Path("data") / "chi_square_curves.json"
 _DEFAULT_CRAMERS_V_CURVES_PATH = Path("data") / "cramers_v_curves.json"
 _DEFAULT_SPEARMAN_CURVES_PATH = Path("data") / "spearman_curves.json"
+_DEFAULT_NLI_SPEARMAN_CURVES_PATH = Path("data") / "nli_spearman_curves.json"
 
 
 def _label_sort_key(label: Any) -> tuple[int, Any]:
@@ -360,10 +361,12 @@ def save_eval_artifacts(
     counts_gold: Sequence[Any] | None,
     rhos: Sequence[float] | None,
     stsb: Mapping[str, Any] | None,
+    nli: Mapping[str, Any] | None = None,
     selection_rate_out_path: str | Path = _DEFAULT_SELECTION_RATE_CURVES_PATH,
     chi_square_out_path: str | Path = _DEFAULT_CHI_SQUARE_CURVES_PATH,
     cramers_v_out_path: str | Path = _DEFAULT_CRAMERS_V_CURVES_PATH,
     spearman_out_path: str | Path = _DEFAULT_SPEARMAN_CURVES_PATH,
+    nli_spearman_out_path: str | Path = _DEFAULT_NLI_SPEARMAN_CURVES_PATH,
 ) -> dict[str, Path]:
     selections = _build_selections_payload(counts_pred, counts_gold, rhos)
     chi_square = _build_chi_square_payload(counts_pred, counts_gold, rhos)
@@ -372,20 +375,24 @@ def save_eval_artifacts(
     chi_square_payload = _build_chi_square_curves_payload(chi_square)
     cramers_v_payload = _build_cramers_v_curves_payload(chi_square)
     spearman_payload = _build_spearman_curves_payload(stsb)
+    nli_spearman_payload = _build_spearman_curves_payload(nli)
 
     selection_rate_path = Path(selection_rate_out_path)
     chi_square_path = Path(chi_square_out_path)
     cramers_v_path = Path(cramers_v_out_path)
     spearman_path = Path(spearman_out_path)
+    nli_spearman_path = Path(nli_spearman_out_path)
 
     _write_json(selection_rate_path, selection_rate_payload)
     _write_json(chi_square_path, chi_square_payload)
     _write_json(cramers_v_path, cramers_v_payload)
     _write_json(spearman_path, spearman_payload)
+    _write_json(nli_spearman_path, nli_spearman_payload)
 
     return {
         "selection_rate": selection_rate_path,
         "chi_square": chi_square_path,
         "cramers_v": cramers_v_path,
         "spearman": spearman_path,
+        "nli_spearman": nli_spearman_path,
     }

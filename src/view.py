@@ -16,6 +16,8 @@ _DEFAULT_CHI_SQUARE_CURVES_PATH = Path("data") / "chi_square_curves.json"
 _DEFAULT_CRAMERS_V_CURVES_PATH = Path("data") / "cramers_v_curves.json"
 _DEFAULT_SPEARMAN_CURVES_PATH = Path("data") / "spearman_curves.json"
 _DEFAULT_SPEARMAN_PLOT_PATH = Path("plots") / "spearman_vs_rho.png"
+_DEFAULT_NLI_SPEARMAN_CURVES_PATH = Path("data") / "nli_spearman_curves.json"
+_DEFAULT_NLI_SPEARMAN_PLOT_PATH = Path("plots") / "nli_spearman_vs_rho.png"
 _DEFAULT_SELECTION_RATE_PLOT_PATH = Path("plots") / "selection_rate_vs_rho.png"
 _DEFAULT_CHI_SQUARE_PLOT_PATH = Path("plots") / "chi_square_vs_rho.png"
 _DEFAULT_CRAMERS_V_PLOT_PATH = Path("plots") / "cramers_v_vs_rho.png"
@@ -25,6 +27,7 @@ _METRIC_TO_FILENAME = {
     "chi_square": "chi_square_curves.json",
     "cramers_v": "cramers_v_curves.json",
     "spearman": "spearman_curves.json",
+    "nli_spearman": "nli_spearman_curves.json",
 }
 
 _METRIC_TO_DATA_PATH = {
@@ -32,6 +35,7 @@ _METRIC_TO_DATA_PATH = {
     "chi_square": _DEFAULT_CHI_SQUARE_CURVES_PATH,
     "cramers_v": _DEFAULT_CRAMERS_V_CURVES_PATH,
     "spearman": _DEFAULT_SPEARMAN_CURVES_PATH,
+    "nli_spearman": _DEFAULT_NLI_SPEARMAN_CURVES_PATH,
 }
 
 _METRIC_TO_PLOT_PATH = {
@@ -39,6 +43,7 @@ _METRIC_TO_PLOT_PATH = {
     "chi_square": _DEFAULT_CHI_SQUARE_PLOT_PATH,
     "cramers_v": _DEFAULT_CRAMERS_V_PLOT_PATH,
     "spearman": _DEFAULT_SPEARMAN_PLOT_PATH,
+    "nli_spearman": _DEFAULT_NLI_SPEARMAN_PLOT_PATH,
 }
 
 
@@ -126,6 +131,10 @@ def plot_spearman_curves() -> Path:
     return _plot_metric_from_artifact("spearman", "Spearman correlation (STS-B)")
 
 
+def plot_nli_spearman_curves() -> Path:
+    return _plot_metric_from_artifact("nli_spearman", "Spearman correlation (NLI)")
+
+
 def save_eval_plots(metric_names: Sequence[str]) -> dict[str, Path]:
     plot_paths: dict[str, Path] = {}
     for metric_name in metric_names:
@@ -137,6 +146,8 @@ def save_eval_plots(metric_names: Sequence[str]) -> dict[str, Path]:
             plot_paths[metric_name] = plot_cramers_v_curves()
         elif metric_name == "spearman":
             plot_paths[metric_name] = plot_spearman_curves()
+        elif metric_name == "nli_spearman":
+            plot_paths[metric_name] = plot_nli_spearman_curves()
     return plot_paths
 
 
@@ -405,6 +416,55 @@ def plot_spearman_overview(groups: Sequence[Any], out_path: Path, ncols: int) ->
 
         if not selector_curves or x_ref is None:
             ax.text(0.5, 0.5, "no spearman data", transform=ax.transAxes, ha="center", va="center")
+            continue
+
+        selector_mean, selector_std = mean_std_curves([c.tolist() for c in selector_curves])
+        random_mean, random_std = mean_std_curves([c.tolist() for c in random_curves])
+        plot_with_band(ax, x_ref, selector_mean, selector_std, "selector mean+-std")
+        plot_with_band(ax, x_ref, random_mean, random_std, "random mean+-std", linestyle="--", alpha=0.14)
+        handles, _ = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(fontsize=7)
+
+    _finalize_overview_figure(fig, axes, len(groups), out_path)
+
+
+def plot_nli_spearman_overview(groups: Sequence[Any], out_path: Path, ncols: int) -> None:
+    fig, axes = _build_overview_figure(len(groups), ncols)
+
+    for ax, group in zip(axes, groups):
+        _setup_overview_axis(ax, group.label, len(group.runs), "selection rate (rho)", "spearman (NLI)")
+
+        selector_curves: list[np.ndarray] = []
+        random_curves: list[np.ndarray] = []
+        x_ref: np.ndarray | None = None
+        skipped_mismatch = 0
+
+        for run in group.runs:
+            metric_payload = _load_metric_payload_for_run(run.sig_dir, metric="nli_spearman")
+            if metric_payload is None:
+                continue
+            parsed = maybe_extract_metric_payload(metric_payload)
+            if parsed is None:
+                continue
+            x, curves, _ = parsed
+            y_selector = curves.get("selector")
+            y_random = curves.get("random")
+            if y_selector is None or y_random is None:
+                continue
+            if x_ref is None:
+                x_ref = x
+            elif x_ref.shape != x.shape or not np.allclose(x_ref, x, atol=1e-8, rtol=1e-8):
+                skipped_mismatch += 1
+                continue
+            selector_curves.append(y_selector)
+            random_curves.append(y_random)
+
+        if skipped_mismatch:
+            print(f"Skipped {skipped_mismatch} nli_spearman runs in group '{group.label}' due to rho-grid mismatch")
+
+        if not selector_curves or x_ref is None:
+            ax.text(0.5, 0.5, "no nli_spearman data", transform=ax.transAxes, ha="center", va="center")
             continue
 
         selector_mean, selector_std = mean_std_curves([c.tolist() for c in selector_curves])

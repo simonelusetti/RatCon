@@ -30,6 +30,7 @@ from .utils import (
 )
 from .view import save_train_eval_loss_plot, save_eval_plots
 from .retrival_fun import run_stsb_sweep
+from .nli_fun import run_nli_sweep
 
 
 class SelectorTrainer:
@@ -345,7 +346,7 @@ class SelectorTrainer:
             tokenizer=self.tokenizer,
             selector=self.model,
         )
-        
+
         stsb_data = {
             "base": float(base),
             "ours_by_rho": {str(float(k)): float(v) for k, v in ours.items()},
@@ -353,11 +354,27 @@ class SelectorTrainer:
             "rhos": [float(k) for k in ours.keys()],
         }
 
+        nli_base, nli_ours, nli_rand = run_nli_sweep(
+            cfg=self.cfg,
+            device=self.device,
+            encoder=self.sent_encoder,
+            tokenizer=self.tokenizer,
+            selector=self.model,
+        )
+
+        nli_data = {
+            "base": float(nli_base),
+            "ours_by_rho": {str(float(k)): float(v) for k, v in nli_ours.items()},
+            "random_by_rho": {str(float(k)): float(v) for k, v in nli_rand.items()},
+            "rhos": [float(k) for k in nli_ours.keys()],
+        }
+
         artifact_paths = save_eval_artifacts(
             counts_pred=counts_pred,
             counts_gold=counts_gold,
             rhos=self.rhos,
             stsb=stsb_data,
+            nli=nli_data,
         )
         for metric_name, artifact_path in artifact_paths.items():
             self.logger.info("Saved %s artifact to: %s", metric_name, artifact_path)

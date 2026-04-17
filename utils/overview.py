@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.view import (
     plot_chi_square_overview,
     plot_loss_overview,
+    plot_nli_spearman_overview,
     plot_selection_rates_overview,
     plot_spearman_overview,
 )
@@ -117,6 +118,7 @@ def main() -> None:
     plot_chi_square_overview(groups, out_root / "chi_square_overview.png", ncols=args.ncols, metric="chi_square")
     plot_chi_square_overview(groups, out_root / "cramers_v_overview.png", ncols=args.ncols, metric="cramers_v")
     plot_spearman_overview(groups, out_root / "spearman_overview.png", ncols=args.ncols)
+    plot_nli_spearman_overview(groups, out_root / "nli_spearman_overview.png", ncols=args.ncols)
 
     print(f"Saved overview figures to {out_root}")
 

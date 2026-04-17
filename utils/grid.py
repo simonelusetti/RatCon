@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess, yaml
 from datetime import datetime
 from pathlib import Path
@@ -6,6 +7,8 @@ from pathlib import Path
 
 from tabulate import tabulate
 from tqdm import tqdm
+
+_ANSI_ESCAPE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]|\r')
 
 
 CONFIG_PATH = Path("./utils/grid.yaml")
@@ -63,7 +66,10 @@ def run_and_capture_signature(cmd: list[str], pbar: tqdm, run_pbar: tqdm | None 
     child_env = {
         **os.environ,
         "DISABLE_TQDM": "1",
+        "TQDM_DISABLE": "1",
         "PYTHONUNBUFFERED": "1",
+        "HF_DATASETS_DISABLE_PROGRESS_BARS": "1",
+        "DATASETS_DISABLE_PROGRESS_BARS": "1",
     }
     process = subprocess.Popen(
         cmd,
@@ -75,7 +81,7 @@ def run_and_capture_signature(cmd: list[str], pbar: tqdm, run_pbar: tqdm | None 
     )
     assert process.stdout is not None
     for line in process.stdout:
-        line = line.rstrip()
+        line = _ANSI_ESCAPE.sub('', line).rstrip()
         if run_pbar is not None and "GRID_EPOCH " in line:
             step = line.rsplit("GRID_EPOCH ", 1)[1]
             try:

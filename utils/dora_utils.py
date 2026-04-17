@@ -153,8 +153,11 @@ def needs_eval(sig_dir: Path) -> bool:
         return False  # explicitly configured to skip evaluation
 
     data_dir = sig_dir / "data"
-    spearman_artifact = data_dir / "spearman_curves.json"
-    if not spearman_artifact.exists():
+    spearman_artifacts = (
+        data_dir / "spearman_curves.json",
+        data_dir / "nli_spearman_curves.json",
+    )
+    if not all(path.exists() for path in spearman_artifacts):
         return True
 
     count_artifacts = (

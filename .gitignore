@@ -21,6 +21,7 @@ rank linearized.md
 # Local AI-assistant tooling config, not part of the project.
 .codex
 AGENTS.md
+.github/agents/
 
 # Paper sources and build artifacts, kept out of the code repo.
 *.tex

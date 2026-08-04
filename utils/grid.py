@@ -16,16 +16,17 @@ RUNS_DIR = Path("outputs/utils/grid")
 DEFAULT_CFG_PATH = Path("./src/conf/default.yaml")
 
 
-def load_config(path: Path) -> tuple[list[str], list[list[str]]]:
+def load_config(path: Path) -> tuple[list[str], list[list[str]], str | None]:
     if not path.exists():
         raise FileNotFoundError(f"Config file not found: {path}")
     with path.open("r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
     baseline = data.get("baseline", []) or []
     sweep = data.get("sweep", []) or []
+    main_module = data.get("main_module")
     if not sweep:
         raise ValueError("No sweep entries defined in config")
-    return baseline, sweep
+    return baseline, sweep, main_module
 
 
 def load_default_train_epochs(path: Path) -> int:
@@ -112,14 +113,15 @@ def shorten_key(key: str, keep_parts: int = 1) -> str:
     parts = key.split(".")
     return ".".join(parts[-keep_parts:])
 
-def main() -> None:
+def main(config_path: Path = CONFIG_PATH) -> None:
     try:
-        baseline, sweep = load_config(CONFIG_PATH)
+        baseline, sweep, main_module = load_config(config_path)
     except (FileNotFoundError, ValueError) as exc:
         print(f"⚠️ {exc}")
         return
 
-    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    runs_dir = RUNS_DIR / config_path.stem
+    runs_dir.mkdir(parents=True, exist_ok=True)
 
     summary_rows = []
 
@@ -134,7 +136,7 @@ def main() -> None:
             pbar.write(f"Baseline overrides: {baseline}")
             pbar.write(f"Sweep overrides   : {overrides}")
 
-            cmd = ["dora", "run"] + setting_overrides
+            cmd = ["dora"] + (["--main_module", main_module] if main_module else []) + ["run"] + setting_overrides
             signatures = []
             failures = 0
             run_desc = f"Training {shorten_key(setting_label)}"
@@ -176,7 +178,7 @@ def main() -> None:
     print(table)
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    output_path = RUNS_DIR / f"grid_results_{timestamp}.md"
+    output_path = runs_dir / f"grid_results_{timestamp}.md"
     output_content = f"Baseline overrides: {', '.join(baseline) if baseline else '<none>'}\n\n{table}\n"
     output_path.write_text(output_content, encoding="utf-8")
     print(f"\nSaved table view to {output_path}")
@@ -186,6 +188,12 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Grid sweep runner and plot combiner.")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=CONFIG_PATH,
+        help=f"Grid sweep config YAML (default: {CONFIG_PATH}).",
+    )
     args = parser.parse_args()
 
-    main()
+    main(config_path=args.config)

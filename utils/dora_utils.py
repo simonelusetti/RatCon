@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
+from omegaconf import OmegaConf
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -43,6 +44,19 @@ def load_dora_exclude() -> list[str]:
     cfg = _load_default_cfg()
     excludes = cfg.get("dora", {}).get("exclude", [])
     return [str(x) for x in excludes]
+
+
+def load_xp_cfg(sig_dir: Path) -> OmegaConf:
+    """Merge default.yaml with the overrides stored in the xp's .argv.json."""
+    base = OmegaConf.load(DEFAULT_CFG)
+
+    overrides = load_overrides_for_sig(sig_dir) or []
+    # Filter out runtime.* and train.* keys that don't affect model/data structure
+    skip_prefixes = ("runtime.", "train.", "run=")
+    filtered = [o for o in overrides if not any(o.startswith(p) for p in skip_prefixes)]
+
+    patch = OmegaConf.from_dotlist(filtered)
+    return OmegaConf.merge(base, patch)
 
 
 # ---------------------------------------------------------------------------
@@ -153,17 +167,10 @@ def needs_eval(sig_dir: Path) -> bool:
         return False  # explicitly configured to skip evaluation
 
     data_dir = sig_dir / "data"
-    spearman_artifacts = (
-        data_dir / "spearman_curves.json",
-        data_dir / "nli_spearman_curves.json",
-    )
-    if not all(path.exists() for path in spearman_artifacts):
-        return True
-
     count_artifacts = (
         data_dir / "selection_rate_curves.json",
-        data_dir / "chi_square_curves.json",
-        data_dir / "cramers_v_curves.json",
+        data_dir / "pvalue_curves.json",
+        data_dir / "effect_size_curves.json",
     )
     count_exists = [path.exists() for path in count_artifacts]
 

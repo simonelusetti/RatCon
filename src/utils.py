@@ -19,6 +19,28 @@ from tqdm import tqdm
 tqdm._instances.clear()
 
 
+def remap_checkpoint_state_dict(state_dict: dict, model_state_dict: dict) -> dict:
+    """Reconcile a saved state_dict with the live model's key naming.
+
+    Handles two sources of drift between the environment that trained a
+    checkpoint and the one loading it: a torch.compile `_orig_mod.` prefix,
+    and sentence-transformers renaming its wrapped HF module from `model` to
+    `auto_model` across versions.
+    """
+    ckpt_compiled = any(k.startswith("_orig_mod.") for k in state_dict)
+    model_compiled = any(k.startswith("_orig_mod.") for k in model_state_dict)
+    if ckpt_compiled and not model_compiled:
+        remapped = {k.removeprefix("_orig_mod."): v for k, v in state_dict.items()}
+    elif model_compiled and not ckpt_compiled:
+        remapped = {f"_orig_mod.{k}": v for k, v in state_dict.items()}
+    else:
+        remapped = dict(state_dict)
+
+    if any(".auto_model." in k for k in model_state_dict) and not any(".auto_model." in k for k in remapped):
+        remapped = {k.replace(".model.0.model.", ".model.0.auto_model."): v for k, v in remapped.items()}
+    return remapped
+
+
 @dataclass(frozen=True)
 class RunStartCapture:
     started_perf: float

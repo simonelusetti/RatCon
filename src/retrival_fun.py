@@ -1,3 +1,23 @@
+"""STS-B sufficiency test (paper Section 4.3/5.1) and cross-corpus
+generalization support. Despite the filename (kept for continuity with the
+original research codebase this was ported from), this has nothing to do
+with retrieval -- it evaluates whether the tokens a trained selector keeps
+are sufficient to preserve an encoder's sentence-similarity behaviour.
+
+For each retention rate rho: filter sentence1 of an STS-B pair through the
+trained selector (keeping only its top-k tokens for that rho), re-encode,
+and compare its cosine similarity against the *unfiltered* sentence2 to the
+gold human similarity score via Spearman correlation. Compared against a
+random-selection baseline of the same size, averaged over several seeds.
+
+This module is dataset-independent of whatever the selector was *trained*
+on (see src/data.py's "stsb" dataset entry for that side) -- it always
+evaluates against STS-B's validation split (which has real gold labels,
+unlike GLUE's STS-B test split), regardless of cfg.data.dataset. That is
+what makes cross-corpus generalization (paper Fig. 3, rightmost panel)
+possible: every training run gets STS-B-evaluated at the end, whatever
+corpus it trained on.
+"""
 import sys
 
 import torch
@@ -9,6 +29,7 @@ from scipy.stats import spearmanr
 from tqdm import tqdm
 from numpy import linspace
 
+from .sentence import ALIAS_TO_CANON
 from .utils import should_disable_tqdm
 
 
@@ -24,7 +45,7 @@ def build_non_special_mask(tokenizer, input_ids, attention_mask, device):
     return attention_mask * (1 - special_tokens_mask)
 
 
-def get_rhos(cfg):
+def get_rhos(cfg) -> list[float]:
     return list(linspace(
         cfg.sweep_range[0],
         cfg.sweep_range[1],
@@ -44,11 +65,22 @@ class STSBDataset(Dataset):
         return {
             "sentence1": item["sentence1"],
             "sentence2": item["sentence2"],
-            "label": float(item["label"]),
+            # sentence-transformers/stsb's column is "score" (0-1, already
+            # normalized), not GLUE stsb's raw "label" (0-5) -- see the
+            # comment on run_stsb_sweep's load_dataset call for why this repo
+            # uses that source instead of raw GLUE.
+            "label": float(item["score"]),
         }
 
 
-def build_stsb_collate(tokenizer, device, max_length, keep_special: bool = True):
+def build_stsb_collate(tokenizer, device, max_length, family: str, keep_special: bool = False):
+    # Same "query: " prefix convention as src/data.py's encode_examples, for
+    # the same reason (E5's model card documents unprefixed text as a known
+    # way to degrade embedding quality). Applied here too since this loader
+    # tokenizes STS-B independently of the encode_examples/get_dataset cache
+    # path -- it never goes through that pipeline.
+    is_e5 = ALIAS_TO_CANON[family.lower()] == "e5"
+
     def strip_special(toks):
         ids = toks["input_ids"]
         attn = toks["attention_mask"]
@@ -75,6 +107,10 @@ def build_stsb_collate(tokenizer, device, max_length, keep_special: bool = True)
         s1 = [x["sentence1"] for x in batch]
         s2 = [x["sentence2"] for x in batch]
         labels = torch.tensor([x["label"] for x in batch], dtype=torch.float)
+
+        if is_e5:
+            s1 = [f"query: {s}" for s in s1]
+            s2 = [f"query: {s}" for s in s2]
 
         t1 = tokenizer(
             s1,
@@ -105,6 +141,7 @@ def build_stsb_collate(tokenizer, device, max_length, keep_special: bool = True)
 
 @torch.no_grad()
 def eval_baseline(loader, encoder):
+    """Unfiltered (full-sentence, no selection) cosine-sim vs gold Spearman."""
     sims, labels = [], []
 
     for batch in tqdm(
@@ -120,8 +157,8 @@ def eval_baseline(loader, encoder):
         e1 = encoder.token_embeddings(t1["input_ids"], t1["attention_mask"])
         e2 = encoder.token_embeddings(t2["input_ids"], t2["attention_mask"])
 
-        z1 = encoder.pool(e1, t1["attention_mask"])
-        z2 = encoder.pool(e2, t2["attention_mask"])
+        z1 = encoder.pool_full(e1, t1["attention_mask"])
+        z2 = encoder.pool_full(e2, t2["attention_mask"])
 
         sims.extend(F.cosine_similarity(z1, z2).cpu().tolist())
         labels.extend(batch["labels"].tolist())
@@ -161,7 +198,7 @@ def eval_sweep(
         a2 = t2["attention_mask"]
 
         e2_full = encoder.token_embeddings(t2["input_ids"], a2)
-        z2 = encoder.pool(e2_full, a2)
+        z2 = encoder.pool_full(e2_full, a2)
 
         new_a1_sweep = mask_generator(t1, a1, rhos)
 
@@ -183,7 +220,7 @@ def build_selector_mask_generator(
     tokenizer,
     device,
     hard: bool = False,
-    keep_special: bool = True,
+    keep_special: bool = False,
 ):
     @torch.no_grad()
     def mask_generator(t1, a1, rhos):
@@ -194,7 +231,7 @@ def build_selector_mask_generator(
             a1,
             rhos=rhos,
         )
-        
+
         pred = g if hard else z
 
         non_special = (
@@ -214,7 +251,7 @@ def build_selector_mask_generator(
     return mask_generator
 
 
-def build_random_mask_generator(cfg, tokenizer, device, keep_special: bool = True):
+def build_random_mask_generator(cfg, tokenizer, device, keep_special: bool = False):
     @torch.no_grad()
     def mask_generator(t1, a1, rhos):
         candidate_mask = a1
@@ -247,7 +284,7 @@ def build_random_mask_generator(cfg, tokenizer, device, keep_special: bool = Tru
 
 
 @torch.no_grad()
-def eval_random_sweep(loader, encoder, tokenizer, eval_cfg, device, keep_special: bool = True):
+def eval_random_sweep(loader, encoder, tokenizer, eval_cfg, device, keep_special: bool = False):
     rhos = get_rhos(eval_cfg)
     runs = eval_cfg.random_selector.runs
 
@@ -258,7 +295,7 @@ def eval_random_sweep(loader, encoder, tokenizer, eval_cfg, device, keep_special
         t1, t2 = batch["t1"], batch["t2"]
         a2 = t2["attention_mask"]
         e2_full = encoder.token_embeddings(t2["input_ids"], a2)
-        cached.append((t1, encoder.pool(e2_full, a2), batch["labels"]))
+        cached.append((t1, encoder.pool_full(e2_full, a2), batch["labels"]))
 
     with tqdm(
         total=runs * len(cached),
@@ -301,14 +338,16 @@ def eval_random_sweep(loader, encoder, tokenizer, eval_cfg, device, keep_special
 
 @torch.no_grad()
 def run_stsb_sweep(cfg, device, encoder, tokenizer, selector):
-    hf_ds = load_dataset("glue", "stsb", split="validation")
+    hf_ds = load_dataset("sentence-transformers/stsb", split="validation")
     ds = STSBDataset(hf_ds)
 
+    keep_special = bool(cfg.model.get("keep_special", False))
     collate_fn = build_stsb_collate(
         tokenizer,
         device,
         cfg.data.max_length,
-        keep_special=bool(cfg.model.get("keep_special", True)),
+        family=str(cfg.data.encoder.family),
+        keep_special=keep_special,
     )
 
     loader = DataLoader(
@@ -321,7 +360,6 @@ def run_stsb_sweep(cfg, device, encoder, tokenizer, selector):
 
     base = eval_baseline(loader, encoder)
 
-    keep_special = bool(cfg.model.get("keep_special", True))
     selector_mask_gen = build_selector_mask_generator(
         selector,
         encoder,
@@ -330,7 +368,7 @@ def run_stsb_sweep(cfg, device, encoder, tokenizer, selector):
         hard=bool(cfg.runtime.eval.get("hard", True)),
         keep_special=keep_special,
     )
-    
+
     ours = eval_sweep(loader, encoder, selector_mask_gen, cfg.runtime.eval)
     rand = eval_random_sweep(
         loader,

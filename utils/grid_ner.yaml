@@ -1,0 +1,23 @@
+main_module: ner_probe
+baseline:
+  # Kept only for dora signature continuity with runs already computed
+  # under the old train.py task=ner branch (now removed) -- ner_probe.py's
+  # own entry point doesn't read cfg.task, but dora hashes the full
+  # resolved config regardless of which module executes it, so dropping
+  # this would silently orphan 440a82b4/e860ca48/etc as unresumable.
+  - "task=ner"
+  - "runtime.grid=true"
+  - "runtime.threads=16"
+  - "runtime.data.batch_size=16"
+  # Lets re-running this grid resume gracefully, same as the other grid
+  # configs: NERTrainer.train() (src/ner_probe.py) already resumes from
+  # the latest checkpoint when continue=true (or just re-runs final_eval
+  # if a run already finished all its epochs).
+  - "train.continue=true"
+sweep:
+  - [data.dataset=wikiann, data.encoder.family=sbert]
+  - [data.dataset=wikiann, data.encoder.family=e5]
+  - [data.dataset=wikiann, data.encoder.family=llm]
+  - [data.dataset=conll2003, data.encoder.family=sbert]
+  - [data.dataset=conll2003, data.encoder.family=e5]
+  - [data.dataset=conll2003, data.encoder.family=llm]

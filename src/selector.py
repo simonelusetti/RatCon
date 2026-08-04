@@ -50,7 +50,6 @@ def soft_rank(
     scores: torch.Tensor,
     attn: torch.Tensor,
     tau: float,
-    gamma: float = 1.0,
 ) -> torch.Tensor:
     attn = attn.float()
     scores = scores.masked_fill(attn == 0, 0.0)
@@ -64,8 +63,6 @@ def soft_rank(
     diff = scores.unsqueeze(2) - scores.unsqueeze(1)
 
     p = torch.sigmoid((-diff) / tau)
-    if gamma != 1.0:
-        p = p ** gamma
 
     pair_mask = attn.unsqueeze(1) * attn.unsqueeze(2)
     p = p * pair_mask
@@ -97,9 +94,6 @@ class RationaleSelectorModel(nn.Module):
 
         selector_cfg = selector_cfg or {}
         self.condition_on_rho = bool(selector_cfg.get("condition_on_rho", True))
-        self.hard = bool(
-            selector_cfg.get("hard", False)
-        )
 
         self.selector = SelectorMLP(
             embedding_dim,
@@ -111,8 +105,42 @@ class RationaleSelectorModel(nn.Module):
         self.loss_cfg = loss_cfg
 
         self.tau_rank = float(selector_cfg.get("tau_rank", 0.05))
-        self.gamma_rank = float(selector_cfg.get("gamma_rank", 2.0))
         self.tau_gate = float(selector_cfg.get("tau_gate", 0.2))
+
+    def _rank(
+        self,
+        embeddings: torch.Tensor,
+        attn: torch.Tensor,
+        rhos: Sequence[float],
+    ) -> torch.Tensor:
+        """Per-token soft ranks r_t (Section 3), shape [R, B, L]."""
+        param_dtype = next(self.parameters()).dtype
+        if embeddings.dtype != param_dtype:
+            embeddings = embeddings.to(param_dtype)
+
+        attn_f = attn.float()
+        B, L = attn.shape
+        R = len(rhos)
+        device = embeddings.device
+        rhos_t = torch.tensor(list(rhos), device=device, dtype=torch.float32)
+
+        emb = embeddings * attn.unsqueeze(-1)
+        if self.condition_on_rho:
+            emb_rep = emb[None].expand(R, B, L, -1).reshape(R * B, L, emb.shape[-1])
+            attn_rep_for_rank = attn_f[None].expand(R, B, L).reshape(R * B, L)
+            rho_per_example = rhos_t[:, None].expand(R, B).reshape(R * B)
+
+            scores = self.selector(emb_rep, rho_per_example)
+            scores = scores.masked_fill(attn_rep_for_rank == 0, 0.0)
+
+            ranks = soft_rank(scores, attn_rep_for_rank, tau=self.tau_rank).view(R, B, L)
+        else:
+            scores = self.selector(emb)
+            scores = scores.masked_fill(attn_f == 0, 0.0)
+            shared_ranks = soft_rank(scores, attn_f, tau=self.tau_rank)
+            ranks = shared_ranks.unsqueeze(0).expand(R, -1, -1)
+
+        return ranks
 
     def forward(
         self,
@@ -129,7 +157,7 @@ class RationaleSelectorModel(nn.Module):
 
         attn_f = attn.float()
         with torch.no_grad():
-            full_rep = self.sent_encoder.pool(embeddings, attn_f)
+            full_rep = self.sent_encoder.pool_full(embeddings, attn_f)
 
         selection_f = attn_f
         L_eff = selection_f.sum(dim=1).float()
@@ -139,31 +167,7 @@ class RationaleSelectorModel(nn.Module):
 
         rhos_t = torch.tensor(list(rhos), device=device, dtype=torch.float32)
 
-        emb = embeddings * attn.unsqueeze(-1)
-        if self.condition_on_rho:
-            emb_rep = emb[None].expand(R, B, L, -1).reshape(R * B, L, emb.shape[-1])
-            attn_rep_for_rank = attn_f[None].expand(R, B, L).reshape(R * B, L)
-            rho_per_example = rhos_t[:, None].expand(R, B).reshape(R * B)
-
-            scores = self.selector(emb_rep, rho_per_example)
-            scores = scores.masked_fill(attn_rep_for_rank == 0, 0.0)
-
-            ranks = soft_rank(
-                scores,
-                attn_rep_for_rank,
-                tau=self.tau_rank,
-                gamma=self.gamma_rank,
-            ).view(R, B, L)
-        else:
-            scores = self.selector(emb)
-            scores = scores.masked_fill(attn_f == 0, 0.0)
-            shared_ranks = soft_rank(
-                scores,
-                attn_f,
-                tau=self.tau_rank,
-                gamma=self.gamma_rank,
-            )
-            ranks = shared_ranks.unsqueeze(0).expand(R, -1, -1)
+        ranks = self._rank(embeddings, attn, rhos)
 
         k = (rhos_t[:, None] * L_eff[None]).round().long()
         k = torch.where(L_eff[None] > 0, k.clamp(min=1), torch.zeros_like(k))
@@ -182,20 +186,15 @@ class RationaleSelectorModel(nn.Module):
         g = torch.zeros(R, B, L, device=device)
         g.scatter_(2, sorted_idx, valid_sel.float())
 
-        g_st = g + (z - z.detach())
+        # Training always uses the soft mask z (Eq. 3); the hard top-k mask g
+        # is exposed for eval/inference callers (Section 4/5/6), not training.
+        effective_attns = attn_f[None] * z
 
-        if self.hard:
-            effective_attns = attn_f[None] * g_st
-        else:
-            effective_attns = attn_f[None] * z
-        
         ids_rep = ids[None].expand(R, B, L).reshape(R * B, L)
         attn_rep = effective_attns.reshape(R * B, L)
 
-        with torch.autocast(ids_rep.device.type, dtype=torch.bfloat16, enabled=True):
-            tok = self.sent_encoder.token_embeddings(ids_rep, attn_rep)
-            pred_rep = self.sent_encoder.pool(tok, attn_rep)
-            pred_rep = pred_rep.view(R, B, -1)
+        tok = self.sent_encoder.token_embeddings(ids_rep, attn_rep)
+        pred_rep = self.sent_encoder.pool(tok, attn_rep).view(R, B, -1)
 
         full_rep_exp = full_rep.unsqueeze(0).expand(R, B, -1)
         per_sample = 1.0 - F.cosine_similarity(pred_rep, full_rep_exp, dim=-1)

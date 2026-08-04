@@ -17,3 +17,14 @@ beir_datasets/
 linearize.log
 rank linearized.md
 .claude/
+
+# Paper sources and build artifacts, kept out of the code repo.
+*.tex
+*.pdf
+iolex-release.zip
+
+# Exploratory scripts/outputs from the paper push, not part of the
+# reproducibility path (see README.md for the scripts that are).
+old/
+plots/
+state/

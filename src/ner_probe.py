@@ -4,6 +4,7 @@ import re
 import sys
 import torch
 
+from collections import Counter
 from logging import Logger
 from pathlib import Path
 from torch.utils.data import DataLoader
@@ -11,15 +12,12 @@ from tqdm import tqdm
 
 from dora import get_xp, hydra_main, XP
 from omegaconf import DictConfig
-from transformers import AutoTokenizer
-from numpy import linspace
+from seqeval.metrics import classification_report, f1_score, precision_score, recall_score
+from sklearn.metrics import classification_report as sk_classification_report
 
-from .metrics import Counts, SelectionLog, build_token_frequency_table
 from .sentence import SentenceEncoder
-from .selector import RationaleSelectorModel
-from .data import SPECIAL_TAG, initialize_data
-from .eval import save_eval_artifacts
-from .retrival_fun import run_stsb_sweep
+from .tagger import MLPTagger, gather_word_level
+from .data import PAD_TAG, LABEL_DISPLAY_NAMES, canonical_name, initialize_data
 from .utils import (
     get_logger,
     configure_runtime,
@@ -31,18 +29,24 @@ from .utils import (
     should_disable_tqdm,
     remap_checkpoint_state_dict,
 )
-from .view import save_train_eval_loss_plot, save_eval_plots
+from .view import save_train_eval_loss_plot
 
 
-class SelectorTrainer:
+class NERTrainer:
+    """Word-level per-token MLP NER probe on top of a frozen sentence encoder.
+
+    Downstream validation for the selection-bias test: holds the probe
+    architecture fixed and swaps the encoder, tracking precision/recall/F1
+    per epoch so it can be compared against the bias-test results.
+    """
+
     def __init__(
         self,
         cfg: DictConfig,
         train_dl: DataLoader,
         test_dl: DataLoader,
         sent_encoder: SentenceEncoder,
-        tokenizer: AutoTokenizer,
-        labels_set: set | None,
+        tag_names: list[str],
         logger: Logger,
         xp: XP,
         start_capture,
@@ -60,11 +64,6 @@ class SelectorTrainer:
         self.skip_eval = bool(cfg.runtime.eval.get("skip", False))
         self.grid_mode = bool(cfg.runtime.grid)
         self.device = cfg.runtime.device
-        self.rhos = linspace(cfg.model.loss.sweep_range[0], cfg.model.loss.sweep_range[1], cfg.model.loss.sweep_range[2])
-
-        rhos_per_step = cfg.train.get("rhos_per_step", None)
-        self.rhos_per_step = len(self.rhos) if rhos_per_step is None else min(int(rhos_per_step), len(self.rhos))
-
         self._tqdm_disabled = should_disable_tqdm(self.short_log, self.grid_mode)
 
         self.xp = xp
@@ -77,10 +76,38 @@ class SelectorTrainer:
         self.plots_dir = self.checkpoint_dir / "plots"
         self.data_dir = self.checkpoint_dir / "data"
         self.loss_history_path = self.data_dir / "loss_history.json"
+        self.ner_report_history_path = self.data_dir / "ner_report_history.json"
+        self.tag_names = tag_names
+        # Label values come from the dataset's own raw label strings: for
+        # ClassLabel-encoded datasets (wikiann/conll2003) these are already
+        # stringified indices ("0","1",...); for conll2000 (no upstream
+        # ClassLabel -- NLTK yields the raw tag string) they're the tag name
+        # itself ("B-NP"). Handle both without needing int() to work.
+        self.label_to_idx = {str(i): i for i in range(len(tag_names))}
+        self.label_to_idx.update({name: i for i, name in enumerate(tag_names)})
 
-        self.tokenizer = tokenizer
-        self.labels_set = None if labels_set is None else set(labels_set) | {SPECIAL_TAG}
-        self.label_order = sorted(self.labels_set) if self.labels_set is not None else []
+        # Inverse-frequency class weights (sklearn's "balanced" formula:
+        # total / (num_classes * count[c])), computed once from the
+        # training label distribution. Off by default -- see ner.class_weighted
+        # in default.yaml. Guards against severe imbalance (e.g.
+        # movie_rationales' ~5.4:1 skew) collapsing the probe to always
+        # predicting the majority class, but the wikiann/conll2003 probes
+        # reported in the paper were trained without it.
+        ner_cfg = cfg.get("ner", {})
+        self.class_weights = None
+        if bool(ner_cfg.get("class_weighted", False)):
+            counts = Counter()
+            for seq in self.train_dl.dataset["labels"]:
+                for v in seq:
+                    if v != PAD_TAG:
+                        counts[self.label_to_idx[v]] += 1
+            total = sum(counts.values())
+            num_tags = len(tag_names)
+            self.class_weights = torch.tensor(
+                [total / (num_tags * counts.get(i, 1)) for i in range(num_tags)],
+                dtype=torch.float32,
+                device=self.device,
+            )
 
         self.sent_encoder = sent_encoder.to(self.device)
         self.sent_encoder.eval()
@@ -94,18 +121,12 @@ class SelectorTrainer:
                 first["attn_mask"].to(self.device),
             ).shape[-1]
 
-        self.model = RationaleSelectorModel(
+        self.model = MLPTagger(
             model_dim,
-            loss_cfg=cfg.model.loss,
-            selector_cfg=cfg.model.get("selector", None),
-            sent_encoder=self.sent_encoder,
+            num_tags=len(tag_names),
+            hidden=int(ner_cfg.get("hidden", 256)),
+            dropout=float(ner_cfg.get("dropout", 0.1)),
         ).to(self.device)
-
-        # No training loop to amortize the compile warmup over in eval-only
-        # (train.no_train) runs, so skip it there regardless of runtime.compile.
-        if cfg.runtime.get("compile", False) and not bool(cfg.train.get("no_train", False)):
-            self.model = torch.compile(self.model, dynamic=True)
-            logger.info("torch.compile enabled (first epoch will be slower).")
 
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
@@ -118,9 +139,41 @@ class SelectorTrainer:
         self.plots_dir.mkdir(parents=True, exist_ok=True)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.train_loss_history, self.eval_loss_history = load_combined_loss_history(self.loss_history_path)
+        self.ner_report_history: list[dict] = (
+            json.loads(self.ner_report_history_path.read_text(encoding="utf-8"))
+            if self.ner_report_history_path.exists()
+            else []
+        )
 
     def checkpoint_path(self, epoch: int) -> Path:
         return self.models_dir / f"model_{epoch}.pth"
+
+    def _build_ner_reports(self, y_true: list[list[str]], y_pred: list[list[str]]) -> tuple[dict, dict, dict]:
+        span_report = classification_report(y_true, y_pred, output_dict=True, zero_division=0)
+        flat_true = [tag for seq in y_true for tag in seq]
+        flat_pred = [tag for seq in y_pred for tag in seq]
+        token_report = sk_classification_report(flat_true, flat_pred, output_dict=True, zero_division=0)
+        # Binary "is this token part of any entity" (B-*/I-* collapsed to
+        # one class vs O) -- needs the joint confusion matrix (e.g. a
+        # B-PER predicted as B-ORG is a true positive here but wrong for
+        # token_report), so it can't be derived from the per-tag reports
+        # after the fact and has to be computed from the raw sequences.
+        binarize = lambda tags: ["entity" if t != "O" else "O" for t in tags]
+        binary_report = sk_classification_report(
+            binarize(flat_true), binarize(flat_pred), output_dict=True, zero_division=0
+        )
+        return span_report, token_report, binary_report
+
+    def record_ner_report(self, epoch: int, span_report: dict, token_report: dict, binary_report: dict) -> None:
+        self.ner_report_history.append({
+            "epoch": epoch,
+            "span_level": span_report,
+            "token_level": token_report,
+            "binary_entity_level": binary_report,
+        })
+        self.ner_report_history_path.write_text(
+            json.dumps(self.ner_report_history, indent=2, default=lambda o: o.item()), encoding="utf-8"
+        )
 
     def checkpoint_epoch(self, checkpoint_path: Path) -> int | None:
         match = re.fullmatch(r"model_(\d+)\.pth", checkpoint_path.name)
@@ -194,35 +247,33 @@ class SelectorTrainer:
         save_train_eval_loss_plot()
         self.logger.info("Saved loss plot to %s", loss_path)
 
-    def forward_pass(self, batch: dict, examples_count: int, total_loss: float , rhos: list | None = None):
-        ids = batch["ids"]
-        attn = batch["attn_mask"]
-        bs = ids.size(0)
-        
-        if rhos is None:
-            rhos = self.rhos
+    def _label_ids_tensor(self, labels: list[list[str]]) -> torch.Tensor:
+        return torch.tensor(
+            [[-1 if v == PAD_TAG else self.label_to_idx[v] for v in seq] for seq in labels],
+            dtype=torch.long,
+            device=self.device,
+        )
+
+    def forward_pass(self, batch: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        label_ids = self._label_ids_tensor(batch["labels"])
 
         with torch.no_grad():
-            tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
+            tkns_embd = self.sent_encoder.token_embeddings(batch["ids"], batch["attn_mask"])
 
-        z, g, loss = self.model(ids, tkns_embd, attn, rhos=rhos)
+        word_emb, word_mask, word_labels = gather_word_level(tkns_embd, batch["word_ids"], label_ids)
+        emissions = self.model(word_emb, word_mask)
+        loss = self.model.loss(emissions, word_labels, word_mask, weight=self.class_weights)
 
-        return (
-            attn,
-            z,
-            g,
-            loss,
-            examples_count + bs,
-            total_loss + loss.item() * bs,
-        )
-        
+        return emissions, word_mask, word_labels, loss
+
     @torch.no_grad()
-    def short_evaluate(
-        self
-    ) -> dict:
+    def evaluate(self) -> tuple[dict, list[list[str]], list[list[str]]]:
         self.model.eval()
         examples_count = 0
         total_loss = 0.0
+
+        y_true: list[list[str]] = []
+        y_pred: list[list[str]] = []
 
         for batch in tqdm(
             self.test_dl,
@@ -233,73 +284,27 @@ class SelectorTrainer:
             file=sys.stderr,
         ):
             batch = to_device(self.device, batch)
-            _, _, _, _, examples_count, total_loss \
-                = self.forward_pass(batch, examples_count, total_loss)
+            emissions, word_mask, word_labels, loss = self.forward_pass(batch)
+
+            bs = batch["ids"].size(0)
+            examples_count += bs
+            total_loss += loss.item() * bs
+
+            decoded = self.model.decode(emissions, word_mask)
+            lengths = word_mask.sum(dim=1).tolist()
+            gold = word_labels.cpu().tolist()
+            for i, seq_len in enumerate(lengths):
+                y_true.append([self.tag_names[gold[i][t]] for t in range(seq_len)])
+                y_pred.append([self.tag_names[tag] for tag in decoded[i]])
 
         total_loss /= max(1, examples_count)
-
-        return {"eval_loss": total_loss}
-
-    @torch.no_grad()
-    def evaluate(
-        self, soft: bool = False, selection_log: SelectionLog | None = None
-    ) -> tuple[dict, list | None, list | None]:
-        self.model.eval()
-
-        examples_count = 0
-        total_loss = 0.0
-
-        counts_pred = [Counts(labels=self.labels_set) for _ in self.rhos]
-        counts_gold = [Counts(labels=self.labels_set) for _ in self.rhos]
-
-        for batch in tqdm(
-            self.test_dl,
-            desc="Eval",
-            leave=False,
-            dynamic_ncols=True,
-            disable=self._tqdm_disabled,
-            file=sys.stderr,
-        ):
-            batch = to_device(self.device, batch)
-
-            attn, z, g, _, examples_count, total_loss \
-                = self.forward_pass(batch, examples_count, total_loss, rhos=self.rhos)
-
-            pred_mask = z if soft else g
-
-            if self.labels_set is not None:
-                labels = batch["labels"]
-                flat_labels = [label for seq in labels for label in seq]
-                flat_attn = attn.bool().view(-1).cpu()
-
-                word_ids = batch.get("word_ids")
-                if word_ids is not None:
-                    flat_word_ids = word_ids.view(-1).cpu().tolist()
-                    flat_labels = [
-                        SPECIAL_TAG if (is_att and wid < 0 and lbl == "-100") else lbl
-                        for lbl, is_att, wid in zip(flat_labels, flat_attn.tolist(), flat_word_ids)
-                    ]
-
-                for i, pred_mask_i in enumerate(pred_mask):
-                    flat_preds = pred_mask_i.cpu().view(-1)
-                    counts_pred[i] += Counts(flat_labels, flat_attn, flat_preds)
-                    counts_gold[i] += Counts(flat_labels, flat_attn)
-
-                if selection_log is not None:
-                    selection_log.add_batch(
-                        batch["ids"].view(-1).cpu().tolist(),
-                        flat_labels,
-                        flat_attn.tolist(),
-                        pred_mask.reshape(len(self.rhos), -1),
-                        seq_len=attn.shape[1],
-                    )
-
-        total_loss /= max(1, examples_count)
-
-        if self.labels_set is not None:
-            return {"eval_loss": total_loss}, counts_pred, counts_gold
-
-        return {"eval_loss": total_loss}, None, None
+        metrics = {
+            "eval_loss": total_loss,
+            "precision": precision_score(y_true, y_pred),
+            "recall": recall_score(y_true, y_pred),
+            "f1": f1_score(y_true, y_pred),
+        }
+        return metrics, y_true, y_pred
 
     @torch.no_grad()
     def final_eval(self, record_eval_history: bool = True) -> None:
@@ -307,76 +312,27 @@ class SelectorTrainer:
             self.logger.info("Skipping full evaluation (runtime.eval.skip=true).")
             return
 
-        selection_log = None
-        if self.labels_set is not None:
-            freq_table = build_token_frequency_table(self.train_dl.dataset["ids"])
-            selection_log = SelectionLog(self.rhos, freq_table)
-
-        # Section 5 counts use the hard top-k mask g_pi(rho) per the paper's
-        # inference convention; evaluate(soft=True) would use the soft mask z.
-        eval_losses, counts_pred, counts_gold = self.evaluate(
-            soft=not bool(self.cfg.runtime.eval.get("hard", True)),
-            selection_log=selection_log,
-        )
-
+        eval_losses, y_true, y_pred = self.evaluate()
         if record_eval_history:
             self.record_eval_losses(eval_losses)
-        self.logger.info("Final evaluation: eval_loss=%.4f", eval_losses.get("eval_loss", 0.0))
+        self.logger.info(
+            "Final evaluation: eval_loss=%.4f precision=%.4f recall=%.4f f1=%.4f",
+            eval_losses["eval_loss"], eval_losses["precision"], eval_losses["recall"], eval_losses["f1"],
+        )
         self.write_loss_plot()
 
-        # Create data and plots directories
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.plots_dir.mkdir(parents=True, exist_ok=True)
-
-        # Runs unconditionally, regardless of what cfg.data.dataset was used
-        # to train -- this is what makes cross-corpus generalization (every
-        # run gets STS-B-evaluated, whatever it trained on) possible without
-        # any extra configuration.
-        base, ours, rand = run_stsb_sweep(
-            cfg=self.cfg,
-            device=self.device,
-            encoder=self.sent_encoder,
-            tokenizer=self.tokenizer,
-            selector=self.model,
-        )
-        stsb = {
-            "base": float(base),
-            "ours_by_rho": {str(float(k)): float(v) for k, v in ours.items()},
-            "random_by_rho": {str(float(k)): float(v) for k, v in rand.items()},
-        }
-
-        artifact_paths = save_eval_artifacts(
-            counts_pred=counts_pred,
-            counts_gold=counts_gold,
-            rhos=self.rhos,
-            label_order=self.label_order,
-            selection_log=selection_log,
-            stsb=stsb,
-        )
-        for metric_name, artifact_path in artifact_paths.items():
-            self.logger.info("Saved %s artifact to: %s", metric_name, artifact_path)
-
-        if "exact_test_summary" in artifact_paths:
-            with artifact_paths["exact_test_summary"].open("r", encoding="utf-8") as f:
-                summary = json.load(f)
-            z_critical = summary.get("z_critical")
-            self.logger.info(
-                "Exact test (Bonferroni, per-dataset): m=%d alpha=%.3g threshold=%.6g z_critical=%s",
-                summary.get("m", 0),
-                summary.get("alpha", 0.0),
-                summary.get("threshold", 0.0),
-                f"{z_critical:.4f}" if isinstance(z_critical, (int, float)) else "n/a",
-            )
-
-        plot_paths = save_eval_plots(artifact_paths.keys(), dataset_name=self.cfg.data.dataset)
-        for metric_name, plot_path in plot_paths.items():
-            self.logger.info("Saved %s plot to: %s", metric_name, plot_path)
+        span_report, token_report, binary_report = self._build_ner_reports(y_true, y_pred)
+        report = {"span_level": span_report, "token_level": token_report, "binary_entity_level": binary_report}
+        report_path = self.data_dir / "ner_classification_report.json"
+        report_path.write_text(json.dumps(report, indent=2, default=lambda o: o.item()), encoding="utf-8")
+        self.logger.info("Saved NER classification report to %s", report_path)
 
     def train(self) -> None:
         start_epoch = 0
-        
-        if self.cfg.train.untrained:
-            self.logger.info("No train run, only initializated model evaluation")
+
+        if self.cfg.train.get("untrained", False):
+            self.logger.info("No train run, only initialized model evaluation")
             self.final_eval()
             return
 
@@ -430,40 +386,42 @@ class SelectorTrainer:
                 batch = to_device(self.device, batch)
                 self.optimizer.zero_grad(set_to_none=True)
 
-                # The reconstruction-loss forward+backward is the dominant training
-                # cost and scales linearly with the number of rhos evaluated per
-                # step, so a random subset is used here (full sweep still covers
-                # every rho over the course of training via resampling). Eval
-                # always uses the full sweep (self.rhos) via forward_pass's default.
-                if self.rhos_per_step < len(self.rhos):
-                    step_rho_idx = torch.randperm(len(self.rhos))[: self.rhos_per_step]
-                    step_rhos = [self.rhos[i] for i in step_rho_idx.tolist()]
-                else:
-                    step_rhos = self.rhos
-
-                _, _, _, loss, examples_count, total_loss \
-                    = self.forward_pass(batch, examples_count, total_loss, rhos=step_rhos)
+                _, _, _, loss = self.forward_pass(batch)
 
                 loss.backward()
                 self.optimizer.step()
 
+                bs = batch["ids"].size(0)
+                examples_count += bs
+                total_loss += loss.item() * bs
+
             total_loss /= max(1, examples_count)
-            
+
             train_losses = {"train_loss": total_loss}
             self.record_train_losses(train_losses)
 
             if self.skip_eval:
-                eval_losses = {"eval_loss": float("nan")}
+                eval_losses = {
+                    "eval_loss": float("nan"),
+                    "precision": float("nan"),
+                    "recall": float("nan"),
+                    "f1": float("nan"),
+                }
             else:
-                eval_losses = self.short_evaluate()
+                eval_losses, y_true, y_pred = self.evaluate()
                 self.record_eval_losses(eval_losses)
+                span_report, token_report, binary_report = self._build_ner_reports(y_true, y_pred)
+                self.record_ner_report(epoch + 1, span_report, token_report, binary_report)
 
             self.logger.info(
-                "Epoch %d/%d | train_loss=%.4f | eval_loss=%.4f",
+                "Epoch %d/%d | train_loss=%.4f | eval_loss=%.4f | precision=%.4f | recall=%.4f | f1=%.4f",
                 epoch + 1,
                 self.epochs,
                 train_losses.get("train_loss", 0.0),
                 eval_losses.get("eval_loss", 0.0),
+                eval_losses.get("precision", 0.0),
+                eval_losses.get("recall", 0.0),
+                eval_losses.get("f1", 0.0),
             )
             self.completed_epochs = epoch + 1
             self.save_checkpoint(epoch + 1)
@@ -481,6 +439,17 @@ class SelectorTrainer:
         self.final_eval()
 
 
+def _resolve_ner_tag_names(dataset_name: str) -> list[str]:
+    name = canonical_name(dataset_name)
+    if name not in {"wikiann", "conll2003", "conll2000", "movie_rationales"}:
+        raise ValueError(
+            f"task=ner requires a per-token-labeled dataset (wikiann, "
+            f"conll2003, conll2000, or movie_rationales), got dataset={dataset_name!r}."
+        )
+    tag_map = LABEL_DISPLAY_NAMES[name]
+    return [tag_map[str(i)] for i in range(len(tag_map))]
+
+
 @hydra_main(config_path="conf", config_name="default", version_base="1.1")
 def main(cfg: DictConfig) -> None:
     start_capture = start_run_metrics_capture()
@@ -496,7 +465,7 @@ def main(cfg: DictConfig) -> None:
     if changed_device:
         logger.warning("CUDA requested but unavailable, using CPU.")
 
-    train_dl, test_dl, encoder, tokenizer, labels_set, _ = initialize_data(
+    train_dl, test_dl, encoder, _, _, _ = initialize_data(
         cfg.data,
         cfg.runtime.data,
         logger,
@@ -504,9 +473,8 @@ def main(cfg: DictConfig) -> None:
         keep_special=bool(cfg.model.get("keep_special", True)),
     )
 
-    trainer = SelectorTrainer(
-        cfg, train_dl, test_dl, encoder, tokenizer, labels_set, logger, xp, start_capture
-    )
+    tag_names = _resolve_ner_tag_names(cfg.data.dataset)
+    trainer = NERTrainer(cfg, train_dl, test_dl, encoder, tag_names, logger, xp, start_capture)
 
     if cfg.train.no_train:
         trainer.load_checkpoint(Path(os.getcwd()) / "state/models/" / str(cfg.train.checkpoint_path))

@@ -1,23 +1,13 @@
-- controllare loss nelle run degeneri rispetto a quelle normali
-- controllare la distribuzione delle label se è stabile
-- altri encoder (quelli più usati nel landscape)
+- controllo del xi square e del multitesting (chiedi a veronica se serve)
+- fare il downstream test
+- stressare che è meglio degli altri perché può fare una cosa che gli altri non fanno, far capire bene che è una roba diversa dagli altri
 
-- trovare una metrica per misurare la differenza di distribuzione tra le label
-    - farlo tra varie run
-    - farlo tra dataset con diverse 
+- leggenda dell'STS-B con le righe tratteggiate
 
-- controllare l'interdipenza tra le label di diversi dataset
+5.1: STS-B suffiency in domain
+5.2: NER across encoders
+5.3 diventa il grounding test
+5.4: sts-b out domain
+5.5: biases in sbert
 
-- related: 
-    - fare la versione dove mean pool per fare vedere come mai è meglio, sarebbe risultati trivial, SOTTO STS-B
-    - anche untrained
-
-- 2/3 sentence e token encoder
-
-- vedere se il nostro modello produce ranking che sono sottoinsieme li uni degli altri (con condizionamento su rho o no)
-
-- controllare il modello non allenato
-- matrice di profilo di selezioni (ictus plot)
-    - heatmap e rank medio (std del rank del cls)
-
-- nuovi plot: heatmap con colore inutile, colore preso sempre, colore non preso mai
+datasets e encoder all'inizio del 5

@@ -1,73 +1,105 @@
 import logging, torch
 from pathlib import Path
-from typing import Callable, Optional, TypedDict
+from typing import TypedDict
 from typing_extensions import NotRequired
-from datasets import Dataset, DatasetDict, load_dataset, load_from_disk, Value, Sequence
+from datasets import DatasetDict, load_from_disk, Value, Sequence
 from dora import to_absolute_path
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 from transformers import PreTrainedTokenizerBase
 
-from .sentence import ALIAS_TO_CANON, resolve_tokenizer_group, build_sentence_encoder, SentenceEncoder
+from .sentence import ALIAS_TO_CANON, build_sentence_encoder, SentenceEncoder
 
 from .datasets_builders import (
-    build_both_parasci,
     build_conll2000,
     build_movie_reviews,
-    build_shape,
-    build_twitter,
-    build_ud,
-    build_treebank,
     build_conll2003,
     build_wikiann,
-    map_conll2003_secondary_labels,
-    build_wikiann_swap,
-    build_ud_pos
+    build_stsb,
 )
 
 ALIASES = {
-    "cnn_dailymail": {"cnn", "cnn_dailymail"},
-    "shape": {"shape"},
     "wikiann": {"wikiann"},
     "conll2003": {"conll2003", "conll03"},
     "conll2000": {"conll2000", "conll00"},
-    "ud": {"ud"},
-    "ud_pos": {"ud_raw","ud_pos"},
-    "treebank": {"treebank", "tb"},
     "movie_rationales": {"movie_rationales", "mr"},
-    "parasci": {"parasci", "ps"},
-    "parasci_concat": {"parasci_concat", "parasci-concat", "prsc"},
-    "tweet_sentiment": {"tweet_sentiment", "twitter", "twt"},
-    "mpqa": {"mpqa"},
-    "fever": {"fever"},
-    "glue": {"glue", "stsb"},
-    "wikiann_swap": {"wikiann_swap"},
-    "emails_pwc": {"emails_pwc", "emails", "enron", "pwc"},
+    "stsb": {"stsb", "sts-b", "stsb-en"},
 }
 
-TEXT_FIELD = {
-    "cnn_dailymail": "article",
-    "shape": "tokens",
-    "wikiann": "tokens",
-    "conll2003": "tokens",
-    "conll2000": "tokens",
-    "ud": "tokens",
-    "treebank": "tokens",
-    "movie_rationales": "tokens",
-    "parasci": "tokens",
-    "parasci_concat": "tokens",
-    "tweet_sentiment": "tokens",
-    "mpqa": "text",
-    "fever": "claim",
-    "glue": "sentence1",
+BUILDERS = {
+    "wikiann": build_wikiann,
+    "conll2003": build_conll2003,
+    "conll2000": build_conll2000,
+    "movie_rationales": build_movie_reviews,
+    "stsb": build_stsb,
 }
 
 PAD_TAG = "-100"
 SPECIAL_TAG = "special"
 
-SECONDARY_LABELS_DS = {
-    "conll2003": map_conll2003_secondary_labels,
+# Fixed across every run so dataset-level example ordering never varies with
+# train.seed (see shuffle_and_subset) -- only weight init/dropout/batch order do.
+DATASET_SHUFFLE_SEED = 42
+
+# ---------------------------------------------------------------------------
+# Human-readable label display names, keyed by canonical dataset name.
+# Inner dict: raw label string (as stored after the ClassLabel->string cast
+# in get_dataset) -> real tag name. For wikiann/conll03 these are the actual
+# BIO entity tags (needed for seqeval, not just display); other datasets are
+# shown/used with their raw label unchanged.
+# ---------------------------------------------------------------------------
+LABEL_DISPLAY_NAMES: dict[str, dict[str, str]] = {
+    "conll03": {
+        "0": "O",
+        "1": "B-PER",
+        "2": "I-PER",
+        "3": "B-ORG",
+        "4": "I-ORG",
+        "5": "B-LOC",
+        "6": "I-LOC",
+        "7": "B-MISC",
+        "8": "I-MISC",
+    },
+    "wikiann": {
+        "0": "O",
+        "1": "B-PER",
+        "2": "I-PER",
+        "3": "B-ORG",
+        "4": "I-ORG",
+        "5": "B-LOC",
+        "6": "I-LOC",
+    },
+    "mr": {
+        "0": "not rationale",
+        "1": "rationale",
+    },
+    # CoNLL-2000 has no ClassLabel encoding upstream (NLTK's iob_sents()
+    # yields raw tag strings, not integer ids) -- this fixes a canonical
+    # index order for the 23 tags actually observed across train+test
+    # (11 phrase types x {B,I}, plus O), needed by the NER probe's output
+    # layer. The rationale/bias-test pipeline doesn't need this at all: it
+    # keys everything by the raw tag string directly.
+    "conll2000": {
+        "0": "O",
+        "1": "B-ADJP", "2": "I-ADJP",
+        "3": "B-ADVP", "4": "I-ADVP",
+        "5": "B-CONJP", "6": "I-CONJP",
+        "7": "B-INTJ", "8": "I-INTJ",
+        "9": "B-LST", "10": "I-LST",
+        "11": "B-NP", "12": "I-NP",
+        "13": "B-PP", "14": "I-PP",
+        "15": "B-PRT", "16": "I-PRT",
+        "17": "B-SBAR", "18": "I-SBAR",
+        "19": "B-UCP", "20": "I-UCP",
+        "21": "B-VP", "22": "I-VP",
+    },
 }
+# Also index by canonical_name() output, so lookups keyed on the canonical
+# name (e.g. NER scoring) work regardless of which alias the user passed in
+# data.dataset (view.py's plotting lookups key on the raw override string, so
+# both spellings are kept).
+LABEL_DISPLAY_NAMES["conll2003"] = LABEL_DISPLAY_NAMES["conll03"]
+LABEL_DISPLAY_NAMES["movie_rationales"] = LABEL_DISPLAY_NAMES["mr"]
 
 class TokenizedExample(TypedDict):
     ids: list[int]
@@ -75,7 +107,6 @@ class TokenizedExample(TypedDict):
     word_ids: list[int | None]
     tokens: list[str]
     labels: NotRequired[list[str]]
-    scnd_labels: NotRequired[list[str]]
 
 class CollatedBatch(TypedDict, total=False):
     ids: torch.Tensor
@@ -83,7 +114,6 @@ class CollatedBatch(TypedDict, total=False):
     word_ids: torch.Tensor
     tokens: list[list[str]]
     labels: list[list[str]]
-    scnd_labels: list[list[str]]
 
 def canonical_name(name: str) -> str:
     for canon, aliases in ALIASES.items():
@@ -92,34 +122,19 @@ def canonical_name(name: str) -> str:
     raise ValueError(f"Unknown dataset name: {name}")
 
 
-def dataset_path(
-    name: str,
-    tokenizer_group: str,
-    max_length: int,
-    encoder_name: str | None,
-    config: dict | None,
-) -> Path:
-    suffix = f"_tok={tokenizer_group}_len={max_length}"
-    if encoder_name:
-        suffix += f"_enc={encoder_name.replace('/', '__')}"
-    if config:
-        suffix += "_" + "_".join(str(v) for v in config.values())
-    return Path(to_absolute_path(f"./data/cache/{name}{suffix}"))
+def dataset_path(name: str, family: str, max_length: int) -> Path:
+    return Path(to_absolute_path(f"./data/cache/{name}_tok={family}_len={max_length}"))
 
 
 def shuffle_and_subset(ds: DatasetDict, subset: float | int | None, shuffle: bool) -> DatasetDict:
     if shuffle:
-        ds = DatasetDict({k: v.shuffle(seed=42) for k, v in ds.items()})
+        ds = DatasetDict({k: v.shuffle(seed=DATASET_SHUFFLE_SEED) for k, v in ds.items()})
 
     if subset is None or subset == 1.0:
         return ds
 
-    assert "train" in ds and "test" in ds, "Expected train/test splits"
-    n_train = int(len(ds["train"]) * subset) if subset <= 1 else int(subset)
-    n_test = int(len(ds["test"]) * subset) if subset <= 1 else int(subset)
-
-    ds["train"] = ds["train"].select(range(n_train))
-    ds["test"] = ds["test"].select(range(n_test))
+    ds["train"] = subset_split(ds["train"], subset)
+    ds["test"] = subset_split(ds["test"], subset)
     return ds
 
 
@@ -173,146 +188,74 @@ def collate(batch: list[TokenizedExample]) -> CollatedBatch:
             for x in labels
         ]
 
-    if "scnd_labels" in batch[0]:
-        scnd_labels = [x["scnd_labels"] for x in batch]
-        scnd_max_len = max(len(x) for x in scnd_labels)
-        out["scnd_labels"] = [
-            x + [PAD_TAG] * (scnd_max_len - len(x))
-            for x in scnd_labels
-        ]
-        
     return out
 
 
-def resolve_dataset(
-    name: str,
-    text_field: str = "tokens",
-    logger: Optional[logging.Logger] = None,
-    config: dict | None = None,
-) -> DatasetDict:
+def resolve_dataset(name: str, logger: logging.Logger | None = None) -> DatasetDict:
     if logger:
         logger.info(f"Resolving dataset: {name}")
 
-    if name == "conll2000":
-        ds = build_conll2000()
-    elif name == "movie_rationales":
-        ds = build_movie_reviews()
-    elif name == "tweet_sentiment":
-        ds = build_twitter()
-    elif name == "shape":
-        assert config is not None and "shape" in config, "Shape dataset requires 'shape' config."
-        original_name = canonical_name(config["shape"]["original"])
-        rate = config["shape"]["rate"]
-        if rate > 1.0:
-            rate = float(rate) / 100.0
-        original_ds = resolve_dataset(original_name, text_field=config["shape"].get("text_field", "tokens"))
-        ds = build_shape(original_ds, rate=rate)
-    elif name == "ud":
-        ds = build_ud()
-    elif name in {"parasci", "parasci_concat"}:
-        a, b = build_both_parasci()
-        ds = a if name == "parasci" else b
-    elif name == "treebank":
-        ds = build_treebank()
-    elif name == "fever":
-        ds = load_from_disk(to_absolute_path("./data/raw/fever"))
-    elif name == "glue":
-        ds = load_dataset("glue", "stsb", trust_remote_code=True)
-    elif name == "conll2003":
-        ds = build_conll2003()
-    elif name == "wikiann":
-        ds = build_wikiann()
-    elif name == "wikiann_swap":
-        ds = build_wikiann_swap()
-    elif name == "cnn_dailymail":
-        ds = load_dataset("cnn_dailymail", "3.0.0", trust_remote_code=True)
-    elif name == "ud_pos":
-        ds = build_ud_pos()
-    elif name == "emails_pwc":
-        ds = load_from_disk(to_absolute_path("./data/raw/emails_pwc"))
-    else:
-        raise ValueError(f"Unsupported dataset: {name}")
-
-    if text_field != "tokens":
-        ds = ds.rename_column(text_field, "tokens")
+    ds = BUILDERS[name]()
 
     assert isinstance(ds, DatasetDict), "Expected DatasetDict"
     assert "train" in ds and "test" in ds, "Dataset must have train and test splits"
     return ds
 
+
 def encode_examples(
     data_cfg: dict,
     ds: DatasetDict,
     tokenizer: PreTrainedTokenizerBase,
-    scnd_labels_map: Callable | None = None,
 ) -> DatasetDict:
-    labels_present = "labels" in ds["train"].column_names
+    # E5 is trained with a "query: " prefix on every input -- the model card
+    # documents unprefixed text as a known way to degrade embedding quality.
+    # "query: " (rather than "passage: ") is E5's own recommended choice for
+    # symmetric tasks (similarity/clustering), which is what both the
+    # selector's cosine-similarity loss and the downstream probes are.
+    # Prepended at the id level (not the word list) so it reuses the existing
+    # None-word_id -> PAD_TAG handling below, same as any other added token,
+    # with no offset bookkeeping needed.
+    family = ALIAS_TO_CANON[data_cfg.encoder.family.lower()]
+    prefix_ids = tokenizer.encode("query: ", add_special_tokens=False) if family == "e5" else []
 
     def _encode(example: dict) -> TokenizedExample:
-        text = example["tokens"]
+        budget = max(1, data_cfg.max_length - len(prefix_ids))
         enc = tokenizer(
-            text,
+            example["tokens"],
             truncation=True,
-            max_length=data_cfg.max_length,
-            is_split_into_words=isinstance(text, list),
+            max_length=budget,
+            is_split_into_words=True,
         )
-        
+
+        ids = prefix_ids + enc["input_ids"]
+        attn_mask = [1] * len(prefix_ids) + enc["attention_mask"]
+        word_ids = [None] * len(prefix_ids) + enc.word_ids()
+
         out = {
-            "ids": enc["input_ids"],
-            "attn_mask": enc["attention_mask"],
-            "tokens": tokenizer.convert_ids_to_tokens(enc["input_ids"]),
-            "word_ids": enc.word_ids(),
+            "ids": ids,
+            "attn_mask": attn_mask,
+            "tokens": tokenizer.convert_ids_to_tokens(ids),
+            "word_ids": word_ids,
         }
 
-        labels = example.get("labels", None)
-        if labels_present and labels is not None:
-            word_ids = enc.word_ids()
-            aligned_labels = []
-            for wid in word_ids:
-                if wid is None:
-                    aligned_labels.append(PAD_TAG)
-                else:
-                    aligned_labels.append(str(labels[wid]))
-            out["labels"] = aligned_labels
-            if scnd_labels_map is not None:
-                out["scnd_labels"] = scnd_labels_map(aligned_labels)
+        labels = example.get("labels")
+        if labels is not None:
+            out["labels"] = [
+                PAD_TAG if wid is None else str(labels[wid])
+                for wid in word_ids
+            ]
 
         return out
 
-    cols = ["ids", "attn_mask", "tokens", "word_ids"]
-    if labels_present:
-        cols.append("labels")
-        if scnd_labels_map is not None:
-            cols.append("scnd_labels")
-
-    out = DatasetDict()
-    template_features = None
-    for split, d in ds.items():
-        if len(d) == 0:
-            if template_features is None:
-                continue
-            out[split] = Dataset.from_dict({c: [] for c in cols}, features=template_features)
-            continue
-
-        # Map to add new columns, remove old ones
-        mapped = d.map(
+    return DatasetDict({
+        split: d.map(
             _encode,
-            batched=False,
             desc=f"Encoding {split} split",
             load_from_cache_file=False,
-            remove_columns=d.column_names  # Remove all original columns, keep only what _encode returns
+            remove_columns=d.column_names,
         )
-        out[split] = mapped
-        if template_features is None:
-            template_features = mapped.features
-
-    # Add empty datasets for any splits that were skipped (empty with no features established yet)
-    for split in ds:
-        if split not in out:
-            kw = {"features": template_features} if template_features is not None else {}
-            out[split] = Dataset.from_dict({c: [] for c in cols}, **kw)
-
-    return out
+        for split, d in ds.items()
+    })
 
 
 def get_dataset(
@@ -321,40 +264,29 @@ def get_dataset(
     tokenizer: PreTrainedTokenizerBase,
     logger: logging.Logger | None = None,
 ) -> DatasetDict:
-    tokenizer_group = resolve_tokenizer_group(data_cfg.encoder.family)
+    # Keyed by family, not tokenizer_group: e5 shares its underlying
+    # tokenizer with sbert (both "bert-base") but now encodes different ids
+    # (the "query: " prefix), so they can no longer share one cache file.
+    family = ALIAS_TO_CANON[data_cfg.encoder.family.lower()]
     name = canonical_name(data_cfg.dataset)
-    path = dataset_path(
-        name,
-        tokenizer_group,
-        int(data_cfg.max_length),
-        data_cfg.encoder.get("name"),
-        data_cfg.get("config"),
-    )
+    path = dataset_path(name, family, int(data_cfg.max_length))
 
-    text_field = TEXT_FIELD.get(name, "tokens")
     if path.exists() and not runtime_cfg.rebuild:
-        ds = load_from_disk(path)
-        if text_field != "tokens" and "tokens" not in ds["train"].column_names and text_field in ds["train"].column_names:
-            ds = ds.rename_column(text_field, "tokens")
         if logger:
-            logger.info(f"Loading cached TOKENIZED dataset from {path}")
-        assert "ids" in ds["train"].column_names and "attn_mask" in ds["train"].column_names
-        return ds
+            logger.info(f"Loading cached tokenized dataset from {path}")
+        return load_from_disk(path)
 
     if logger:
-        logger.info(f"Building + tokenizing dataset (NO embeddings): {name}")
+        logger.info(f"Building + tokenizing dataset: {name}")
 
-    ds_dict = resolve_dataset(name, text_field, logger, config=data_cfg.get("config", None))
-    
+    ds_dict = resolve_dataset(name, logger)
+
     features = ds_dict["train"].features.copy()
     if "labels" in features:
         features["labels"] = Sequence(Value("string"))
-    if "scnd_labels" in features:
-        features["scnd_labels"] = Sequence(Value("string"))
     ds_dict = ds_dict.cast(features)
 
-    scnd_labels_map = SECONDARY_LABELS_DS.get(name, None)
-    ds_tok = encode_examples(data_cfg, ds_dict, tokenizer, scnd_labels_map=scnd_labels_map)
+    ds_tok = encode_examples(data_cfg, ds_dict, tokenizer)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     ds_tok.save_to_disk(path)
@@ -392,9 +324,6 @@ def initialize_data(
     encoder: SentenceEncoder | None = None,
     tokenizer: PreTrainedTokenizerBase | None = None,
 ) -> tuple[DataLoader, DataLoader, SentenceEncoder, PreTrainedTokenizerBase, set[str] | None, DatasetDict]:
-    family = ALIAS_TO_CANON[data_cfg.encoder.family.lower()]
-    assert keep_special or family != "bge", "keep_special=false is not supported for BGE."
-
     if encoder is None or tokenizer is None:
         encoder, tokenizer = build_sentence_encoder(
             family=data_cfg.encoder.family,

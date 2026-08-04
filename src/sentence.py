@@ -11,7 +11,6 @@ from transformers import AutoModel, AutoTokenizer
 ALIASES = {
     "sbert": {"sbert"},
     "e5": {"e5", "retrieval", "gte"},
-    "bge": {"bge", "late"},
     "llm": {"llm"},
 }
 
@@ -24,19 +23,16 @@ ALIAS_TO_CANON = {
 DEFAULT_MODEL_NAMES = {
     "sbert": "sentence-transformers/all-MiniLM-L6-v2",
     "e5": "intfloat/e5-base-v2",
-    "bge": "BAAI/bge-base-en-v1.5",
     "llm": "EleutherAI/pythia-410m",
 }
 
 TOKENIZER_GROUPS = {
     "bert-base": {"sbert", "e5", "retrieval", "gte"},
-    "bge": {"bge", "late"},
     "gpt": {"llm"},
 }
 
 CANONICAL_TOKENIZERS = {
     "bert-base": "bert-base-uncased",
-    "bge": "BAAI/bge-base-en-v1.5",
     "gpt": "EleutherAI/pythia-410m",
 }
 
@@ -132,6 +128,18 @@ class SentenceEncoder(nn.Module):
     - token_embeddings(ids, attn) does the heavy transformer forward once.
     - pool(token_emb, pool_mask) computes sentence repr for an arbitrary pool_mask.
       pool_mask is where your selector's g lives (e.g., pool_mask = attn * g).
+      Always mean pooling, regardless of encoder family: this pools an
+      arbitrary (possibly learned) token subset, and "last real token"
+      pooling has no well-defined meaning for a subset that need not include
+      the sequence's last token -- mean is the only generally sensible
+      reduction here.
+    - pool_full(token_emb, attn_mask) computes the encoder's own canonical
+      whole-sentence embedding (the *entire* real sequence, not a subset),
+      using each family's standard convention: mean pooling by default here,
+      overridden to last-token pooling for causal encoders (see
+      FrozenLLMEncoder) where every earlier position's hidden state has only
+      attended to a left-context prefix and mean-pooling them in would dilute
+      the one position that actually saw the whole sentence.
     """
     def __init__(self, normalize: bool) -> None:
         super().__init__()
@@ -144,6 +152,9 @@ class SentenceEncoder(nn.Module):
         mask = pool_mask.unsqueeze(-1).type_as(token_emb)
         sent_emb = (token_emb * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-6)
         return F.normalize(sent_emb, dim=-1) if self.normalize else sent_emb
+
+    def pool_full(self, token_emb: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
+        return self.pool(token_emb, attn_mask)
 
 
 # -----------------------------------------------------------------------------
@@ -179,19 +190,21 @@ class FrozenE5(_FrozenHFEncoder):
         return bert_token_embeddings(self.model, input_ids, attention_mask)
 
 
-class FrozenBGE(_FrozenHFEncoder):
-    def token_embeddings(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-        return bert_token_embeddings(self.model, input_ids, attention_mask)
-
-    def pool(self, token_emb: torch.Tensor, pool_mask: torch.Tensor) -> torch.Tensor:
-        # BGE convention: use CLS token. pool_mask is irrelevant here.
-        sent_emb = token_emb[:, 0]
-        return F.normalize(sent_emb, dim=-1) if self.normalize else sent_emb
-
-
 class FrozenLLMEncoder(_FrozenHFEncoder):
     def token_embeddings(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         return gpt_token_embeddings(self.model, input_ids, attention_mask)
+
+    def pool_full(self, token_emb: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
+        # Causal attention means only the last real token has attended to the
+        # whole sequence -- standard practice for embedding a causal LM's
+        # sentence representation is to take that position, not mean-pool
+        # (see e.g. GritLM/LLM2Vec/PromptEOL-style extraction). Assumes
+        # right-padding (this repo's tokenizers are configured that way).
+        lengths = attn_mask.sum(dim=1).clamp(min=1).long()
+        last_idx = lengths - 1
+        batch_idx = torch.arange(token_emb.shape[0], device=token_emb.device)
+        sent_emb = token_emb[batch_idx, last_idx]
+        return F.normalize(sent_emb, dim=-1) if self.normalize else sent_emb
 
 
 # -----------------------------------------------------------------------------
@@ -215,8 +228,6 @@ def build_sentence_encoder(
         encoder = FrozenSBERT(encoder_name, normalize=False)
     elif family == "e5":
         encoder = FrozenE5(encoder_name, normalize=False)
-    elif family == "bge":
-        encoder = FrozenBGE(encoder_name, normalize=False)
     elif family == "llm":
         encoder = FrozenLLMEncoder(encoder_name, normalize=False)
     else:

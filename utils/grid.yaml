@@ -1,9 +1,18 @@
 baseline:
   - "runtime.grid=true"
-  - "data.dataset=stsb"
+  - "data.dataset=wikiann"
   - "runtime.data.batch_size=16"
+  # Lets re-running this grid resume gracefully: SelectorTrainer.train()
+  # already resumes from the latest checkpoint when continue=true (or just
+  # re-runs final_eval if a run already finished all its epochs), so an
+  # interrupted grid can just be re-launched as-is.
+  - "train.continue=true"
 sweep:
-  - [data.encoder.family=e5, "run=1"]
-  - [data.encoder.family=e5, "run=2"]
-  - [data.encoder.family=llm, "run=1"]
-  - [data.encoder.family=llm, "run=2"]
+  # sbert intentionally omitted: 97d170e1 already has a complete sbert run
+  # for wikiann (trained standalone, batch_size=64, not through this grid) --
+  # re-running final_eval on it (e.g. via `dora run --from_sig 97d170e1
+  # train.no_train=true train.checkpoint_path=model_10.pth
+  # runtime.eval.skip=false`) picks up the new exact test automatically
+  # without retraining.
+  - [data.encoder.family=e5, "run=1", "train.seed=1"]
+  - [data.encoder.family=llm, "run=1", "train.seed=1"]

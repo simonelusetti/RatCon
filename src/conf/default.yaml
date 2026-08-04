@@ -1,27 +1,35 @@
 defaults:
   - _self_
 
+task: "rationale"  # "rationale" (selector, default) or "ner" (per-token MLP downstream probe)
+
 model:
   keep_special: false
   selector:
     condition_on_rho: true
-    hard: false
     tau_rank: 0.05
-    gamma_rank: 2.0
     tau_gate: 0.2
   loss:
-    tau: 1.0
     sweep_range: [0.1, 1.0, 10]
   optim:
     lr: 1e-3
     weight_decay: 1e-2
     betas: [0.9, 0.999]
 
+ner:
+  hidden: 256
+  dropout: 0.1
+  # Off by default to match the reported wikiann/conll2003 probes, which
+  # were trained with plain unweighted cross-entropy. Turn on for datasets
+  # with severe label imbalance (e.g. movie_rationales' ~5.4:1 skew), where
+  # unweighted CE collapses the probe to always predicting the majority
+  # class.
+  class_weighted: false
+
 data:
   shuffle: false
   max_length: 512
   dataset: "wikiann"
-  config: null
   subset: 1.0
   encoder:
     family: "sbert"
@@ -33,6 +41,14 @@ train:
   continue: false
   checkpoint_path: model_10.pth
   untrained: false
+  seed: 42
+  # Random rhos sampled per training step out of model.loss.sweep_range's full
+  # sweep (still covers the full range over the course of training via
+  # resampling). The reconstruction-loss forward+backward is the dominant
+  # training cost and scales linearly with this count, so this is the main
+  # lever on training time. Set >= sweep_range's count (or to null) to use
+  # the full sweep every step.
+  rhos_per_step: 3
 
 runtime:
   grid: false
@@ -46,9 +62,12 @@ runtime:
     batch_size: 64
     num_workers: 2
   eval:
-    hard: false
+    hard: true
     short_log: false
     skip: false
+    # STS-B sufficiency-test sweep (src/retrival_fun.py): a finer 20-point
+    # grid than model.loss.sweep_range's 10-point training sweep, since this
+    # is a cheap forward-only eval, not a training cost.
     sweep_range: [0.1, 1.0, 20]
     random_selector:
       runs: 5
@@ -60,5 +79,6 @@ dora:
     - "train.no_train"
     - "train.continue"
     - "train.checkpoint_path"
+    - "train.seed"
 
 run: 0

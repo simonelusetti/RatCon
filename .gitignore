@@ -18,6 +18,10 @@ linearize.log
 rank linearized.md
 .claude/
 
+# Local AI-assistant tooling config, not part of the project.
+.codex
+AGENTS.md
+
 # Paper sources and build artifacts, kept out of the code repo.
 *.tex
 *.pdf

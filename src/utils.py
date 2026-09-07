@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import sys
 import time
 import resource
@@ -11,12 +12,29 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from dora import XP
+from forge.core import ExperimentRun
+from omegaconf import OmegaConf
 from prettytable import PrettyTable
 from tqdm import tqdm
 
 
 tqdm._instances.clear()
+
+
+# Captured at import time, which forge guarantees happens before the run
+# starts: commands.run() imports the entry-point module first and only then
+# calls main() -> start_run(), and start_run() is what chdirs into the run
+# directory. Anything addressed relative to where the user launched `forge`
+# (the dataset cache, most importantly) has to be resolved against this
+# rather than against the live cwd. Replaces dora.to_absolute_path, which
+# got the same value from hydra's original-cwd bookkeeping.
+LAUNCH_CWD = Path.cwd()
+
+
+def to_absolute_path(path: str | Path) -> Path:
+    """Resolve *path* against the directory `forge` was launched from."""
+    path = Path(path)
+    return path if path.is_absolute() else (LAUNCH_CWD / path).resolve()
 
 
 def remap_checkpoint_state_dict(state_dict: dict, model_state_dict: dict) -> dict:
@@ -84,37 +102,29 @@ def load_json(path: Path) -> Any:
         return json.load(f)
 
 
-def write_metrics_artifacts(
+def write_metrics_details(
     cfg: dict,
-    xp: XP,
-    train_loss_history: Sequence[Mapping[str, float]],
-    eval_loss_history: Sequence[Mapping[str, float]],
+    run: ExperimentRun,
     start_capture: RunStartCapture,
     epochs_completed: int,
     epochs_target: int,
     training_completed: bool,
 ) -> None:
-    run_statistics = _build_run_statistics(start_capture)
-    final_losses = dict(eval_loss_history[-1]) if eval_loss_history else {}
+    """Write the nested `metrics_details.json` side-artifact.
 
-    compact_metrics = {
-        "run_statistics": run_statistics,
-        "final_losses": final_losses,
-        "training_progress": {
-            "epochs_completed": int(epochs_completed),
-            "epochs_target": int(epochs_target),
-            "completed": bool(training_completed),
-        },
-    }
-
+    forge owns `metrics.json` (written by run.finish() from the flat dict
+    build_final_metrics returns) and `logs.jsonl` (run.push_log); this keeps
+    the richer nested payload -- resource usage, the resolved runtime -- that
+    doesn't fit a flat metrics table but is worth having per run.
+    """
     training_cfg = cfg.get("train", {}) if isinstance(cfg, Mapping) else {}
     runtime_cfg = cfg.get("runtime", {}) if isinstance(cfg, Mapping) else {}
     runtime_data_cfg = runtime_cfg.get("data", {}) if isinstance(runtime_cfg, Mapping) else {}
 
-    details_metrics = {
+    _write_json("metrics_details.json", {
         "experiment": {
-            "signature": xp.sig,
-            "folder": str(xp.folder),
+            "signature": run.signature,
+            "folder": str(run.path),
         },
         "training": {
             "epochs_target": int(training_cfg.get("epochs", 0) or 0),
@@ -129,23 +139,92 @@ def write_metrics_artifacts(
             "batch_size": int(runtime_data_cfg.get("batch_size", 0) or 0),
             "num_workers": int(runtime_data_cfg.get("num_workers", 0) or 0),
         },
-        "run_statistics": run_statistics,
+        "run_statistics": _build_run_statistics(start_capture),
+    })
+
+
+def build_final_metrics(
+    eval_loss_history: Sequence[Mapping[str, float]],
+    start_capture: RunStartCapture,
+    epochs_completed: int,
+) -> dict[str, float]:
+    """Flat metrics dict for ExperimentRun.finish().
+
+    Flat and scalar-valued on purpose: this is what `forge metrics` renders
+    as table columns, so nested payloads go to metrics_details.json instead.
+    """
+    stats = _build_run_statistics(start_capture)
+    return {
+        **{str(k): float(v) for k, v in (eval_loss_history[-1] if eval_loss_history else {}).items()},
+        "epochs_completed": int(epochs_completed),
+        "duration_seconds": float(stats["duration_seconds"]),
+        "max_rss_gb": stats["resources"]["max_rss_bytes"] / 1024 ** 3,
     }
 
-    metrics_file = str(cfg.get("metrics_file", "metrics.json"))
-    metrics_details_file = str(cfg.get("metrics_details_file", "metrics_details.json"))
-    _write_json(metrics_details_file, details_metrics)
-    if training_completed:
-        _write_json(metrics_file, compact_metrics)
+
+def checkpoint_epoch(checkpoint_path: Path) -> int | None:
+    match = re.fullmatch(r"model_(\d+)\.pth", checkpoint_path.name)
+    return int(match.group(1)) if match else None
+
+
+def _run_seed(runtime_yaml: Path) -> Any:
+    """The seed recorded in a run's runtime.yaml, or None if absent."""
+    if not runtime_yaml.exists():
+        return None
+    return OmegaConf.select(OmegaConf.load(runtime_yaml), "seed")
+
+
+def find_resume_checkpoint(run: ExperimentRun) -> tuple[int, Path] | None:
+    """Highest-epoch `model_<n>.pth` among this experiment's *same-seed* runs.
+
+    dora reused a single directory per signature, so `train.continue=true`
+    only had to look in the cwd. forge gives every launch its own run
+    directory under the shared experiment directory, so resuming has to look
+    across sibling runs -- the freshly created run dir is always empty, and
+    would otherwise read as a cold start.
+
+    Restricted to runs sharing this run's seed, because `runtime.seed` is
+    excluded from the experiment signature: every seed of a configuration is
+    a run of the *same* experiment. Without the filter, a seed sweep launched
+    with continue=true would find an already-finished run under a different
+    seed, conclude it had reached the target epoch, and skip training
+    entirely -- silently returning a set of identical runs instead of
+    independent seeds. Resuming is meant to continue one trajectory, and a
+    different seed is a different trajectory.
+
+    Ties (the same epoch reached more than once) go to the most recently
+    written file.
+    """
+    seed = OmegaConf.select(run.config, "seed")
+    candidates = [
+        (epoch, path)
+        for path in run.experiment.path.glob("*/state/models/model_*.pth")
+        if (epoch := checkpoint_epoch(path)) is not None
+        and _run_seed(path.parents[2] / "runtime.yaml") == seed
+    ]
+    return max(candidates, key=lambda item: (item[0], item[1].stat().st_mtime)) if candidates else None
+
+
+# torch.set_num_interop_threads() is a once-per-process call -- it raises if
+# called again after any parallel work has started. `forge grid` executes
+# every entry in a single process (dora used to fork a subprocess per run),
+# so without this guard the second and later runs of a grid would die here.
+_interop_threads_configured = False
 
 
 def configure_runtime(runtime_cfg: dict) -> tuple[dict, bool]:
+    global _interop_threads_configured
     changed_device = False
 
+    # Safe to call repeatedly, unlike its interop counterpart below.
     if "threads" in runtime_cfg and runtime_cfg["threads"] is not None:
         torch.set_num_threads(int(runtime_cfg["threads"]))
-    if "interop_threads" in runtime_cfg and runtime_cfg["interop_threads"] is not None:
+    if (
+        not _interop_threads_configured
+        and runtime_cfg.get("interop_threads") is not None
+    ):
         torch.set_num_interop_threads(int(runtime_cfg["interop_threads"]))
+        _interop_threads_configured = True
     if runtime_cfg.get("device") == "cuda" and not torch.cuda.is_available():
         changed_device = True
 

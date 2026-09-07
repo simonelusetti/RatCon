@@ -3,7 +3,7 @@ dataset, in the paper's original Figure 4 layout (one panel per encoder,
 shared colorbar). wikiann by default; conll2003 also available.
 
 Two metrics, since they trade off differently:
-  --metric zscore  (default): raw signed z-score. Doesn't saturate, so it
+  --metric division  (default): raw signed z-score. Doesn't saturate, so it
       shows real gradation -- the recommended choice.
   --metric pvalue: sign(z) * -log10(p), matching the original chi-square-era
       figure's convention exactly. At this scale these p-values are so
@@ -12,7 +12,7 @@ Two metrics, since they trade off differently:
       much stronger one effect is than another -- kept for continuity with
       the original figure, not because it's the more informative view.
 
-Usage: python3 utils/plot_signed_heatmap.py [--dataset wikiann|conll2003] [--metric zscore|pvalue] [--output PATH]
+Usage: python3 utils/plot_signed_heatmap.py [--dataset wikiann|conll2003] [--metric division|pvalue] [--output PATH]
 """
 import argparse
 import json
@@ -27,14 +27,22 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.data import LABEL_DISPLAY_NAMES  # noqa: E402
+from utils.forge_paths import run_dir  # noqa: E402
 from utils._heatmap_common import make_flat_grey_cmap, make_flat_grey_norm  # noqa: E402
 
-# Bias-test (rationale task) signatures, per dataset -- used only as CLI
-# argument DEFAULTS (see __main__), not a hardcoded lookup; every sig is a
-# real, overridable --*-sig argument.
-_DEFAULT_SIGS = {
-    "wikiann": {"sbert": "97d170e1", "e5": "479e2061", "llm": "55a3e229"},
-    "conll2003": {"sbert": "273e869c", "e5": "84efae79", "llm": "d4fae7a4"},
+# Datasets this figure supports, mapped to per-encoder bias-test signatures
+# used only as CLI argument DEFAULTS (see __main__), never as a hardcoded
+# lookup -- every sig is a real, overridable --*-sig argument.
+#
+# The defaults are empty since the move from dora to forge: forge hashes the
+# config differently, so no dora-era signature resolves any more, and a
+# default that always fails is worse than none (the __main__ check below then
+# names exactly which flags are missing). The keys still define --dataset's
+# choices, so they stay. Fill a dataset back in once its sweep has been
+# re-run under forge -- `forge info -S` lists signatures.
+_DEFAULT_SIGS: dict[str, dict[str, str]] = {
+    "wikiann": {},
+    "conll2003": {},
 }
 DATASET_DISPLAY = {"wikiann": "WikiAnn", "conll2003": "CoNLL2003"}
 ENCODER_DISPLAY = {"sbert": "SBERT", "e5": "E5", "llm": "Pythia 400m"}
@@ -56,17 +64,17 @@ def entity_tags(dataset: str) -> list[str]:
 
 def load_matrix(dataset: str, sig: str, metric: str) -> tuple[list[float], dict[str, list[float]]]:
     label_map = LABEL_DISPLAY_NAMES.get(dataset, {})
-    effect = json.loads((ROOT / "outputs/xps" / sig / "data/effect_size_curves.json").read_text())
+    effect = json.loads((run_dir(sig) / "data/effect_size_curves.json").read_text())
     rho = [float(r) for r in effect["rho"]]
 
     matrix = {}
     if metric == "pvalue":
-        pvalue = json.loads((ROOT / "outputs/xps" / sig / "data/pvalue_curves.json").read_text())
+        pvalue = json.loads((run_dir(sig) / "data/pvalue_curves.json").read_text())
     for label_idx, name in label_map.items():
         if name in EXCLUDE_LABELS:
             continue
         z_curve = np.array(effect["curves"][label_idx])
-        if metric == "zscore":
+        if metric == "division":
             matrix[name] = z_curve.tolist()
         else:
             neglogp_curve = np.array(pvalue["curves"][label_idx])
@@ -78,8 +86,8 @@ def main(dataset: str, sigs: dict[str, str], metric: str, output: Path) -> None:
     sigs = {ENCODER_DISPLAY[enc]: sig for enc, sig in sigs.items()}
     rows = entity_tags(dataset)
     display_name = DATASET_DISPLAY.get(dataset, dataset)
-    p05 = Z_CRIT_P05 if metric == "zscore" else NEGLOGP_CRIT_P05
-    cbar_label = "Preference score" if metric == "zscore" else "sign × -log10(p)"
+    p05 = Z_CRIT_P05 if metric == "division" else NEGLOGP_CRIT_P05
+    cbar_label = "Preference score" if metric == "division" else "sign × -log10(p)"
 
     panels = {name: load_matrix(dataset, sig, metric) for name, sig in sigs.items()}
 
@@ -115,9 +123,8 @@ def main(dataset: str, sigs: dict[str, str], metric: str, output: Path) -> None:
     cbar.set_ticklabels(labels)
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, dpi=180, bbox_inches="tight")
-    fig.savefig(output.with_suffix(".pdf"), bbox_inches="tight")
-    print(f"Saved plot to {output} (+ .pdf)")
+    fig.savefig(output, bbox_inches="tight")
+    print(f"Saved plot to {output}")
 
 
 if __name__ == "__main__":
@@ -129,13 +136,13 @@ if __name__ == "__main__":
     defaults = _DEFAULT_SIGS[pre_args.dataset]
     for enc in ("sbert", "e5", "llm"):
         parser.add_argument(f"--{enc}-sig", default=defaults.get(enc),
-                             help=f"bias-test dora sig for {ENCODER_DISPLAY[enc]}")
-    parser.add_argument("--metric", choices=["zscore", "pvalue"], default="zscore")
+                             help=f"bias-test forge sig for {ENCODER_DISPLAY[enc]}")
+    parser.add_argument("--metric", choices=["division", "pvalue"], default="division")
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
     sigs = {enc: getattr(args, f"{enc}_sig") for enc in ("sbert", "e5", "llm")}
     missing = [f"--{enc}-sig" for enc, s in sigs.items() if not s]
     if missing:
         raise ValueError(f"Missing required signature argument(s): {', '.join(missing)}")
-    output = args.output or ROOT / f"outputs/analysis/signed_heatmap_{args.dataset}_{args.metric}.png"
+    output = args.output or ROOT / f"outputs/analysis/signed_heatmap_{args.dataset}_{args.metric}.pdf"
     main(args.dataset, sigs, args.metric, output)

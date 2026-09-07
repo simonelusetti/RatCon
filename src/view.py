@@ -13,16 +13,16 @@ from .data import LABEL_DISPLAY_NAMES
 
 
 _DEFAULT_LOSS_HISTORY_PATH = Path("data") / "loss_history.json"
-_DEFAULT_LOSS_PLOT_PATH = Path("plots") / "loss.png"
+_DEFAULT_LOSS_PLOT_PATH = Path("plots") / "loss.pdf"
 _DEFAULT_SELECTION_RATE_CURVES_PATH = Path("data") / "selection_rate_curves.json"
 _DEFAULT_PVALUE_CURVES_PATH = Path("data") / "pvalue_curves.json"
 _DEFAULT_EFFECT_SIZE_CURVES_PATH = Path("data") / "effect_size_curves.json"
-_DEFAULT_SELECTION_RATE_PLOT_PATH = Path("plots") / "selection_rate_vs_rho.png"
-_DEFAULT_PVALUE_PLOT_PATH = Path("plots") / "pvalue_vs_rho.png"
-_DEFAULT_EFFECT_SIZE_PLOT_PATH = Path("plots") / "effect_size_vs_rho.png"
-_DEFAULT_SIGNED_EFFECT_HEATMAP_PLOT_PATH = Path("plots") / "signed_effect_heatmap.png"
+_DEFAULT_SELECTION_RATE_PLOT_PATH = Path("plots") / "selection_rate_vs_rho.pdf"
+_DEFAULT_PVALUE_PLOT_PATH = Path("plots") / "pvalue_vs_rho.pdf"
+_DEFAULT_EFFECT_SIZE_PLOT_PATH = Path("plots") / "effect_size_vs_rho.pdf"
+_DEFAULT_SIGNED_EFFECT_HEATMAP_PLOT_PATH = Path("plots") / "signed_effect_heatmap.pdf"
 _DEFAULT_SPEARMAN_CURVES_PATH = Path("data") / "spearman_curves.json"
-_DEFAULT_SPEARMAN_PLOT_PATH = Path("plots") / "spearman_vs_rho.png"
+_DEFAULT_SPEARMAN_PLOT_PATH = Path("plots") / "spearman_vs_rho.pdf"
 
 _METRIC_TO_FILENAME = {
     "selection_rate": "selection_rate_curves.json",
@@ -50,7 +50,7 @@ _METRIC_TO_PLOT_PATH = {
 }
 
 
-_DEFAULT_CONF_PATH = Path(__file__).resolve().parent / "conf" / "default.yaml"
+_DEFAULT_CONF_PATH = Path(__file__).resolve().parent.parent / "conf" / "config.yaml"
 _DEFAULT_DATASET_NAME: str | None = None
 
 

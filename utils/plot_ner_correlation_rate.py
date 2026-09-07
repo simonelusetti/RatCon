@@ -36,6 +36,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.data import LABEL_DISPLAY_NAMES  # noqa: E402
+from utils.forge_paths import run_dir  # noqa: E402
 from utils.plot_ner_correlation import (  # noqa: E402
     ENCODER_COLOR,
     ENCODER_DISPLAY,
@@ -53,7 +54,7 @@ def load_bias_rate(dataset: str, sig: str, rho: float | None) -> dict[str, float
     rho except 1.0 (keep-everything -> rate=1.0, over-selection=0 by
     construction there, not a real data point)."""
     label_map = LABEL_DISPLAY_NAMES.get(dataset, {})
-    payload = json.loads((ROOT / "outputs/xps" / sig / "data/selection_rate_curves.json").read_text())
+    payload = json.loads((run_dir(sig) / "data/selection_rate_curves.json").read_text())
     rhos = np.array(payload["rho"])
     if rho is None:
         keep = ~np.isclose(rhos, 1.0)
@@ -170,9 +171,8 @@ def main(dataset: str, bias_sigs: dict[str, str], ner_sigs: dict[str, str], rho:
 
     fig.tight_layout()
     output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, dpi=150)
-    fig.savefig(output.with_suffix(".pdf"))
-    print(f"Saved plot to {output} (+ .pdf)")
+    fig.savefig(output)
+    print(f"Saved plot to {output}")
     for encoder, r_p in within.items():
         print(f"Within {ENCODER_DISPLAY[encoder]}: r={r_p:.4f}  (n={len(tags)})")
     print(f"Across-encoder: r={across_pearson:.4f}  (n=3, low power)")
@@ -195,5 +195,5 @@ if __name__ == "__main__":
     rho = None if args.rho_average else args.rho
     rho_tag = "rhoavg" if args.rho_average else f"rho{args.rho:g}"
     pooled_tag = "_pooled" if args.pooled else ""
-    output = args.output or ROOT / "outputs/analysis/ner_correlation_rate" / f"ner_correlation_rate_{args.dataset}_{rho_tag}{pooled_tag}.png"
+    output = args.output or ROOT / "outputs/analysis/ner_correlation_rate" / f"ner_correlation_rate_{args.dataset}_{rho_tag}{pooled_tag}.pdf"
     main(args.dataset, bias_sigs, ner_sigs, rho, args.pooled, output)

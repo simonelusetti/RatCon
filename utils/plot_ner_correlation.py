@@ -28,21 +28,17 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.data import LABEL_DISPLAY_NAMES  # noqa: E402
+from utils.forge_paths import run_dir  # noqa: E402
 
-# Known signatures, used only as CLI argument DEFAULTS (see add_sig_args
-# below) -- every sig is a real, overridable --*-sig argument, not a
-# hardcoded lookup. Kept here so existing invocations without explicit sig
-# flags keep reproducing the same figures.
-_DEFAULT_SIGS = {
-    "wikiann": {
-        "bias": {"sbert": "97d170e1", "e5": "479e2061", "llm": "55a3e229"},
-        "ner": {"sbert": "440a82b4", "e5": "e860ca48", "llm": "b449c587"},
-    },
-    "conll2003": {
-        "bias": {"sbert": "273e869c", "e5": "84efae79", "llm": "d4fae7a4"},
-        "ner": {"sbert": "ed6de7a2", "e5": "2aa2e5c0", "llm": "3e4bc3d4"},
-    },
-}
+# Optional CLI argument DEFAULTS (see add_sig_args below) -- every sig is a
+# real, overridable --*-sig argument, not a hardcoded lookup.
+#
+# Deliberately empty since the move from dora to forge: forge hashes the
+# config differently, so none of the old dora signatures resolve any more,
+# and a default that always fails is worse than no default (sigs_from_args
+# raises naming exactly which flags are missing). Fill a dataset back in once
+# its sweep has been re-run under forge -- `forge info -S` lists signatures.
+_DEFAULT_SIGS: dict[str, dict[str, dict[str, str]]] = {}
 
 # Background / non-entity classes to drop -- not an entity type, and its
 # magnitude would dwarf the real entity tags' z-scores and distort the plot.
@@ -62,11 +58,11 @@ def add_sig_args(parser: argparse.ArgumentParser, dataset_for_defaults: str = "w
     for enc in ("sbert", "e5", "llm"):
         parser.add_argument(
             f"--{enc}-bias-sig", default=defaults["bias"].get(enc),
-            help=f"bias-test (rationale) dora sig for {ENCODER_DISPLAY[enc]}",
+            help=f"bias-test (rationale) forge sig for {ENCODER_DISPLAY[enc]}",
         )
         parser.add_argument(
             f"--{enc}-ner-sig", default=defaults["ner"].get(enc),
-            help=f"NER-probe dora sig for {ENCODER_DISPLAY[enc]}",
+            help=f"NER-probe forge sig for {ENCODER_DISPLAY[enc]}",
         )
 
 
@@ -89,7 +85,7 @@ def load_bias_z(dataset: str, sig: str, rho: float | None) -> dict[str, float]:
     """rho=None averages the z-score curve over every available rho except
     1.0 (keep-everything -> z=0 by construction there, not a real data point)."""
     label_map = LABEL_DISPLAY_NAMES.get(dataset, {})
-    payload = json.loads((ROOT / "outputs/xps" / sig / "data/effect_size_curves.json").read_text())
+    payload = json.loads((run_dir(sig) / "data/effect_size_curves.json").read_text())
     if rho is None:
         rhos = np.array(payload["rho"])
         keep = ~np.isclose(rhos, 1.0)
@@ -108,7 +104,7 @@ def load_bias_z(dataset: str, sig: str, rho: float | None) -> dict[str, float]:
 
 
 def load_ner_f1(sig: str, tags: list[str]) -> dict[str, float]:
-    report = json.loads((ROOT / "outputs/xps" / sig / "data/ner_classification_report.json").read_text())
+    report = json.loads((run_dir(sig) / "data/ner_classification_report.json").read_text())
     return {tag: report["token_level"][tag]["f1-score"] for tag in tags}
 
 
@@ -116,7 +112,7 @@ def load_binary_entity_f1(sig: str) -> float:
     """Token-level F1 of "is this token part of any entity" (all B-*/I-*
     tags collapsed to one class vs O) -- a genuine detection metric, not an
     aggregate of the per-tag F1s used for the within-encoder analysis."""
-    report = json.loads((ROOT / "outputs/xps" / sig / "data/ner_classification_report.json").read_text())
+    report = json.loads((run_dir(sig) / "data/ner_classification_report.json").read_text())
     return report["binary_entity_level"]["entity"]["f1-score"]
 
 
@@ -226,9 +222,8 @@ def main(dataset: str, bias_sigs: dict[str, str], ner_sigs: dict[str, str], rho:
 
     fig.tight_layout()
     output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, dpi=150)
-    fig.savefig(output.with_suffix(".pdf"))
-    print(f"Saved plot to {output} (+ .pdf)")
+    fig.savefig(output)
+    print(f"Saved plot to {output}")
     for encoder, r_p in within.items():
         print(f"Within {ENCODER_DISPLAY[encoder]}: r={r_p:.4f}  (n={len(tags)})")
     print(f"Across-encoder: r={across_pearson:.4f}  (n=3, low power)")
@@ -240,7 +235,11 @@ if __name__ == "__main__":
     # for the --*-sig arguments below -- argparse can't cross-reference one
     # argument's value into another's default within a single parse.
     pre = argparse.ArgumentParser(add_help=False)
-    pre.add_argument("--dataset", default="wikiann", choices=list(_DEFAULT_SIGS))
+    # Listed explicitly rather than derived from _DEFAULT_SIGS: that dict is
+    # empty (no signature survived the dora->forge move), which would leave
+    # --dataset with no valid choice at all. These are the datasets carrying
+    # BIO tags in LABEL_DISPLAY_NAMES, which is what this figure needs.
+    pre.add_argument("--dataset", default="wikiann", choices=["wikiann", "conll2003"])
     pre_args, _ = pre.parse_known_args()
 
     parser = argparse.ArgumentParser(parents=[pre])
@@ -254,5 +253,5 @@ if __name__ == "__main__":
     rho = None if args.rho_average else args.rho
     rho_tag = "rhoavg" if args.rho_average else f"rho{args.rho:g}"
     pooled_tag = "_pooled" if args.pooled else ""
-    output = args.output or ROOT / "outputs/analysis/ner_correlation" / f"ner_correlation_{args.dataset}_{rho_tag}{pooled_tag}.png"
+    output = args.output or ROOT / "outputs/analysis/ner_correlation" / f"ner_correlation_{args.dataset}_{rho_tag}{pooled_tag}.pdf"
     main(args.dataset, bias_sigs, ner_sigs, rho, args.pooled, output)

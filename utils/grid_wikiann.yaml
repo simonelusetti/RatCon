@@ -1,0 +1,21 @@
+# Selector (bias-test) sweep over the three encoder families on WikiAnn.
+#
+#   forge grid --file utils/grid_wikiann.yaml
+globals:
+  - "runtime.grid=true"
+  - "data.dataset=wikiann"
+  - "runtime.data.batch_size=16"
+  # Lets re-running this grid resume gracefully: SelectorTrainer.train()
+  # resumes from the latest checkpoint across the experiment's runs when
+  # continue=true (or just re-runs final_eval if a run already finished all
+  # its epochs), so an interrupted grid can be re-launched as-is.
+  - "train.continue=true"
+product:
+  data.encoder.family: [sbert, e5, llm]
+
+# Add seeds from the CLI rather than here, so the base grid stays one run per
+# encoder:
+#   forge grid --file utils/grid_wikiann.yaml --sweep runtime.seed=0,1,2
+# Seeds are excluded from the signature, so those land as extra *runs* of
+# these same three experiments. train.continue above stays safe under a seed
+# sweep: resume only follows checkpoints from runs with a matching seed.

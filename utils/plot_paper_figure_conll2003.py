@@ -108,9 +108,8 @@ def main(bias_sigs: dict[str, str], ner_sigs: dict[str, str], rho: float, output
 
     fig.tight_layout()
     output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, dpi=180)
-    fig.savefig(output.with_suffix(".pdf"))
-    print(f"Saved plot to {output} (+ .pdf)")
+    fig.savefig(output)
+    print(f"Saved plot to {output}")
 
 
 if __name__ == "__main__":
@@ -120,5 +119,5 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
     bias_sigs, ner_sigs = sigs_from_args(args)
-    output = args.output or ROOT / "outputs/analysis" / "paper_figure_conll2003.png"
+    output = args.output or ROOT / "outputs/analysis" / "paper_figure_conll2003.pdf"
     main(bias_sigs, ner_sigs, args.rho, output)

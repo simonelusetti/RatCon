@@ -19,6 +19,7 @@ from matplotlib.lines import Line2D
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from utils.forge_paths import run_dir  # noqa: E402
 from utils.plot_ner_correlation import _DEFAULT_SIGS, ENCODER_COLOR, ENCODER_DISPLAY, ENCODER_MARKER  # noqa: E402
 
 BIO_LINESTYLE = {"B": "-", "I": "--"}
@@ -29,7 +30,7 @@ def add_ner_sig_args(parser: argparse.ArgumentParser, dataset_for_defaults: str 
     for enc in ("sbert", "e5", "llm"):
         parser.add_argument(
             f"--{enc}-sig", default=defaults.get(enc),
-            help=f"NER-probe dora sig for {ENCODER_DISPLAY[enc]}",
+            help=f"NER-probe forge sig for {ENCODER_DISPLAY[enc]}",
         )
 
 
@@ -43,7 +44,7 @@ def ner_sigs_from_args(args: argparse.Namespace) -> dict[str, str]:
 
 def load_history(sig: str) -> tuple[list[int], list[float], list[float]]:
     """Returns (epochs, macro-avg F1 over B-* tags, macro-avg F1 over I-* tags)."""
-    history = json.loads((ROOT / "outputs/xps" / sig / "data/ner_report_history.json").read_text())
+    history = json.loads((run_dir(sig) / "data/ner_report_history.json").read_text())
     epochs, b_f1s, i_f1s = [], [], []
     for entry in history:
         token = entry["token_level"]
@@ -92,9 +93,8 @@ def main(dataset: str, ner_sigs: dict[str, str], output: Path) -> None:
 
     fig.tight_layout()
     output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, dpi=150)
-    fig.savefig(output.with_suffix(".pdf"))
-    print(f"Saved plot to {output} (+ .pdf)")
+    fig.savefig(output)
+    print(f"Saved plot to {output}")
 
 
 if __name__ == "__main__":
@@ -107,5 +107,5 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
     ner_sigs = ner_sigs_from_args(args)
-    output = args.output or ROOT / "outputs/analysis" / f"ner_convergence_{args.dataset}.png"
+    output = args.output or ROOT / "outputs/analysis" / f"conv_{args.dataset}.pdf"
     main(args.dataset, ner_sigs, output)

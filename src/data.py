@@ -3,12 +3,12 @@ from pathlib import Path
 from typing import TypedDict
 from typing_extensions import NotRequired
 from datasets import DatasetDict, load_from_disk, Value, Sequence
-from dora import to_absolute_path
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 from transformers import PreTrainedTokenizerBase
 
 from .sentence import ALIAS_TO_CANON, build_sentence_encoder, SentenceEncoder
+from .utils import to_absolute_path
 
 from .datasets_builders import (
     build_conll2000,
@@ -38,7 +38,7 @@ PAD_TAG = "-100"
 SPECIAL_TAG = "special"
 
 # Fixed across every run so dataset-level example ordering never varies with
-# train.seed (see shuffle_and_subset) -- only weight init/dropout/batch order do.
+# runtime.seed (see shuffle_and_subset) -- only weight init/dropout/batch order do.
 DATASET_SHUFFLE_SEED = 42
 
 # ---------------------------------------------------------------------------
@@ -123,7 +123,10 @@ def canonical_name(name: str) -> str:
 
 
 def dataset_path(name: str, family: str, max_length: int) -> Path:
-    return Path(to_absolute_path(f"./data/cache/{name}_tok={family}_len={max_length}"))
+    # Anchored to the launch directory, not the cwd: forge chdirs into the
+    # per-run output directory before training starts, and the tokenized
+    # dataset cache is shared across every run, not per-run state.
+    return to_absolute_path(f"./data/cache/{name}_tok={family}_len={max_length}")
 
 
 def shuffle_and_subset(ds: DatasetDict, subset: float | int | None, shuffle: bool) -> DatasetDict:
@@ -329,6 +332,7 @@ def initialize_data(
             family=data_cfg.encoder.family,
             encoder_name=data_cfg.encoder.name,
             device=device,
+            pooling=str(data_cfg.encoder.get("pooling", "mean")),
         )
 
     ds = get_dataset(data_cfg, runtime_cfg, tokenizer, logger)

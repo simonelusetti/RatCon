@@ -10,69 +10,117 @@ probe.
 
 ## Setup
 
+Experiments are managed by [forge](https://github.com/simonelusetti/forge),
+which is not on PyPI — clone it and install it editable:
+
 ```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install --upgrade pip setuptools wheel
+
+git clone https://github.com/simonelusetti/forge.git ../forge
+pip install -e ../forge
+
 pip install -r requirements.txt
 ```
 
-Python >= 3.10. GPU is optional (`runtime.device=cuda`); every experiment
-in the paper was also runnable on CPU, just slower. This is a standalone
-project, not an installable library — everything is run directly from the
-repo root (`dora run ...`, `python3 utils/plot_*.py ...`); there's no
-package to `pip install -e .`.
+Python >= 3.10. A virtualenv is not optional in practice: a distro
+`pip`/`setuptools` older than setuptools 64 cannot install forge editable
+at all (`build backend is missing the 'build_editable' hook`), because the
+system `setuptools` shadows the modern one pip fetches for the build.
+
+GPU is optional (`runtime.device=cuda`); every experiment in the paper was
+produced on CPU. This is a standalone project, not an installable library —
+everything runs from the repo root.
 
 ## How an experiment is identified
 
-Every training run is a [dora](https://github.com/facebookresearch/dora)
-experiment, hashed from its config overrides into a short **signature**
-(e.g. `97d170e1`). All of that run's outputs live under
-`outputs/xps/<sig>/`:
+Forge splits identity into two levels:
+
+- an **experiment** — the sha1 of the resolved config, an 8-hex
+  **signature** like `f733d54d`
+- a **run** — one launch of that experiment, its own 8-hex id
+
+so outputs land under `outputs/xps/<experiment>/<run>/`:
 
 ```
-outputs/xps/<sig>/
-  data/       # JSON artifacts (curves, histories, summaries) -- what the plot scripts read
-  plots/      # PNGs saved directly by the training run
-  state/models/  # checkpoints
-  train.log
+outputs/xps/<xp>/
+  config.yaml               # the resolved config that defines this experiment
+  <run>/
+    meta.json               # launched_on, finished_on, status
+    metrics.json            # final metrics (run.finish)
+    metrics_details.json    # resource usage, resolved runtime
+    logs.jsonl              # per-epoch metrics (run.push_log)
+    runtime.yaml            # runtime config snapshot for this run
+    data/                   # JSON artifacts -- what the plot scripts read
+    plots/                  # PNGs saved by the run
+    state/models/           # checkpoints
+    train.log
 ```
 
-Launch a run with `dora run <overrides...>`; it prints `Exp signature: <sig>`
-on completion. The `utils/plot_*.py` scripts below all take one or more
-`--*-sig` arguments that point at these directories — **there is no
-hidden lookup table**; every sig has to come from a run you (or the
-checkpoint bundle you were given) actually produced.
+Keys listed under `forge.exclude` in `conf/config.yaml` are left out of the
+signature — all of `runtime.*` (which includes **`runtime.seed`**) and the
+`train.*` resume switches.
+Excluding the seed is what makes multi-seed sweeps convenient: three seeds
+of one configuration are three *runs of one experiment*, not three unrelated
+experiments, so the plot scripts take a single signature per curve and pick
+up every seed under it.
 
-Two entry points share the same config (`src/conf/default.yaml`):
+The seed lives under `runtime` rather than `train` for a second reason
+besides the exclusion: forge snapshots the `runtime` block per run into
+`runtime.yaml`, while the experiment-level `config.yaml` is rewritten by
+every launch. Anywhere else in the config, a multi-seed sweep would leave no
+per-run record of which seed a given run used. To see them:
+
+```bash
+forge artifact runtime.yaml     # locate each run's snapshot
+grep '^seed:' outputs/xps/*/*/runtime.yaml
+```
+
+Both entry points share `conf/config.yaml`:
 
 | Task | Entry point | Invocation |
 |---|---|---|
-| Rationale selector (the bias test) | `src/train.py` | `dora run <overrides>` |
-| NER MLP probe (downstream validation) | `src/ner_probe.py` | `dora --main_module ner_probe run <overrides>` |
+| Rationale selector (the bias test) | `train.py` | `forge run <overrides>` |
+| NER MLP probe (downstream validation) | `ner_probe.py` | `forge -M ner_probe run <overrides>` |
 
 Key config overrides:
 
 - `data.dataset` — one of `wikiann`, `conll2003`, `conll2000`,
   `movie_rationales`, `stsb`
 - `data.encoder.family` — one of `sbert`, `e5`, `llm` (Pythia)
-- `train.seed` — seed (excluded from the dora signature, so re-running the
-  same overrides with a different seed reuses the same `<sig>` directory
-  layout only if you also bump `run=N`; see `utils/grid_*.yaml` for the
-  pattern used to launch multi-seed sweeps)
+- `runtime.seed` — seed (excluded from the signature, recorded per run in
+  `runtime.yaml`; see above)
 
-A plain `dora run data.dataset=wikiann data.encoder.family=sbert` trains
+A plain `forge run data.dataset=wikiann data.encoder.family=sbert` trains
 the selector, then automatically runs the bias-test evaluation
 (`runtime.eval.skip=false` is the default) and writes every `data/*.json`
 artifact the plot scripts need — no separate eval step required.
 
+### Inspecting results
+
+```bash
+forge info                       # every experiment, its config and runs
+forge info -S                    # signatures only
+forge metrics                    # final metrics, one column per run
+forge metrics -l                 # + launched/status columns
+forge metrics data.encoder.family=e5   # filter by config override
+forge clean                      # drop runs that died without finishing
+```
+
+Note that `purge`, `store` and `metrics` infer their selection mode from the
+pattern itself (hex → signature, `k=v` → override, otherwise → tag), so
+signatures are passed positionally: `forge purge f733d54d`, not `-S`.
+
 ## Reproducing the paper's figures
 
 Each row below trains whatever the figure needs (skip if you already have
-matching sigs) and then calls the corresponding plot script.
+matching signatures — `forge info -S` lists them) and then calls the plot
+script. Every `--*-sig` flag accepts either an experiment signature or a
+specific `<xp>/<run>`.
 
 **Figure 4 — per-encoder bias heatmap (WikiAnn / CoNLL-2003)**
 ```bash
-dora run data.dataset=wikiann data.encoder.family=sbert
-dora run data.dataset=wikiann data.encoder.family=e5
-dora run data.dataset=wikiann data.encoder.family=llm
+forge grid --file utils/grid_wikiann.yaml
 
 python3 utils/plot_signed_heatmap.py --dataset wikiann \
     --sbert-sig <sig> --e5-sig <sig> --llm-sig <sig>
@@ -80,9 +128,8 @@ python3 utils/plot_signed_heatmap.py --dataset wikiann \
 
 **Figure 5 — grounding test (bias rate vs. NER F1, + B/I convergence)**
 ```bash
-dora run data.dataset=conll2003 data.encoder.family=sbert
-dora --main_module ner_probe run data.dataset=conll2003 data.encoder.family=sbert
-# ...repeat both for e5 and llm
+forge grid --file utils/grid_conll2003.yaml
+forge -M ner_probe grid --file utils/grid_ner.yaml
 
 python3 utils/plot_paper_figure_conll2003.py \
     --sbert-bias-sig <sig> --sbert-ner-sig <sig> \
@@ -91,62 +138,86 @@ python3 utils/plot_paper_figure_conll2003.py \
     --rho 0.8
 ```
 
-**Figure 6 — SBERT bias across 4 corpora**
+**Figure 6 — SBERT bias across 3 corpora**
+
+CoNLL-2003 is deliberately not a panel here (WikiAnn already covers NER, and
+Figure 4 provides the WikiAnn/CoNLL-2003 comparison) — see the script's
+docstring.
+
 ```bash
-dora run data.dataset=wikiann data.encoder.family=sbert
-dora run data.dataset=conll2003 data.encoder.family=sbert
-dora run data.dataset=conll2000 data.encoder.family=sbert
-dora run data.dataset=movie_rationales data.encoder.family=sbert
+for d in wikiann conll2000 movie_rationales; do
+    forge grid --file utils/grid_$d.yaml --sweep data.encoder.family=sbert
+done
 
 python3 utils/plot_signed_heatmap_sbert_corpora.py \
-    --wikiann-sig <sig> --conll2003-sig <sig> \
-    --conll2000-sig <sig> --movie-rationales-sig <sig>
+    --wikiann-sig <sig> --conll2000-sig <sig> --movie-rationales-sig <sig>
 ```
 
 **Figure 3 — STS-B sufficiency test (3 panels)**
 ```bash
-# panel 1 + 2: trained+evaluated on STS-B, 3 seeds per encoder
-dora run data.dataset=stsb data.encoder.family=sbert train.seed=0
-dora run data.dataset=stsb data.encoder.family=sbert train.seed=1
-dora run data.dataset=stsb data.encoder.family=sbert train.seed=2
-# ...repeat for e5, llm
+# panels 1 + 2: trained+evaluated on STS-B, 3 encoders x 3 seeds
+forge grid --file utils/grid_stsb.yaml
 
 # panel 3: SBERT trained on each of the other 4 corpora, evaluated on STS-B
-# (already have these sigs if you ran Figure 6 above -- STS-B evaluation
-# runs automatically on every training run regardless of data.dataset)
+# (STS-B evaluation runs on every training run regardless of data.dataset)
+for d in wikiann conll2003 conll2000 movie_rationales; do
+    forge grid --file utils/grid_$d.yaml \
+        --sweep data.encoder.family=sbert --sweep runtime.seed=0,1,2
+done
 
 python3 utils/plot_stsb_sufficiency.py \
-    --panel1-sigs <sig> <sig> <sig> \
-    --panel2-sbert-sigs <sig> <sig> <sig> \
-    --panel2-e5-sigs <sig> <sig> <sig> \
-    --panel2-llm-sigs <sig> <sig> <sig> \
-    --panel3-stsb-sigs <sig> <sig> <sig> \
-    --panel3-wikiann-sigs <sig> <sig> <sig> \
-    --panel3-conll2003-sigs <sig> <sig> <sig> \
-    --panel3-conll2000-sigs <sig> <sig> <sig> \
-    --panel3-movie-rationales-sigs <sig> <sig> <sig>
+    --panel1-sigs <sig> \
+    --panel2-sbert-sigs <sig> --panel2-e5-sigs <sig> --panel2-llm-sigs <sig> \
+    --panel3-stsb-sigs <sig> --panel3-wikiann-sigs <sig> \
+    --panel3-conll2003-sigs <sig> --panel3-conll2000-sigs <sig> \
+    --panel3-movie-rationales-sigs <sig>
 ```
-This script has no default sigs at all (unlike the others) — the STS-B
-training sweep hasn't been run in this repo yet, so there is nothing
-correct to default to.
+One signature per curve here, not one per seed: the seeds are runs of the
+same experiment.
 
-## Multi-seed / multi-encoder sweeps
+## Sweeps
 
-`utils/grid.py` drives `utils/grid_<name>.yaml` configs that launch a
-whole sweep sequentially via `dora run` and print a signature summary
-table at the end:
+`forge grid` runs a set of experiments and prints a metrics table at the end.
+`utils/grid_*.yaml` hold this repo's sweeps:
 
 ```bash
-python3 utils/grid.py --config utils/grid_conll2003.yaml
+forge grid --file utils/grid_conll2003.yaml         # 3 encoders
+forge grid --file utils/grid_ner.yaml               # WRONG -- see below
+forge -M ner_probe grid --file utils/grid_ner.yaml  # NER probe sweep
 ```
 
-`grid_ner.yaml` sets `main_module: ner_probe` so its sweep launches
-`ner_probe.py` runs instead of `train.py` runs. Every plot script's
-`--help` documents exactly which flags it needs and which sig each one
-should come from.
+The grid file carries config overrides only, so `-M ner_probe` is what
+selects the probe entry point. CLI arguments layer on top of the file, which
+composes usefully — `--sweep runtime.seed=0,1,2` adds a seed axis to any grid,
+and `--sweep data.encoder.family=sbert` narrows one.
+
+Two things to know about `forge grid`:
+
+- it runs every entry **in the same process** (dora used a subprocess per
+  run), so once-per-process setup has to be idempotent — see
+  `_interop_threads_configured` in `src/utils.py`
+- it catches and swallows exceptions per entry, marking the run `failed`
+  without printing a traceback. When a grid entry fails silently, re-run that
+  one config with plain `forge run` to see the error.
+
+`train.continue=true` (set in every grid file) resumes from the highest-epoch
+checkpoint across the experiment's runs, so an interrupted grid can be
+relaunched as-is. Resume is scoped to runs sharing the same `runtime.seed`:
+since the seed is excluded from the signature, every seed is a run of the
+same experiment, and an unscoped search would let a seed sweep find an
+already-finished run under a *different* seed, decide it had reached the
+target epoch, and skip training — quietly yielding identical runs instead of
+independent seeds.
 
 ## Every plot/analysis script's own docstring
 
 Each `utils/plot_*.py` file has a module docstring describing what figure
 it produces and its exact CLI usage — run `python3 utils/<script>.py --help`
 for the authoritative, current argument list.
+
+## Known issues
+
+The old script-based `conll2003` Hub loader is incompatible with
+`datasets==4.0.0`. `build_conll2003` therefore reads the Hub's converted
+parquet revision directly, preserving the original splits and ClassLabel
+metadata without executing a dataset script.

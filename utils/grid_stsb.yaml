@@ -1,0 +1,26 @@
+# STS-B sufficiency sweep -- paper Figure 3, panels 1 and 2.
+#
+#   forge grid --file utils/grid_stsb.yaml
+#
+# Three encoders x three seeds. Because runtime.seed is in forge.exclude
+# (conf/config.yaml), the three seeds of an encoder land as three *runs* of
+# one experiment, which is exactly the grouping plot_stsb_sufficiency.py
+# expects: pass it one experiment signature per curve, not one per seed.
+#
+# Panel 3 (cross-corpus generalisation) reuses the per-dataset grids with the
+# same seed sweep layered on from the CLI, keeping SBERT fixed -- every
+# training run gets STS-B-evaluated at the end regardless of what it trained
+# on, so no STS-B-specific config is needed there:
+#
+#   forge grid --file utils/grid_wikiann.yaml \
+#       --sweep data.encoder.family=sbert --sweep runtime.seed=0,1,2
+#
+# (likewise grid_conll2003.yaml, grid_conll2000.yaml, grid_movie_rationales.yaml)
+globals:
+  - "runtime.grid=true"
+  - "data.dataset=stsb"
+  - "runtime.data.batch_size=16"
+  - "train.continue=true"
+product:
+  data.encoder.family: [sbert, e5, llm]
+  runtime.seed: [0, 1, 2]

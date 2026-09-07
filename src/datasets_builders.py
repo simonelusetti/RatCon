@@ -14,7 +14,22 @@ def find_sublist(haystack: list[str], needle: list[str]) -> tuple[int | None, in
 
 
 def build_conll2003() -> DatasetDict:
-    ds = load_dataset("conll2003", trust_remote_code=True).rename_column("ner_tags", "labels")\
+    # datasets>=4 no longer executes Hub dataset scripts, which made the old
+    # load_dataset("conll2003") path fail before an experiment could start.
+    # The Hub's auto-converted parquet revision carries the same three splits
+    # and ClassLabel metadata without requiring script execution.
+    from huggingface_hub import hf_hub_download
+
+    files = {
+        split: hf_hub_download(
+            "eriktks/conll2003",
+            f"conll2003/{split}/0000.parquet",
+            repo_type="dataset",
+            revision="refs/convert/parquet",
+        )
+        for split in ("train", "validation", "test")
+    }
+    ds = load_dataset("parquet", data_files=files).rename_column("ner_tags", "labels")\
         .remove_columns(["id", "pos_tags", "chunk_tags"])
     train_ds = ds["train"]
     test_ds = concatenate_datasets([ds["validation"], ds["test"]])

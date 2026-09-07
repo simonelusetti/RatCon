@@ -1,0 +1,131 @@
+defaults:
+  - _self_
+
+task: "rationale"  # "rationale" (selector, default) or "ner" (per-token MLP downstream probe)
+
+model:
+  keep_special: false
+  selector:
+    condition_on_rho: true
+    tau_rank: 0.05
+    tau_gate: 0.2
+  loss:
+    sweep_range: [0.1, 1.0, 10]
+  optim:
+    lr: 1e-3
+    weight_decay: 1e-2
+    betas: [0.9, 0.999]
+
+ner:
+  hidden: 256
+  dropout: 0.1
+  # Off by default to match the reported wikiann/conll2003 probes, which
+  # were trained with plain unweighted cross-entropy. Turn on for datasets
+  # with severe label imbalance (e.g. movie_rationales' ~5.4:1 skew), where
+  # unweighted CE collapses the probe to always predicting the majority
+  # class.
+  class_weighted: false
+
+data:
+  shuffle: false
+  max_length: 512
+  dataset: "wikiann"
+  subset: 1.0
+  # An experiment is a (token encoder, pooling strategy) pair: `family` (with
+  # optional `name`) fixes what each token's hidden state is, `pooling` fixes
+  # how a set of those states becomes one sentence vector. They are separate
+  # axes on purpose -- holding one fixed while varying the other is what
+  # tells you whether a selection bias belongs to the representation or to
+  # the reduction applied to it.
+  encoder:
+    family: "sbert"
+    name: null
+    # mean | max | min | last  (see POOLING_STRATEGIES in src/sentence.py)
+    # Applies to BOTH the selected subset and the full-sentence
+    # reconstruction target, so the two are always formed the same way.
+    # `last` takes the final selected token, the standard causal-LM sentence
+    # embedding and what the llm family used to hardcode for its target.
+    pooling: "mean"
+
+train:
+  epochs: 10
+  no_train: false
+  continue: false
+  checkpoint_path: model_10.pth
+  untrained: false
+  # Random rhos sampled per training step out of model.loss.sweep_range's full
+  # sweep (still covers the full range over the course of training via
+  # resampling). The reconstruction-loss forward+backward is the dominant
+  # training cost and scales linearly with this count, so this is the main
+  # lever on training time. Set >= sweep_range's count (or to null) to use
+  # the full sweep every step.
+  rhos_per_step: 3
+
+runtime:
+  # Lives under runtime, not train, for two reasons that only both hold here:
+  # runtime.* is excluded from the experiment signature (so seeds of one
+  # configuration stay runs of a single experiment rather than forking it),
+  # and forge snapshots `runtime` per run into runtime.yaml -- while the
+  # experiment-level config.yaml is rewritten by every launch. Anywhere else
+  # in the config, a multi-seed sweep would leave no per-run record of which
+  # seed a given run actually used.
+  seed: 42
+  grid: false
+  threads: 24
+  interop_threads: 1
+  device: "cpu"
+  compile: false   # torch.compile the selector model (first epoch slower)
+  # Brute-force oracle search (src/oracle.py). Under runtime, and therefore
+  # excluded from the experiment signature, for the same reason as seed:
+  # these are compute-budget knobs, and forge snapshots runtime per run so
+  # the values used are still recorded in each run's runtime.yaml. The
+  # trade-off is that two oracle runs with different caps share one
+  # experiment -- read exhaustive_fraction in the run's oracle_summary.json
+  # to see what a given run actually achieved.
+  oracle:
+    # Enumerate every mask when C(n,k) is at most this; above it, fall back
+    # to `samples` uniform draws and take the best of those (a lower bound
+    # on the true oracle, never an overstatement).
+    max_combinations: 10000
+    samples: 10000
+    # Rows per encoder forward are chunked to this many tokens, so short
+    # sentences pack more candidates per batch than long ones.
+    chunk_tokens: 262144
+    # fp16 | bf16 | fp32. The search only needs candidate *rankings* to
+    # survive, and fp16 matches fp32 pooled embeddings to cosine 0.999999
+    # while running >3x faster; bf16 is no faster and 40x less faithful.
+    # Applies to the oracle only -- training numerics are untouched.
+    precision: "fp16"
+
+    # Off by default: the STS-B sweep would re-run the whole search per pair
+    # per rho on the finer 20-point eval grid.
+    stsb: false
+  data:
+    rebuild: false
+    test_subset: null
+    batch_size: 64
+    num_workers: 2
+  eval:
+    hard: true
+    short_log: false
+    skip: false
+    # STS-B sufficiency-test sweep (src/retrival_fun.py): a finer 20-point
+    # grid than model.loss.sweep_range's 10-point training sweep, since this
+    # is a cheap forward-only eval, not a training cost.
+    sweep_range: [0.1, 1.0, 20]
+    random_selector:
+      runs: 5
+      seed: 314
+
+forge:
+  exclude:
+    # forge.* is bookkeeping (tags, store location), not science -- excluding
+    # it keeps tagging or relocating the store from forking experiment
+    # identity. The rest match what used to be dora.exclude: none of these
+    # change what is being measured, only how/where it is computed.
+    - "forge.*"
+    # Covers runtime.seed too -- see the note on it above.
+    - "runtime.*"
+    - "train.no_train"
+    - "train.continue"
+    - "train.checkpoint_path"

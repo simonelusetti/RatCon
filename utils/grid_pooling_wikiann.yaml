@@ -1,0 +1,33 @@
+# Pooling-strategy sweep on WikiAnn, token encoder held fixed.
+#
+#   forge grid --file utils/grid_pooling_wikiann.yaml runtime.device=cuda
+#
+# The experimental design: `bert` is plain pretrained bert-base-uncased, a
+# token encoder with no sentence-level training on top. That is what makes it
+# the right control here -- sbert and e5 had their weights tuned so that one
+# particular pooling produces good sentence embeddings, so comparing
+# strategies on them would confound "this strategy is better" with "these
+# weights were trained for this strategy". On raw BERT no strategy is
+# privileged, so any difference in selection bias is attributable to the
+# pooling alone.
+#
+# 3 strategies x 3 seeds = 9 runs. Seeds are excluded from the signature, so
+# this is 3 experiments of 3 runs each -- exactly the grouping the plot
+# scripts expect (pass one signature per curve, it picks up every seed).
+globals:
+  - "runtime.grid=true"
+  - "data.dataset=wikiann"
+  - "runtime.data.batch_size=16"
+  # Resume is scoped to matching seeds, so an interrupted sweep can be
+  # relaunched as-is without one seed picking up another's checkpoint.
+  - "train.continue=true"
+product:
+  # The token encoder is an axis rather than a global so that a CLI sweep
+  # replaces it outright:
+  #   forge grid --file utils/grid_pooling_wikiann.yaml \
+  #       --sweep data.encoder.family=electra,roberta
+  # bert / electra / roberta are all raw pretrained stacks with no
+  # sentence-level objective, so none of them privileges a pooling strategy.
+  data.encoder.family: [bert]
+  data.encoder.pooling: [mean, max, min]
+  runtime.seed: [0, 1, 2]

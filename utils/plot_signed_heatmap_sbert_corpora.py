@@ -5,11 +5,11 @@ shared colorbar. CoNLL2003 (NER) is intentionally omitted -- WikiAnn
 already covers the NER task, and plot_signed_heatmap.py provides the
 WikiAnn/CoNLL2003 per-encoder comparison separately.
 
-Same --metric choice as plot_signed_heatmap.py (zscore doesn't saturate;
+Same --metric choice as plot_signed_heatmap.py (division doesn't saturate;
 pvalue matches the original figure's exact "sign x -log10(p)" convention
 but is prone to hitting the exact test's precision floor on strong effects).
 
-Usage: python3 utils/plot_signed_heatmap_sbert_corpora.py [--metric zscore|pvalue] [--output PATH]
+Usage: python3 utils/plot_signed_heatmap_sbert_corpora.py [--metric division|pvalue] [--output PATH]
 """
 import argparse
 import json
@@ -24,15 +24,21 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.data import LABEL_DISPLAY_NAMES  # noqa: E402
+from utils.forge_paths import run_dir  # noqa: E402
 from utils._heatmap_common import make_flat_grey_cmap, make_flat_grey_norm  # noqa: E402
 
 # SBERT bias-test (rationale task) signatures, one per corpus -- used only as
 # CLI argument DEFAULTS (see __main__), not a hardcoded lookup; every sig is
 # a real, overridable --*-sig argument.
+# default_sig is a CLI argument DEFAULT only, never a hardcoded lookup.
+# All three are None since the move from dora to forge: forge hashes the
+# config differently, so no dora-era signature resolves any more, and a
+# default that always fails is worse than none. Fill one back in once its
+# sweep has been re-run under forge -- `forge info -S` lists signatures.
 _CORPORA = [
-    {"name": "WikiAnn (NER)", "dataset": "wikiann", "flag": "wikiann", "default_sig": "97d170e1"},
-    {"name": "CoNLL2000 (Chunking)", "dataset": "conll2000", "flag": "conll2000", "default_sig": "2581e10b"},
-    {"name": "Movie Review (Rationale)", "dataset": "movie_rationales", "flag": "movie-rationales", "default_sig": "3dc43efa"},
+    {"name": "WikiAnn (NER)", "dataset": "wikiann", "flag": "wikiann", "default_sig": None},
+    {"name": "CoNLL2000 (Chunking)", "dataset": "conll2000", "flag": "conll2000", "default_sig": None},
+    {"name": "Movie Review (Rationale)", "dataset": "movie_rationales", "flag": "movie-rationales", "default_sig": None},
 ]
 # Background / non-of-interest classes to drop from every panel's rows.
 EXCLUDE_LABELS = {"O", "special", "not rationale"}
@@ -50,10 +56,10 @@ def resolve_name(raw_key: str, dataset: str) -> str:
 
 def load_matrix(entry: dict, metric: str) -> tuple[list[float], dict[str, list[float]]]:
     sig = entry["sig"]
-    effect = json.loads((ROOT / "outputs/xps" / sig / "data/effect_size_curves.json").read_text())
+    effect = json.loads((run_dir(sig) / "data/effect_size_curves.json").read_text())
     rho = [float(r) for r in effect["rho"]]
     if metric == "pvalue":
-        pvalue = json.loads((ROOT / "outputs/xps" / sig / "data/pvalue_curves.json").read_text())
+        pvalue = json.loads((run_dir(sig) / "data/pvalue_curves.json").read_text())
 
     matrix = {}
     for raw_key, z_curve in effect["curves"].items():
@@ -61,7 +67,7 @@ def load_matrix(entry: dict, metric: str) -> tuple[list[float], dict[str, list[f
         if name in EXCLUDE_LABELS:
             continue
         z = np.array(z_curve)
-        if metric == "zscore":
+        if metric == "division":
             matrix[name] = z.tolist()
         else:
             matrix[name] = (np.sign(z) * np.array(pvalue["curves"][raw_key])).tolist()
@@ -69,13 +75,13 @@ def load_matrix(entry: dict, metric: str) -> tuple[list[float], dict[str, list[f
 
 
 def main(sigs: dict[str, str], metric: str, height: float, hspace: float, output: Path) -> None:
-    p05 = Z_CRIT_P05 if metric == "zscore" else NEGLOGP_CRIT_P05
+    p05 = Z_CRIT_P05 if metric == "division" else NEGLOGP_CRIT_P05
     panels = {}
     for corpus in _CORPORA:
         entry = {"name": corpus["name"], "dataset": corpus["dataset"], "sig": sigs[corpus["dataset"]]}
         rho, matrix = load_matrix(entry, metric)
         panels[entry["name"]] = (rho, matrix)
-    cbar_label = "Preference score" if metric == "zscore" else "sign × -log10(p)"
+    cbar_label = "Preference score" if metric == "division" else "sign × -log10(p)"
 
     all_abs = [abs(v) for _, matrix in panels.values() for curve in matrix.values() for v in curve if np.isfinite(v)]
     vmax = float(np.percentile(all_abs, 95)) if all_abs else 1.0
@@ -117,17 +123,16 @@ def main(sigs: dict[str, str], metric: str, height: float, hspace: float, output
     cbar.set_ticklabels(labels)
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, dpi=180, bbox_inches="tight")
-    fig.savefig(output.with_suffix(".pdf"), bbox_inches="tight")
-    print(f"Saved plot to {output} (+ .pdf)")
+    fig.savefig(output, bbox_inches="tight")
+    print(f"Saved plot to {output}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     for corpus in _CORPORA:
         parser.add_argument(f"--{corpus['flag']}-sig", default=corpus["default_sig"],
-                             help=f"bias-test dora sig for {corpus['name']}")
-    parser.add_argument("--metric", choices=["zscore", "pvalue"], default="zscore")
+                             help=f"bias-test forge sig for {corpus['name']}")
+    parser.add_argument("--metric", choices=["division", "pvalue"], default="division")
     parser.add_argument("--height", type=float, default=13.0, help="figure height in inches (default 13)")
     parser.add_argument("--hspace", type=float, default=0.4, help="vertical gap between stacked panels, as a fraction of panel height (default 0.4; increase if titles collide with the panel above)")
     parser.add_argument("--output", type=Path, default=None)
@@ -136,5 +141,5 @@ if __name__ == "__main__":
     missing = [f"--{c['flag']}-sig" for c in _CORPORA if not sigs[c["dataset"]]]
     if missing:
         raise ValueError(f"Missing required signature argument(s): {', '.join(missing)}")
-    output = args.output or ROOT / f"outputs/analysis/signed_heatmap_sbert_corpora_{args.metric}.png"
+    output = args.output or ROOT / f"outputs/analysis/signed_heatmap_sbert_corpora_{args.metric}.pdf"
     main(sigs, args.metric, args.height, args.hspace, output)

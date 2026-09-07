@@ -1,6 +1,9 @@
+import contextlib
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from sentence_transformers import SentenceTransformer
 from transformers import AutoModel, AutoTokenizer
 
@@ -9,6 +12,27 @@ from transformers import AutoModel, AutoTokenizer
 # -----------------------------------------------------------------------------
 
 ALIASES = {
+    # Plain pretrained BERT: a *token* encoder with no sentence-level
+    # training on top, unlike sbert/e5 whose weights were tuned to make one
+    # particular pooling produce good sentence embeddings. That makes it the
+    # control for the pooling experiments -- vary data.encoder.pooling over
+    # this family and nothing about the representation is co-adapted to any
+    # of the strategies being compared.
+    "bert": {"bert", "bert-base"},
+    # ELECTRA and RoBERTa are the other raw token encoders -- pretrained
+    # stacks with no sentence-level objective on top, so like `bert` they
+    # privilege no pooling strategy and can serve as controls.
+    #   electra: same architecture AND the same WordPiece vocab as bert, so
+    #     its subword segmentation is byte-identical. The bias test counts
+    #     subwords per tag, so bert and electra share a null distribution and
+    #     their z-scores compare cell for cell. What differs is the
+    #     pretraining objective (replaced-token detection, not MLM).
+    #   roberta: same architecture, but BPE with a 50k vocab -- it segments
+    #     differently, so its per-tag token counts and therefore its null
+    #     differ. Still interpretable, but it varies tokenisation as well as
+    #     pretraining, and is not directly comparable at the token level.
+    "electra": {"electra"},
+    "roberta": {"roberta"},
     "sbert": {"sbert"},
     "e5": {"e5", "retrieval", "gte"},
     "llm": {"llm"},
@@ -21,19 +45,38 @@ ALIAS_TO_CANON = {
 }
 
 DEFAULT_MODEL_NAMES = {
+    "bert": "bert-base-uncased",
+    "electra": "google/electra-base-discriminator",
+    "roberta": "roberta-base",
     "sbert": "sentence-transformers/all-MiniLM-L6-v2",
     "e5": "intfloat/e5-base-v2",
     "llm": "EleutherAI/pythia-410m",
 }
 
 TOKENIZER_GROUPS = {
-    "bert-base": {"sbert", "e5", "retrieval", "gte"},
+    # electra sits in the bert-base group because its tokenizer is the same
+    # WordPiece vocabulary, verified to produce identical ids; roberta needs
+    # its own because BPE does not.
+    "bert-base": {"bert", "bert-base", "electra", "sbert", "e5", "retrieval", "gte"},
+    "roberta": {"roberta"},
     "gpt": {"llm"},
 }
 
 CANONICAL_TOKENIZERS = {
     "bert-base": "bert-base-uncased",
+    "roberta": "roberta-base",
     "gpt": "EleutherAI/pythia-410m",
+}
+
+# Extra from_pretrained kwargs, per tokenizer group. Every dataset here
+# arrives as a list of words and is encoded with is_split_into_words=True
+# (see encode_examples in src/data.py); RoBERTa's byte-level BPE refuses
+# pre-tokenized input unless it is told that each word starts on a space
+# boundary. Deliberately NOT applied to the gpt group: pythia's tokenizer
+# accepts word lists as-is, and setting the flag there would change its
+# segmentation and silently invalidate every existing llm run.
+TOKENIZER_KWARGS = {
+    "roberta": {"add_prefix_space": True},
 }
 
 
@@ -47,7 +90,9 @@ def resolve_tokenizer_group(family: str) -> str:
 
 def resolve_tokenizer(family: str) -> AutoTokenizer:
     group = resolve_tokenizer_group(family)
-    tokenizer = AutoTokenizer.from_pretrained(CANONICAL_TOKENIZERS[group], use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        CANONICAL_TOKENIZERS[group], use_fast=True, **TOKENIZER_KWARGS.get(group, {})
+    )
 
     if tokenizer.pad_token is None:
         fallback = tokenizer.eos_token or tokenizer.bos_token or tokenizer.unk_token
@@ -64,6 +109,33 @@ def resolve_tokenizer(family: str) -> AutoTokenizer:
 # -----------------------------------------------------------------------------
 # Token embedding backends (NO fractional attention; attention_mask is padding mask)
 # -----------------------------------------------------------------------------
+
+def _sdpa_context(device: torch.device):
+    """Pin scaled_dot_product_attention to its reference kernel on CUDA.
+
+    The selector's whole mechanism depends on gradients flowing back through
+    the *attention mask* (the soft mask z enters as `attention_mask`), so this
+    attention runs with autograd enabled rather than under no_grad. CUDA's
+    memory-efficient backward kernel rejects the resulting broadcast mask --
+    `RuntimeError: LSE is not correctly aligned (strideH)` -- because the
+    bias is [B, 1, 1, T] with a zero stride over the head dimension.
+
+    SDPBackend.MATH is the reference implementation, so this is a kernel
+    choice and not an approximation: same values, more memory. Left untouched
+    on CPU, which has no such restriction and is the path every result in the
+    paper was produced on.
+
+    Only applied when gradients are actually being tracked. The defect is in
+    the memory-efficient *backward* kernel, so under torch.no_grad -- every
+    evaluation path, and the whole of the brute-force oracle search -- the
+    fast kernels are both correct and dramatically quicker. Forcing MATH
+    there would buy nothing and cost a large multiple in throughput on
+    workloads that are pure forward passes.
+    """
+    if device.type != "cuda" or not torch.is_grad_enabled():
+        return contextlib.nullcontext()
+    return sdpa_kernel([SDPBackend.MATH])
+
 
 def bert_token_embeddings(
     model: AutoModel,
@@ -90,7 +162,8 @@ def bert_token_embeddings(
         v = v.view(bsz, seq_len, attn.num_attention_heads, attn.attention_head_size).transpose(1, 2)
 
         attn_bias = torch.log(key_mask.clamp(min=1e-9))  # 0 for valid, ≈-inf for masked
-        context = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias)
+        with _sdpa_context(hidden_states.device):
+            context = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias)
 
         context = context.transpose(1, 2).contiguous().view(bsz, seq_len, attn.all_head_size)
         attn_out = layer.attention.output(context, hidden_states)
@@ -119,6 +192,110 @@ def gpt_token_embeddings(
 
 
 # -----------------------------------------------------------------------------
+# Pooling strategies
+# -----------------------------------------------------------------------------
+#
+# A pooling strategy is the second half of an experiment's identity: an
+# experiment is a (token encoder, pooling strategy) pair. The token encoder
+# decides what each token's hidden state is; the strategy decides how a set
+# of those states becomes one sentence vector. Holding the encoder fixed and
+# varying the strategy is what isolates whether a token-selection bias is a
+# property of the representation or of the reduction applied to it.
+
+POOLING_STRATEGIES = ("mean", "max", "min", "last")
+
+# Additive penalty that removes masked-out positions from a min/max
+# reduction. Has to dominate any real hidden-state magnitude (BERT/Pythia
+# states sit well inside +/-100) while staying far from fp32 overflow, so
+# that a masked position can never win the extremum.
+_EXCLUSION_PENALTY = 1e4
+
+# Temperature of the softmax surrogate that carries min/max gradients (see
+# _soft_extremum). Set relative to hidden-state scale: these are O(1) with
+# occasional excursions to ~10, so tau=1 gives a surrogate sharp enough to
+# track the true extremum without collapsing onto a single position.
+_SOFT_EXTREMUM_TAU = 1.0
+
+
+def _soft_extremum(token_emb: torch.Tensor, gate: torch.Tensor, strategy: str) -> torch.Tensor:
+    """Differentiable stand-in for a masked min/max, used only in backward.
+
+    A hard extremum over a set of tokens is a step function of the selection
+    weights: nudging a token's mask changes nothing until it overtakes the
+    current winner. Differentiating the masked-penalty form instead yields a
+    gradient proportional to the penalty constant (~1e4), which would dwarf
+    every other term in the loss. This softmax-weighted average is the usual
+    smooth relaxation -- bounded, O(1) gradients, and it sharpens to the true
+    extremum as tau falls.
+    """
+    sign = 1.0 if strategy == "max" else -1.0
+    logits = sign * token_emb / _SOFT_EXTREMUM_TAU + torch.log(gate.clamp(min=1e-9))
+    return (torch.softmax(logits, dim=1) * token_emb).sum(dim=1)
+
+
+def masked_pool(
+    token_emb: torch.Tensor,
+    pool_mask: torch.Tensor,
+    strategy: str,
+) -> torch.Tensor:
+    """Reduce token states [B, L, D] to one vector per sequence [B, D].
+
+    `pool_mask` is NOT necessarily binary. During training it carries the
+    selector's soft mask z, and the gradient with respect to it is the only
+    thing that trains the selector, so every branch here has to stay
+    differentiable in the mask:
+
+      mean  weighted average -- the mask acts as the weights directly.
+      max   exact masked extremum in the forward pass, with gradients taken
+      min   from a smooth softmax surrogate (straight-through, see
+            _soft_extremum). The value is therefore always the true extremum
+            over the selected tokens -- no approximation in what is measured
+            -- while the mask still receives a bounded, well-scaled gradient
+            instead of the ~1e4 one the penalty form would produce.
+      last  the last selected position. A hard index, so unlike the others
+            it carries no gradient with respect to the mask -- the selector
+            still trains through the attention path, where the mask also
+            enters (see selector.py's forward), but expect a weaker signal.
+
+    Sequences with an empty selection reduce to zeros rather than to the
+    penalty value; the selector clamps its budget to k >= 1, so this only
+    guards degenerate input.
+    """
+    if strategy not in POOLING_STRATEGIES:
+        raise ValueError(
+            f"Unknown pooling strategy {strategy!r}; expected one of {', '.join(POOLING_STRATEGIES)}."
+        )
+
+    mask = pool_mask.unsqueeze(-1).type_as(token_emb)
+    occupied = mask.sum(dim=1) > 0
+
+    if strategy == "mean":
+        return (token_emb * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-6)
+
+    if strategy in ("max", "min"):
+        # Soft masks can exceed 1 (z is renormalised to sum to k), which would
+        # turn the penalty into a bonus, so gate to [0, 1] first.
+        gate = mask.clamp(0.0, 1.0)
+        penalty = (1.0 - gate) * _EXCLUSION_PENALTY
+        hard = (
+            (token_emb - penalty).max(dim=1).values
+            if strategy == "max"
+            else (token_emb + penalty).min(dim=1).values
+        )
+        # Straight-through: exact extremum forward, surrogate gradient backward.
+        soft = _soft_extremum(token_emb, gate, strategy)
+        pooled = soft + (hard - soft).detach()
+        return torch.where(occupied, pooled, torch.zeros_like(pooled))
+
+    # strategy == "last"
+    positions = torch.arange(token_emb.shape[1], device=token_emb.device)
+    selected = (mask.squeeze(-1) > 0).to(token_emb.dtype)
+    last_idx = (selected * (positions + 1).to(token_emb.dtype)).max(dim=1).values.long() - 1
+    pooled = token_emb[torch.arange(token_emb.shape[0], device=token_emb.device), last_idx.clamp(min=0)]
+    return torch.where(occupied, pooled, torch.zeros_like(pooled))
+
+
+# -----------------------------------------------------------------------------
 # Encoder interface: token_embeddings (expensive, once) + pool (cheap, many times)
 # -----------------------------------------------------------------------------
 
@@ -126,31 +303,33 @@ class SentenceEncoder(nn.Module):
     """
     NO fractional attention.
     - token_embeddings(ids, attn) does the heavy transformer forward once.
-    - pool(token_emb, pool_mask) computes sentence repr for an arbitrary pool_mask.
-      pool_mask is where your selector's g lives (e.g., pool_mask = attn * g).
-      Always mean pooling, regardless of encoder family: this pools an
-      arbitrary (possibly learned) token subset, and "last real token"
-      pooling has no well-defined meaning for a subset that need not include
-      the sequence's last token -- mean is the only generally sensible
-      reduction here.
-    - pool_full(token_emb, attn_mask) computes the encoder's own canonical
-      whole-sentence embedding (the *entire* real sequence, not a subset),
-      using each family's standard convention: mean pooling by default here,
-      overridden to last-token pooling for causal encoders (see
-      FrozenLLMEncoder) where every earlier position's hidden state has only
-      attended to a left-context prefix and mean-pooling them in would dilute
-      the one position that actually saw the whole sentence.
+    - pool(token_emb, pool_mask) computes sentence repr for an arbitrary
+      pool_mask. pool_mask is where your selector's g lives (e.g.,
+      pool_mask = attn * g).
+    - pool_full(token_emb, attn_mask) computes the whole-sentence embedding
+      (the *entire* real sequence, not a subset) -- the reconstruction target.
+
+    Both use the SAME configured strategy (data.encoder.pooling). That is
+    deliberate: the selector is trained to reproduce pool_full's output from
+    a subset via pool, so if the two used different reductions the selector
+    would be learning a cross-operator mapping rather than answering "which
+    tokens suffice under this pooling strategy". Keeping them identical is
+    what makes results comparable across strategies.
     """
-    def __init__(self, normalize: bool) -> None:
+    def __init__(self, normalize: bool, pooling: str = "mean") -> None:
         super().__init__()
         self.normalize = normalize
+        if pooling not in POOLING_STRATEGIES:
+            raise ValueError(
+                f"Unknown pooling strategy {pooling!r}; expected one of {', '.join(POOLING_STRATEGIES)}."
+            )
+        self.pooling = pooling
 
     def token_embeddings(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
     def pool(self, token_emb: torch.Tensor, pool_mask: torch.Tensor) -> torch.Tensor:
-        mask = pool_mask.unsqueeze(-1).type_as(token_emb)
-        sent_emb = (token_emb * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-6)
+        sent_emb = masked_pool(token_emb, pool_mask, self.pooling)
         return F.normalize(sent_emb, dim=-1) if self.normalize else sent_emb
 
     def pool_full(self, token_emb: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
@@ -162,8 +341,8 @@ class SentenceEncoder(nn.Module):
 # -----------------------------------------------------------------------------
 
 class FrozenSBERT(SentenceEncoder):
-    def __init__(self, model_name: str, normalize: bool) -> None:
-        super().__init__(normalize)
+    def __init__(self, model_name: str, normalize: bool, pooling: str = "mean") -> None:
+        super().__init__(normalize, pooling)
         self.model = SentenceTransformer(model_name)
         self.backbone = self.model[0].auto_model
 
@@ -176,8 +355,8 @@ class FrozenSBERT(SentenceEncoder):
 
 
 class _FrozenHFEncoder(SentenceEncoder):
-    def __init__(self, model_name: str, normalize: bool) -> None:
-        super().__init__(normalize)
+    def __init__(self, model_name: str, normalize: bool, pooling: str = "mean") -> None:
+        super().__init__(normalize, pooling)
         self.model = AutoModel.from_pretrained(model_name)
 
         self.model.eval()
@@ -185,37 +364,81 @@ class _FrozenHFEncoder(SentenceEncoder):
             p.requires_grad = False
 
 
-class FrozenE5(_FrozenHFEncoder):
+class _BertStackEncoder(_FrozenHFEncoder):
+    """Any BERT-architecture stack loaded through AutoModel.
+
+    Shared by the raw `bert` family and by `e5`: they differ in weights and
+    in E5's "query: " input prefix (applied in src/data.py at tokenisation
+    time), not in how token states are produced.
+    """
+
     def token_embeddings(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         return bert_token_embeddings(self.model, input_ids, attention_mask)
 
 
+class FrozenBERT(_BertStackEncoder):
+    pass
+
+
+class FrozenELECTRA(_BertStackEncoder):
+    pass
+
+
+class FrozenRoBERTa(_BertStackEncoder):
+    pass
+
+
+class FrozenE5(_BertStackEncoder):
+    pass
+
+
 class FrozenLLMEncoder(_FrozenHFEncoder):
+    """Causal encoder.
+
+    Note on `pooling=last`: causal attention means only the final real token
+    has attended to the whole sequence, which is why last-token extraction is
+    the standard way to embed a causal LM's sentence (GritLM / LLM2Vec /
+    PromptEOL). That convention now lives in the shared `last` strategy
+    rather than being hardcoded here, so it applies to whichever encoder is
+    configured with it -- and so this encoder can equally be run under mean /
+    max / min, which is the point of making pooling a free axis. Assumes
+    right-padding, as this repo's tokenizers are configured.
+    """
+
     def token_embeddings(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         return gpt_token_embeddings(self.model, input_ids, attention_mask)
-
-    def pool_full(self, token_emb: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
-        # Causal attention means only the last real token has attended to the
-        # whole sequence -- standard practice for embedding a causal LM's
-        # sentence representation is to take that position, not mean-pool
-        # (see e.g. GritLM/LLM2Vec/PromptEOL-style extraction). Assumes
-        # right-padding (this repo's tokenizers are configured that way).
-        lengths = attn_mask.sum(dim=1).clamp(min=1).long()
-        last_idx = lengths - 1
-        batch_idx = torch.arange(token_emb.shape[0], device=token_emb.device)
-        sent_emb = token_emb[batch_idx, last_idx]
-        return F.normalize(sent_emb, dim=-1) if self.normalize else sent_emb
 
 
 # -----------------------------------------------------------------------------
 # Builder
 # -----------------------------------------------------------------------------
 
+# One entry per canonical family, same keys as DEFAULT_MODEL_NAMES. A table
+# rather than a branch chain so that adding an encoder is three dict entries
+# and (usually) a `pass`-bodied subclass of an existing stack.
+ENCODER_CLASSES = {
+    "bert": FrozenBERT,
+    "electra": FrozenELECTRA,
+    "roberta": FrozenRoBERTa,
+    "sbert": FrozenSBERT,
+    "e5": FrozenE5,
+    "llm": FrozenLLMEncoder,
+}
+
+
 def build_sentence_encoder(
     family: str,
     encoder_name: str | None,
     device: str | None = None,
+    pooling: str = "mean",
 ) -> tuple[SentenceEncoder, AutoTokenizer]:
+    """Build the (token encoder, pooling strategy) pair an experiment is defined by.
+
+    `family` picks the token encoder, `pooling` the reduction applied to its
+    token states (see POOLING_STRATEGIES). The two are independent by design:
+    the research question is whether a selection bias follows the encoder or
+    the pooling, which is only answerable if either can be varied alone.
+    """
     family = ALIAS_TO_CANON[family.lower()]
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -224,15 +447,7 @@ def build_sentence_encoder(
 
     tokenizer = resolve_tokenizer(family)
 
-    if family == "sbert":
-        encoder = FrozenSBERT(encoder_name, normalize=False)
-    elif family == "e5":
-        encoder = FrozenE5(encoder_name, normalize=False)
-    elif family == "llm":
-        encoder = FrozenLLMEncoder(encoder_name, normalize=False)
-    else:
-        raise ValueError(f"Unknown encoder family: {family}")
-
+    encoder = ENCODER_CLASSES[family](encoder_name, normalize=False, pooling=pooling)
     encoder.to(device)
     encoder.eval()
     return encoder, tokenizer

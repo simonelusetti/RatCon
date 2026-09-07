@@ -1,4 +1,7 @@
-baseline:
+# Selector (bias-test) sweep over the three encoder families on Movie Reviews.
+#
+#   forge grid --file utils/grid_movie_rationales.yaml
+globals:
   - "runtime.grid=true"
   - "data.dataset=movie_rationales"
   - "runtime.data.batch_size=16"
@@ -6,16 +9,12 @@ baseline:
   # concurrently on the same machine -- at 24 threads the main grid was
   # saturating ~23/32 cores and starving the NER runs to a crawl.
   - "runtime.threads=16"
-  # Numerically equivalent (operator fusion, not an approximation) -- same
-  # precedent as 97d170e1, one of the paper's actual results, which was
-  # also trained with compile on.
+  # Numerically equivalent (operator fusion, not an approximation).
   - "runtime.compile=true"
   # Lets re-running this grid resume gracefully: SelectorTrainer.train()
-  # already resumes from the latest checkpoint when continue=true (or just
-  # re-runs final_eval if a run already finished all its epochs), so an
-  # interrupted grid can just be re-launched as-is.
+  # resumes from the latest checkpoint across the experiment's runs when
+  # continue=true (or just re-runs final_eval if a run already finished all
+  # its epochs), so an interrupted grid can be re-launched as-is.
   - "train.continue=true"
-sweep:
-  - [data.encoder.family=sbert, "run=1", "train.seed=1"]
-  - [data.encoder.family=e5, "run=1", "train.seed=1"]
-  - [data.encoder.family=llm, "run=1", "train.seed=1"]
+product:
+  data.encoder.family: [sbert, e5, llm]

@@ -7,21 +7,26 @@
           on STS-B.
 
 Each curve is the mean over several training seeds, with a shaded ±std band
-(paper: "mean over three runs"). Reads outputs/xps/<sig>/data/spearman_curves.json,
+(paper: "mean over three runs"). Reads each run's data/spearman_curves.json,
 written by SelectorTrainer.final_eval() -> src/retrival_fun.py's run_stsb_sweep.
 
+Because `runtime.seed` is in `forge.exclude` (conf/config.yaml), the three
+seeds of one configuration are three *runs* of a single experiment. So each
+--panel*-sigs flag normally takes ONE experiment signature and every run
+under it becomes a seed; passing several signatures still works and pools
+their runs together.
+
 NO DEFAULT SIGNATURES -- this repo has not yet run the STS-B training sweep
-(dora run data.dataset=stsb/wikiann/conll2003/movie_rationales/conll2000
-data.encoder.family=sbert/e5/llm, x3 seeds each). Every curve's sig list must
-be passed explicitly via CLI (see --help); this script raises a clear error
-rather than silently plotting nothing if a sig list is empty.
+(forge grid --file utils/grid_stsb.yaml). Every curve's signature must be
+passed explicitly via CLI (see --help); this script raises a clear error
+rather than silently plotting nothing.
 
 Usage: python3 utils/plot_stsb_sufficiency.py \\
-    --panel1-sigs SIG SIG SIG \\
-    --panel2-sbert-sigs SIG SIG SIG --panel2-e5-sigs SIG SIG SIG --panel2-llm-sigs SIG SIG SIG \\
-    --panel3-stsb-sigs SIG SIG SIG --panel3-wikiann-sigs SIG SIG SIG \\
-    --panel3-conll2003-sigs SIG SIG SIG --panel3-movie-rationales-sigs SIG SIG SIG \\
-    --panel3-conll2000-sigs SIG SIG SIG \\
+    --panel1-sigs SIG \\
+    --panel2-sbert-sigs SIG --panel2-e5-sigs SIG --panel2-llm-sigs SIG \\
+    --panel3-stsb-sigs SIG --panel3-wikiann-sigs SIG \\
+    --panel3-conll2003-sigs SIG --panel3-movie-rationales-sigs SIG \\
+    --panel3-conll2000-sigs SIG \\
     [--output PATH]
 """
 import argparse
@@ -35,6 +40,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from utils.forge_paths import run_dirs  # noqa: E402
 from utils.plot_ner_correlation import ENCODER_COLOR, ENCODER_DISPLAY  # noqa: E402
 
 DATASET_DISPLAY = {
@@ -47,9 +53,8 @@ DATASET_COLOR = {
 }
 
 
-def load_curves(sig: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
-    path = ROOT / "outputs/xps" / sig / "data/spearman_curves.json"
-    payload = json.loads(path.read_text())
+def load_curves(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    payload = json.loads((path / "data/spearman_curves.json").read_text())
     rho = np.array(payload["rho"], dtype=float)
     selector = np.array(payload["curves"]["selector"], dtype=float)
     random = np.array(payload["curves"]["random"], dtype=float)
@@ -60,11 +65,13 @@ def load_curves(sig: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
 def mean_std_over_seeds(sigs: list[str]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if not sigs:
         raise ValueError(
-            "No signatures provided for one of the curves -- pass real dora run "
+            "No signatures provided for one of the curves -- pass real forge "
             "signatures from the STS-B training sweep via the --panel*-sigs CLI "
-            "arguments (see --help) before running this plot."
+            "arguments (see --help) before running this plot. `forge info` "
+            "lists what exists."
         )
-    curves = [load_curves(sig) for sig in sigs]
+    # One experiment signature normally expands to its whole set of seed runs.
+    curves = [load_curves(path) for sig in sigs for path in run_dirs(sig)]
     rho = curves[0][0]
     selectors = np.stack([c[1] for c in curves])
     randoms = np.stack([c[2] for c in curves])
@@ -130,21 +137,20 @@ def main(
 
     fig.tight_layout()
     output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, dpi=180)
-    fig.savefig(output.with_suffix(".pdf"))
-    print(f"Saved plot to {output} (+ .pdf)")
+    fig.savefig(output)
+    print(f"Saved plot to {output}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--panel1-sigs", nargs="+", default=[], metavar="SIG",
-                         help="Panel 1: SBERT trained on STS-B, one sig per seed (paper uses 3)")
+                         help="Panel 1: SBERT trained on STS-B (experiment sig; its runs are the seeds)")
     for family in ("sbert", "e5", "llm"):
         parser.add_argument(f"--panel2-{family}-sigs", nargs="+", default=[], metavar="SIG",
-                             help=f"Panel 2: {ENCODER_DISPLAY[family]} trained on STS-B, one sig per seed")
+                             help=f"Panel 2: {ENCODER_DISPLAY[family]} trained on STS-B (experiment sig)")
     for dataset in ("stsb", "wikiann", "conll2003", "movie_rationales", "conll2000"):
         parser.add_argument(f"--panel3-{dataset.replace('_', '-')}-sigs", nargs="+", default=[], metavar="SIG",
-                             help=f"Panel 3: SBERT trained on {DATASET_DISPLAY[dataset]}, one sig per seed")
+                             help=f"Panel 3: SBERT trained on {DATASET_DISPLAY[dataset]} (experiment sig)")
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
 
@@ -153,5 +159,5 @@ if __name__ == "__main__":
     panel3_sigs = {dataset: getattr(args, f"panel3_{dataset}_sigs") for dataset in
                     ("stsb", "wikiann", "conll2003", "movie_rationales", "conll2000")}
 
-    output = args.output or ROOT / "outputs/analysis/stsb_sufficiency.png"
+    output = args.output or ROOT / "outputs/analysis/stsb.pdf"
     main(panel1_sigs, panel2_sigs, panel3_sigs, output)

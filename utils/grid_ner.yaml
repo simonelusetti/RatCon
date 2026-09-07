@@ -1,23 +1,36 @@
-main_module: ner_probe
-baseline:
-  # Kept only for dora signature continuity with runs already computed
-  # under the old train.py task=ner branch (now removed) -- ner_probe.py's
-  # own entry point doesn't read cfg.task, but dora hashes the full
-  # resolved config regardless of which module executes it, so dropping
-  # this would silently orphan 440a82b4/e860ca48/etc as unresumable.
+# NER MLP probe sweep (downstream validation) -- one probe per token encoder.
+#
+#   forge -M ner_probe grid --file utils/grid_ner.yaml runtime.device=cuda
+#
+# The -M flag is what selects ner_probe.py over train.py -- forge grid files
+# carry config overrides only, not the entry point.
+#
+# data.encoder.pooling is deliberately NOT swept here. The probe classifies
+# word-level token embeddings (gather_word_level over token_embeddings) and
+# never calls pool() or pool_full(), so pooling cannot change its result --
+# sweeping it would only mint signature-distinct experiments that recompute
+# the same numbers. Leave it at the config default for every probe run, and
+# read one probe per *token encoder*, not per (encoder, pooling) pair.
+#
+# conll2003 is omitted: it does not load under the pinned datasets==4.0.0
+# (script-based dataset, support removed). See README "Known issues".
+globals:
+  # Load-bearing, not cosmetic: forge derives the experiment signature from
+  # the config alone, so with no config-level difference a probe run and a
+  # selector run over the same dataset/encoder would hash to the *same*
+  # experiment and pile incompatible artifacts into one directory.
+  # ner_probe.py never reads cfg.task; this exists purely to keep the two
+  # families of experiment distinct.
   - "task=ner"
   - "runtime.grid=true"
   - "runtime.threads=16"
   - "runtime.data.batch_size=16"
-  # Lets re-running this grid resume gracefully, same as the other grid
-  # configs: NERTrainer.train() (src/ner_probe.py) already resumes from
-  # the latest checkpoint when continue=true (or just re-runs final_eval
-  # if a run already finished all its epochs).
+  - "data.dataset=wikiann"
+  # Lets re-running this grid resume gracefully: NERTrainer.train() resumes
+  # from the latest checkpoint among this experiment's same-seed runs when
+  # continue=true (or just re-runs final_eval if a run already finished all
+  # its epochs), so an interrupted grid can be re-launched as-is.
   - "train.continue=true"
-sweep:
-  - [data.dataset=wikiann, data.encoder.family=sbert]
-  - [data.dataset=wikiann, data.encoder.family=e5]
-  - [data.dataset=wikiann, data.encoder.family=llm]
-  - [data.dataset=conll2003, data.encoder.family=sbert]
-  - [data.dataset=conll2003, data.encoder.family=e5]
-  - [data.dataset=conll2003, data.encoder.family=llm]
+product:
+  data.encoder.family: [bert, sbert, e5, llm]
+  runtime.seed: [0, 1, 2]

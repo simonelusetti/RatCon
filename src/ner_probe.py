@@ -1,6 +1,6 @@
 import json
+import math
 import os
-import re
 import sys
 import torch
 
@@ -10,7 +10,8 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from dora import get_xp, hydra_main, XP
+from forge import start_run
+from forge.core import ExperimentRun
 from omegaconf import DictConfig
 from seqeval.metrics import classification_report, f1_score, precision_score, recall_score
 from sklearn.metrics import classification_report as sk_classification_report
@@ -20,12 +21,15 @@ from .tagger import MLPTagger, gather_word_level
 from .data import PAD_TAG, LABEL_DISPLAY_NAMES, canonical_name, initialize_data
 from .utils import (
     get_logger,
+    build_final_metrics,
+    checkpoint_epoch,
     configure_runtime,
+    find_resume_checkpoint,
     to_device,
     save_combined_loss_history,
     load_combined_loss_history,
     start_run_metrics_capture,
-    write_metrics_artifacts,
+    write_metrics_details,
     should_disable_tqdm,
     remap_checkpoint_state_dict,
 )
@@ -48,11 +52,11 @@ class NERTrainer:
         sent_encoder: SentenceEncoder,
         tag_names: list[str],
         logger: Logger,
-        xp: XP,
+        run: ExperimentRun,
         start_capture,
     ) -> None:
 
-        torch.manual_seed(int(cfg.train.get("seed", 42)))
+        torch.manual_seed(int(cfg.runtime.get("seed", 42)))
 
         self.cfg = cfg
         self.logger = logger
@@ -66,10 +70,11 @@ class NERTrainer:
         self.device = cfg.runtime.device
         self._tqdm_disabled = should_disable_tqdm(self.short_log, self.grid_mode)
 
-        self.xp = xp
+        self.run = run
         self.start_capture = start_capture
         self.resume_training = bool(cfg.train.get("continue", False))
         self.completed_epochs = 0
+        # forge.start_run() has already chdir'd into this run's directory.
         self.checkpoint_dir = Path(os.getcwd())
         self.state_dir = self.checkpoint_dir / "state"
         self.models_dir = self.state_dir / "models"
@@ -89,7 +94,7 @@ class NERTrainer:
         # Inverse-frequency class weights (sklearn's "balanced" formula:
         # total / (num_classes * count[c])), computed once from the
         # training label distribution. Off by default -- see ner.class_weighted
-        # in default.yaml. Guards against severe imbalance (e.g.
+        # in conf/config.yaml. Guards against severe imbalance (e.g.
         # movie_rationales' ~5.4:1 skew) collapsing the probe to always
         # predicting the majority class, but the wikiann/conll2003 probes
         # reported in the paper were trained without it.
@@ -175,19 +180,8 @@ class NERTrainer:
             json.dumps(self.ner_report_history, indent=2, default=lambda o: o.item()), encoding="utf-8"
         )
 
-    def checkpoint_epoch(self, checkpoint_path: Path) -> int | None:
-        match = re.fullmatch(r"model_(\d+)\.pth", checkpoint_path.name)
-        if match is None:
-            return None
-        return int(match.group(1))
-
     def latest_checkpoint(self) -> tuple[int, Path] | None:
-        candidates = [
-            (epoch, checkpoint_path)
-            for checkpoint_path in self.models_dir.glob("model_*.pth")
-            if (epoch := self.checkpoint_epoch(checkpoint_path)) is not None
-        ]
-        return max(candidates, key=lambda item: item[0]) if candidates else None
+        return find_resume_checkpoint(self.run)
 
     def save_checkpoint(self, epoch: int) -> None:
         checkpoint_path = self.checkpoint_path(epoch)
@@ -196,7 +190,7 @@ class NERTrainer:
                 "model": self.model.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
                 "meta": {
-                    "sig": self.xp.sig,
+                    "sig": self.run.signature,
                     "epoch": epoch,
                 },
             },
@@ -218,9 +212,13 @@ class NERTrainer:
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         meta = checkpoint.get("meta", {})
 
-        self.train_loss_history, self.eval_loss_history = load_combined_loss_history(self.loss_history_path)
+        # Read from beside the checkpoint, which may be in a sibling run
+        # directory -- see SelectorTrainer.load_checkpoint for the full note.
+        self.train_loss_history, self.eval_loss_history = load_combined_loss_history(
+            checkpoint_path.parents[2] / "data" / "loss_history.json"
+        )
 
-        loaded_epoch = int(meta.get("epoch", self.checkpoint_epoch(checkpoint_path) or 0))
+        loaded_epoch = int(meta.get("epoch", checkpoint_epoch(checkpoint_path) or 0))
         self.completed_epochs = max(self.completed_epochs, loaded_epoch)
         self.logger.info(
             "Loaded checkpoint from %s with signature %s at epoch %d",
@@ -243,7 +241,7 @@ class NERTrainer:
             self.logger.info("Skipping loss plot because no loss history is available.")
             return
 
-        loss_path = self.plots_dir / "loss.png"
+        loss_path = self.plots_dir / "loss.pdf"
         save_train_eval_loss_plot()
         self.logger.info("Saved loss plot to %s", loss_path)
 
@@ -425,11 +423,19 @@ class NERTrainer:
             )
             self.completed_epochs = epoch + 1
             self.save_checkpoint(epoch + 1)
-            write_metrics_artifacts(
+            # NaN placeholders (runtime.eval.skip=true) are dropped -- see the
+            # matching note in SelectorTrainer.train.
+            self.run.push_log(
+                {
+                    k: float(v)
+                    for k, v in {**train_losses, **eval_losses}.items()
+                    if math.isfinite(float(v))
+                },
+                step=epoch + 1,
+            )
+            write_metrics_details(
                 cfg=self.cfg,
-                xp=self.xp,
-                train_loss_history=self.train_loss_history,
-                eval_loss_history=self.eval_loss_history,
+                run=self.run,
                 start_capture=self.start_capture,
                 epochs_completed=self.completed_epochs,
                 epochs_target=int(self.epochs),
@@ -450,14 +456,15 @@ def _resolve_ner_tag_names(dataset_name: str) -> list[str]:
     return [tag_map[str(i)] for i in range(len(tag_map))]
 
 
-@hydra_main(config_path="conf", config_name="default", version_base="1.1")
-def main(cfg: DictConfig) -> None:
+def main(cfg: DictConfig) -> int:
     start_capture = start_run_metrics_capture()
 
+    # start_run() chdirs into the run directory, so it must precede
+    # get_logger() -- see the matching note in src/train.py's main.
+    run = start_run(cfg)
     logger = get_logger()
-    xp = get_xp()
 
-    logger.info(f"Exp signature: {xp.sig}")
+    logger.info(f"Exp signature: {run.signature}")
     logger.info(repr(cfg))
     logger.info(f"Work dir: {os.getcwd()}")
 
@@ -474,28 +481,35 @@ def main(cfg: DictConfig) -> None:
     )
 
     tag_names = _resolve_ner_tag_names(cfg.data.dataset)
-    trainer = NERTrainer(cfg, train_dl, test_dl, encoder, tag_names, logger, xp, start_capture)
+    trainer = NERTrainer(cfg, train_dl, test_dl, encoder, tag_names, logger, run, start_capture)
 
     if cfg.train.no_train:
-        trainer.load_checkpoint(Path(os.getcwd()) / "state/models/" / str(cfg.train.checkpoint_path))
+        # Resolved across the experiment's runs -- see src/train.py's main.
+        checkpoint_name = str(cfg.train.checkpoint_path)
+        candidates = sorted(run.experiment.path.glob(f"*/state/models/{checkpoint_name}"))
+        if not candidates:
+            raise FileNotFoundError(
+                f"No {checkpoint_name} found in any run of experiment {run.experiment.signature}."
+            )
+        trainer.load_checkpoint(candidates[-1])
+        # Falls through to run.finish() either way -- see src/train.py's main.
         if trainer.skip_eval:
             logger.info("Skipping no-train evaluation (runtime.eval.skip=true).")
-            return
-        trainer.final_eval(record_eval_history=False)
+        else:
+            trainer.final_eval(record_eval_history=False)
     else:
         trainer.train()
         trainer.completed_epochs = int(cfg.train.epochs)
-        write_metrics_artifacts(
+        write_metrics_details(
             cfg=cfg,
-            xp=xp,
-            train_loss_history=trainer.train_loss_history,
-            eval_loss_history=trainer.eval_loss_history,
+            run=run,
             start_capture=start_capture,
             epochs_completed=trainer.completed_epochs,
             epochs_target=int(cfg.train.epochs),
             training_completed=True,
         )
 
-
-if __name__ == "__main__":
-    main()
+    run.finish(build_final_metrics(
+        trainer.eval_loss_history, start_capture, trainer.completed_epochs
+    ))
+    return 0

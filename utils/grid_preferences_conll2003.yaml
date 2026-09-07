@@ -1,0 +1,57 @@
+# Full CoNLL-2003 preference/selector matrix used by the grounding analysis.
+#
+# Twelve encoding strategies x three seeds = 36 runs:
+#   * raw token encoders: {bert,electra,roberta} x {mean,max,min}
+#   * sentence encoders: sbert/mean, e5/mean, llm/last
+#
+# Seeds are excluded from the experiment signature, so each strategy is one
+# experiment containing three runs. This is what plot_ner_grounding.py later
+# aggregates into a mean point and seed-spread ellipse.
+globals:
+  - "runtime.grid=true"
+  - "data.dataset=conll2003"
+  - "runtime.data.batch_size=16"
+  - "runtime.threads=24"
+  - "runtime.compile=true"
+  - "train.continue=true"
+
+direct:
+  - ["data.encoder.family=bert",    "data.encoder.pooling=mean", "runtime.seed=0"]
+  - ["data.encoder.family=bert",    "data.encoder.pooling=mean", "runtime.seed=1"]
+  - ["data.encoder.family=bert",    "data.encoder.pooling=mean", "runtime.seed=2"]
+  - ["data.encoder.family=bert",    "data.encoder.pooling=max",  "runtime.seed=0"]
+  - ["data.encoder.family=bert",    "data.encoder.pooling=max",  "runtime.seed=1"]
+  - ["data.encoder.family=bert",    "data.encoder.pooling=max",  "runtime.seed=2"]
+  - ["data.encoder.family=bert",    "data.encoder.pooling=min",  "runtime.seed=0"]
+  - ["data.encoder.family=bert",    "data.encoder.pooling=min",  "runtime.seed=1"]
+  - ["data.encoder.family=bert",    "data.encoder.pooling=min",  "runtime.seed=2"]
+
+  - ["data.encoder.family=electra", "data.encoder.pooling=mean", "runtime.seed=0"]
+  - ["data.encoder.family=electra", "data.encoder.pooling=mean", "runtime.seed=1"]
+  - ["data.encoder.family=electra", "data.encoder.pooling=mean", "runtime.seed=2"]
+  - ["data.encoder.family=electra", "data.encoder.pooling=max",  "runtime.seed=0"]
+  - ["data.encoder.family=electra", "data.encoder.pooling=max",  "runtime.seed=1"]
+  - ["data.encoder.family=electra", "data.encoder.pooling=max",  "runtime.seed=2"]
+  - ["data.encoder.family=electra", "data.encoder.pooling=min",  "runtime.seed=0"]
+  - ["data.encoder.family=electra", "data.encoder.pooling=min",  "runtime.seed=1"]
+  - ["data.encoder.family=electra", "data.encoder.pooling=min",  "runtime.seed=2"]
+
+  - ["data.encoder.family=roberta", "data.encoder.pooling=mean", "runtime.seed=0"]
+  - ["data.encoder.family=roberta", "data.encoder.pooling=mean", "runtime.seed=1"]
+  - ["data.encoder.family=roberta", "data.encoder.pooling=mean", "runtime.seed=2"]
+  - ["data.encoder.family=roberta", "data.encoder.pooling=max",  "runtime.seed=0"]
+  - ["data.encoder.family=roberta", "data.encoder.pooling=max",  "runtime.seed=1"]
+  - ["data.encoder.family=roberta", "data.encoder.pooling=max",  "runtime.seed=2"]
+  - ["data.encoder.family=roberta", "data.encoder.pooling=min",  "runtime.seed=0"]
+  - ["data.encoder.family=roberta", "data.encoder.pooling=min",  "runtime.seed=1"]
+  - ["data.encoder.family=roberta", "data.encoder.pooling=min",  "runtime.seed=2"]
+
+  - ["data.encoder.family=sbert",   "data.encoder.pooling=mean", "runtime.seed=0"]
+  - ["data.encoder.family=sbert",   "data.encoder.pooling=mean", "runtime.seed=1"]
+  - ["data.encoder.family=sbert",   "data.encoder.pooling=mean", "runtime.seed=2"]
+  - ["data.encoder.family=e5",      "data.encoder.pooling=mean", "runtime.seed=0"]
+  - ["data.encoder.family=e5",      "data.encoder.pooling=mean", "runtime.seed=1"]
+  - ["data.encoder.family=e5",      "data.encoder.pooling=mean", "runtime.seed=2"]
+  - ["data.encoder.family=llm",     "data.encoder.pooling=last", "runtime.seed=0"]
+  - ["data.encoder.family=llm",     "data.encoder.pooling=last", "runtime.seed=1"]
+  - ["data.encoder.family=llm",     "data.encoder.pooling=last", "runtime.seed=2"]

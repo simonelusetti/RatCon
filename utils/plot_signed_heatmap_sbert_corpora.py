@@ -2,10 +2,10 @@
 Figure 3 layout: WikiAnn / Movie Review stacked in a left column,
 CoNLL2000 (many more chunk tags) as one tall panel on the right, one
 shared colorbar. CoNLL2003 (NER) is intentionally omitted -- WikiAnn
-already covers the NER task, and plot_signed_heatmap.py provides the
+already covers the NER task, and plot_bias_heatmaps.py provides the
 WikiAnn/CoNLL2003 per-encoder comparison separately.
 
-Same --metric choice as plot_signed_heatmap.py (division doesn't saturate;
+Same --metric choice as plot_bias_heatmaps.py (division doesn't saturate;
 pvalue matches the original figure's exact "sign x -log10(p)" convention
 but is prone to hitting the exact test's precision floor on strong effects).
 
@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.data import LABEL_DISPLAY_NAMES  # noqa: E402
 from utils.forge_paths import run_dir  # noqa: E402
-from utils._heatmap_common import make_flat_grey_cmap, make_flat_grey_norm  # noqa: E402
+from utils._common import make_flat_grey_cmap, make_flat_grey_norm  # noqa: E402
 
 # SBERT bias-test (rationale task) signatures, one per corpus -- used only as
 # CLI argument DEFAULTS (see __main__), not a hardcoded lookup; every sig is

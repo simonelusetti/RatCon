@@ -543,7 +543,7 @@ class SelectorTrainer:
 
 def main(cfg: DictConfig) -> int:
     if cfg.task not in ("rationale", "oracle"):
-        raise ValueError("train expects task=rationale or task=oracle; use -M ner_probe for probes.")
+        raise ValueError("train expects task=rationale or task=oracle; the NER probe is not a forge entry point (see ner/).")
     start_capture = start_run_metrics_capture()
 
     # start_run() registers the run and chdirs into its output directory, so

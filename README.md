@@ -82,15 +82,14 @@ Both entry points share `conf/config.yaml`:
 |---|---|---|
 | Rationale selector (the bias test) | `train.py` | `forge run <overrides>` |
 | Oracle mask search | `train.py` | `forge run task=oracle <overrides>` |
-| NER MLP probe (downstream validation) | `ner_probe.py` | `forge -M ner_probe run task=ner <overrides>` |
+
+The NER probe is deliberately *not* here — see "The NER probe" below.
 
 Oracle runs share setup, evaluation and artifact generation with the selector,
 but skip training, compilation and checkpoint loading. They also save
 `data/oracle_masks.npz` and `data/oracle_summary.json`. STS-B search remains
 opt-in with `runtime.oracle.stsb=true`. Existing `forge -M oracle ... task=oracle`
 commands still work; keeping `task=oracle` preserves experiment signatures.
-The probe entry point requires `task=ner` before registering a run, so its
-artifacts cannot be mixed with selector runs under the default task.
 
 Key config overrides:
 
@@ -109,6 +108,45 @@ For `data.encoder.pooling=min` or `max`, each token vector is multiplied by
 its selection weight before taking the coordinate-wise minimum or maximum.
 Weights are not clipped: zero-weight tokens contribute zero vectors, while
 batch padding is excluded. Training differentiates this operation directly.
+
+## The NER probe
+
+The probe is the study's *evaluation object*, not one of its experiments, so
+it does not live in the forge store at all. It answers one fixed question
+about a corpus — "how well can a small MLP recover each tag from this frozen
+encoder's token embeddings?" — and that answer depends on nothing else: the
+probe reads word-level token embeddings and never pools, so neither the
+pooling strategy, nor ρ, nor the selector can change it. One probe therefore
+serves every selector built on the same token encoder.
+
+It is a cache, keyed by exactly what identifies that question:
+
+```
+outputs/ner/<dataset>/<family>/seed<k>/
+  model.pth      # one model per key -- no per-epoch checkpoints
+  report.json    # span_level, token_level, binary_entity_level, + per-epoch history
+```
+
+Seed is in the key only so the grounding figures can show a spread across
+independently trained probes; drop to one seed if you do not need the band.
+
+```bash
+python3 -m ner wikiann --family bert --seeds 0,1,2 --device cuda
+python3 -m ner movie_rationales --family bert --seeds 0,1,2 --class-weighted
+```
+
+Entries that already exist are loaded, not retrained, so re-running is free
+and safe; pass `--retrain` to force. From Python it is one call, which trains
+whatever is missing and returns one report per seed:
+
+```python
+from ner import performances, load
+reports = performances(cfg, dataset="conll2003", seeds=(0, 1, 2))
+reports = load("wikiann", "bert")     # read-only, what the plot scripts use
+```
+
+Because a dataset and an encoder family name the entry completely, the plot
+scripts take no `--*-ner-sig` arguments any more.
 
 ### Inspecting results
 
@@ -136,19 +174,19 @@ specific `<xp>/<run>`.
 ```bash
 forge grid --file utils/grid_wikiann.yaml
 
-python3 utils/plot_signed_heatmap.py --dataset wikiann \
-    --sbert-sig <sig> --e5-sig <sig> --llm-sig <sig>
+python3 utils/plot_bias_heatmaps.py --dataset wikiann --ncols 1 \
+    --strategies sbert,e5,llm
 ```
 
 **Figure 5 — grounding test (bias rate vs. NER F1, + B/I convergence)**
 ```bash
 forge grid --file utils/grid_conll2003.yaml
-forge -M ner_probe grid --file utils/grid_ner.yaml
+python3 -m ner conll2003 --family sbert --seeds 0,1,2
+python3 -m ner conll2003 --family e5    --seeds 0,1,2
+python3 -m ner conll2003 --family llm   --seeds 0,1,2
 
 python3 utils/plot_paper_figure_conll2003.py \
-    --sbert-bias-sig <sig> --sbert-ner-sig <sig> \
-    --e5-bias-sig <sig>    --e5-ner-sig <sig> \
-    --llm-bias-sig <sig>   --llm-ner-sig <sig> \
+    --sbert-bias-sig <sig> --e5-bias-sig <sig> --llm-bias-sig <sig> \
     --rho 0.8
 ```
 
@@ -196,14 +234,12 @@ same experiment.
 
 ```bash
 forge grid --file utils/grid_conll2003.yaml         # 3 encoders
-forge grid --file utils/grid_ner.yaml               # WRONG -- see below
-forge -M ner_probe grid --file utils/grid_ner.yaml  # NER probe sweep
 ```
 
-The grid file carries config overrides only, so `-M ner_probe` is what
-selects the probe entry point. CLI arguments layer on top of the file, which
-composes usefully — `--sweep runtime.seed=0,1,2` adds a seed axis to any grid,
-and `--sweep data.encoder.family=sbert` narrows one.
+CLI arguments layer on top of the file, which composes usefully —
+`--sweep runtime.seed=0,1,2` adds a seed axis to any grid, and
+`--sweep data.encoder.family=sbert` narrows one. There is no probe grid:
+`python3 -m ner <datasets...>` takes the place of one.
 
 Two things to know about `forge grid`:
 
@@ -227,11 +263,24 @@ Evaluation-only runs (`train.no_train=true`) use the same seed filter when
 locating `train.checkpoint_path`. Probe resume also restores per-epoch
 classification reports through the loaded checkpoint's epoch.
 
-## Every plot/analysis script's own docstring
+## Analysis scripts
 
-Each `utils/plot_*.py` file has a module docstring describing what figure
-it produces and its exact CLI usage — run `python3 utils/<script>.py --help`
-for the authoritative, current argument list.
+The figure scripts above reproduce the paper. Three more cover the analysis
+this repo has grown since, and take no signatures at all — they discover
+what exists in the forge store and in the probe cache:
+
+```bash
+python3 utils/plot_ner_grounding.py --grouped-latest --variant both  # grounding, every strategy
+python3 utils/plot_bias_heatmaps.py --dataset wikiann                # bias heatmap, every strategy
+python3 utils/plot_ner_convergence.py --dataset wikiann              # probe B/I convergence
+python3 utils/mask_optimality.py <selector-sig> --rho 0.5            # how good is the selector's mask?
+```
+
+Each `utils/*.py` file has a module docstring describing what it produces and
+its exact CLI usage — run `python3 utils/<script>.py --help` for the
+authoritative, current argument list. `utils/_common.py` holds what they
+share: the encoder palette, the heatmap colormap, and the per-tag loaders
+that read a bias run and the probe cache.
 
 ## Known issues
 

@@ -19,51 +19,44 @@ from matplotlib.lines import Line2D
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from utils.forge_paths import run_dir  # noqa: E402
-from utils.plot_ner_correlation import _DEFAULT_SIGS, ENCODER_COLOR, ENCODER_DISPLAY, ENCODER_MARKER  # noqa: E402
+import ner  # noqa: E402
+from utils._common import ENCODER_COLOR, ENCODER_DISPLAY, ENCODER_MARKER  # noqa: E402
 
 BIO_LINESTYLE = {"B": "-", "I": "--"}
 
 
-def add_ner_sig_args(parser: argparse.ArgumentParser, dataset_for_defaults: str = "conll2003") -> None:
-    defaults = _DEFAULT_SIGS.get(dataset_for_defaults, {"ner": {}})["ner"]
-    for enc in ("sbert", "e5", "llm"):
-        parser.add_argument(
-            f"--{enc}-sig", default=defaults.get(enc),
-            help=f"NER-probe forge sig for {ENCODER_DISPLAY[enc]}",
-        )
+def load_history(dataset: str, family: str) -> tuple[list[int], list[float], list[float]]:
+    """(epochs, macro-avg F1 over B-* tags, macro-avg F1 over I-* tags).
+
+    Averaged over every cached probe seed. The per-epoch history comes from
+    the probe cache (see `ner/`); probes are not forge experiments, so there
+    is no signature to pass.
+    """
+    reports = [r for r in ner.load(dataset, family) if r.get("history")]
+    if not reports:
+        raise SystemExit(
+            f"No cached NER probe history for {dataset}/{family}. "
+            f"Build one with: python -m ner {dataset} --family {family}")
+
+    def macro(token: dict, prefix: str) -> float:
+        scores = [v["f1-score"] for k, v in token.items() if k.startswith(prefix)]
+        return sum(scores) / len(scores)
+
+    epochs = [entry["epoch"] for entry in reports[0]["history"]]
+    curves = [[[macro(e["token_level"], p) for e in r["history"]] for r in reports]
+              for p in ("B-", "I-")]
+    means = [[sum(seed[i] for seed in c) / len(c) for i in range(len(epochs))] for c in curves]
+    return epochs, means[0], means[1]
 
 
-def ner_sigs_from_args(args: argparse.Namespace) -> dict[str, str]:
-    ner_sigs = {enc: getattr(args, f"{enc}_sig") for enc in ("sbert", "e5", "llm")}
-    missing = [f"--{enc}-sig" for enc, s in ner_sigs.items() if not s]
-    if missing:
-        raise ValueError(f"Missing required signature argument(s): {', '.join(missing)}")
-    return ner_sigs
-
-
-def load_history(sig: str) -> tuple[list[int], list[float], list[float]]:
-    """Returns (epochs, macro-avg F1 over B-* tags, macro-avg F1 over I-* tags)."""
-    history = json.loads((run_dir(sig) / "data/ner_report_history.json").read_text())
-    epochs, b_f1s, i_f1s = [], [], []
-    for entry in history:
-        token = entry["token_level"]
-        b_tags = [v["f1-score"] for k, v in token.items() if k.startswith("B-")]
-        i_tags = [v["f1-score"] for k, v in token.items() if k.startswith("I-")]
-        epochs.append(entry["epoch"])
-        b_f1s.append(sum(b_tags) / len(b_tags))
-        i_f1s.append(sum(i_tags) / len(i_tags))
-    return epochs, b_f1s, i_f1s
-
-
-def main(dataset: str, ner_sigs: dict[str, str], output: Path) -> None:
+def main(dataset: str, encoders: list[str], output: Path) -> None:
     fig, ax = plt.subplots(figsize=(6.5, 4.5))
     ax.grid(True, color="#DDDDDD", linewidth=0.8, zorder=0)
     for spine in ax.spines.values():
         spine.set_color("#BBBBBB")
 
-    for encoder, sig in ner_sigs.items():
-        epochs, b_f1s, i_f1s = load_history(sig)
+    for encoder in encoders:
+        epochs, b_f1s, i_f1s = load_history(dataset, encoder)
         for prefix, f1s in (("B", b_f1s), ("I", i_f1s)):
             ax.plot(
                 epochs, f1s,
@@ -81,7 +74,7 @@ def main(dataset: str, ner_sigs: dict[str, str], output: Path) -> None:
 
     encoder_handles = [
         Line2D([0], [0], color=ENCODER_COLOR[e], marker=ENCODER_MARKER[e], linewidth=1.6, label=ENCODER_DISPLAY[e])
-        for e in ner_sigs
+        for e in encoders
     ]
     bio_handles = [
         Line2D([0], [0], color="#555555", linestyle=BIO_LINESTYLE[p], linewidth=1.6, label=f"{p}-*")
@@ -103,9 +96,9 @@ if __name__ == "__main__":
     pre_args, _ = pre.parse_known_args()
 
     parser = argparse.ArgumentParser(parents=[pre])
-    add_ner_sig_args(parser, dataset_for_defaults=pre_args.dataset)
+    parser.add_argument("--encoders", default="sbert,e5,llm",
+                        help="comma-separated token encoders whose cached probes to plot")
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
-    ner_sigs = ner_sigs_from_args(args)
     output = args.output or ROOT / "outputs/analysis" / f"conv_{args.dataset}.pdf"
-    main(args.dataset, ner_sigs, output)
+    main(args.dataset, [e.strip() for e in args.encoders.split(",") if e.strip()], output)

@@ -1,7 +1,7 @@
 """Grounding test across every pooling strategy, aggregated over seeds.
 
-Supersedes plot_ner_correlation.py / plot_ner_correlation_rate.py, which
-plotted three hardcoded encoders from a single run each. This one:
+Replaced the older plot_ner_correlation{,_rate}.py, which plotted three
+hardcoded encoders from a single run each. This one:
 
   * treats a *pooling strategy* as the unit of comparison -- both the
     explicit reductions (bert/mean, bert/max, bert/min) and the trained
@@ -69,30 +69,20 @@ sys.path.insert(0, str(ROOT))
 from forge.core import ExperimentStore  # noqa: E402
 
 from src.data import LABEL_DISPLAY_NAMES  # noqa: E402
+from utils._common import (  # noqa: E402
+    ENCODER_COLOR,
+    SENTENCE_ENCODERS,
+    TOKEN_ENCODERS,
+    binary_entity_f1 as load_binary_entity_f1,
+    entity_tags,
+    load_bias,
+    mean_spread,
+    ner_f1 as load_ner_f1,
+    probe_reports,
+)  # noqa: E402
 
 # Background / non-entity classes: not entity types, and "O" in particular
 # would dwarf every real tag's effect and flatten the axis.
-EXCLUDE_LABELS = {"O", "special"}
-
-# Three channels, because a strategy is a (token encoder, pooling) pair and
-# each strategy contains several entity tags: colour is the TOKEN ENCODER,
-# line style is the POOLING, and point marker is the ENTITY TAG. This keeps
-# every tag identifiable even in the 3 encoders x 3 poolings figure without
-# overloading the plot with repeated text annotations.
-#
-# Fixed order, never cycled. Okabe-Ito, checked with the palette validator:
-# worst adjacent CVD separation dE 9.6 (deutan), worst normal-vision pair
-# 16.4, both clear of their floors. sbert/e5/llm keep the assignments the
-# earlier figures used so a strategy does not change colour between plots.
-ENCODER_COLOR = {
-    "sbert":   "#0072B2",
-    "e5":      "#E69F00",
-    "llm":     "#009E73",
-    "bert":    "#D55E00",
-    "electra": "#CC79A7",
-    "roberta": "#56B4E9",
-}
-
 # The marker half of each tuple is retained for compatibility with the older
 # single-legend layout; render() now uses only the line style because markers
 # are reserved for entity tags.
@@ -112,11 +102,6 @@ _FALLBACK_HUE = "#666666"
 
 DISPLAY_NAME = {"llm": "pythia"}
 
-SENTENCE_ENCODERS = {"sbert", "e5", "llm"}
-TOKEN_ENCODERS = {"bert", "electra", "roberta"}
-
-# Ordered deliberately: this is also the order in which grouped plots are
-# written.
 GROUNDING_GROUPS = {
     "sentence": {
         "title": "sentence encoders — selectors",
@@ -141,15 +126,6 @@ GROUNDING_GROUPS = {
 }
 
 
-def entity_tags(dataset: str) -> list[str]:
-    label_map = LABEL_DISPLAY_NAMES.get(dataset, {})
-    return [name for name in label_map.values() if name not in EXCLUDE_LABELS]
-
-
-# ---------------------------------------------------------------------------
-# Discovery
-# ---------------------------------------------------------------------------
-
 def series_label(family: str, pooling: str | None, task: str = "rationale") -> str:
     """`bert/max` for an explicit strategy, bare `sbert` for a trained one.
 
@@ -173,12 +149,13 @@ def discover_series(dataset: str) -> list[dict]:
     """
     store = ExperimentStore(root=ROOT / "outputs")
     selectors: dict[str, dict] = {}
-    probes: dict[str, dict] = {}
 
     for selection in store.all_selections():
         cfg = selection.experiment.config
         if str(OmegaConf.select(cfg, "data.dataset")) != dataset:
             continue
+        if str(OmegaConf.select(cfg, "task")) == "ner":
+            continue  # probes are no longer forge experiments -- see `ner/`
         done_runs = sorted(
             (r for r in (selection.runs or []) if r.status == "done"),
             key=lambda r: r.launched_on,
@@ -189,45 +166,31 @@ def discover_series(dataset: str) -> list[dict]:
         newest_launch = done_runs[-1].launched_on
 
         family = str(OmegaConf.select(cfg, "data.encoder.family"))
-        if str(OmegaConf.select(cfg, "task")) == "ner":
-            # Several probe experiments for one family are possible after a
-            # config migration. Pooling never affects a probe, so use only
-            # the newest experiment rather than silently merging incompatible
-            # probe configurations or relying on store traversal order.
-            previous = probes.get(family)
-            if previous is None or newest_launch > previous["launched_on"]:
-                probes[family] = {"runs": done, "launched_on": newest_launch}
-        else:
-            pooling = OmegaConf.select(cfg, "data.encoder.pooling")
-            label = series_label(family, None if pooling is None else str(pooling),
-                                 str(OmegaConf.select(cfg, "task")))
-            candidate = {
-                "label": label,
-                "family": family,
-                "task": str(OmegaConf.select(cfg, "task")),
-                "pooling": None if pooling is None else str(pooling),
-                "signature": selection.experiment.signature,
-                "bias_runs": done,
-                "launched_on": newest_launch,
-            }
-            # Same label can occur on both sides of a config migration. A
-            # grounding series is one experiment, never a mixture; retain the
-            # newest completed one deterministically.
-            previous = selectors.get(label)
-            if previous is None or newest_launch > previous["launched_on"]:
-                selectors[label] = candidate
+        pooling = OmegaConf.select(cfg, "data.encoder.pooling")
+        label = series_label(family, None if pooling is None else str(pooling),
+                             str(OmegaConf.select(cfg, "task")))
+        candidate = {
+            "label": label,
+            "family": family,
+            "task": str(OmegaConf.select(cfg, "task")),
+            "pooling": None if pooling is None else str(pooling),
+            "signature": selection.experiment.signature,
+            "bias_runs": done,
+            "launched_on": newest_launch,
+        }
+        # Same label can occur on both sides of a config migration. A
+        # grounding series is one experiment, never a mixture; retain the
+        # newest completed one deterministically.
+        previous = selectors.get(label)
+        if previous is None or newest_launch > previous["launched_on"]:
+            selectors[label] = candidate
 
     series = []
     order = list(ENCODER_COLOR)
     for label in sorted(selectors, key=lambda k: (order.index(selectors[k]["family"])
                                                   if selectors[k]["family"] in order else 99, k)):
         entry = selectors[label]
-        probe = probes.get(entry["family"])
-        if not probe:
-            print(f"skipping {label}: no completed NER probe for token encoder "
-                  f"{entry['family']!r} (run `forge -M ner_probe grid ...`)", file=sys.stderr)
-            continue
-        entry["ner_runs"] = probe["runs"]
+        entry["ner_reports"] = probe_reports(dataset, entry["family"])
         series.append(entry)
     return series
 
@@ -258,7 +221,7 @@ def grouped_series_with_latest_runs(series: list[dict], count: int = 3) -> dict[
             {
                 **entry,
                 "bias_runs": entry["bias_runs"][-count:],
-                "ner_runs": entry["ner_runs"][-count:],
+                "ner_reports": entry["ner_reports"][-count:],
             }
             for entry in candidates
         ]
@@ -268,70 +231,6 @@ def grouped_series_with_latest_runs(series: list[dict], count: int = 3) -> dict[
 # ---------------------------------------------------------------------------
 # Per-run loaders (one run directory in, one value per tag out)
 # ---------------------------------------------------------------------------
-
-def load_bias(run_path: Path, dataset: str, metric: str, rho: float | None) -> dict[str, float]:
-    """Selection bias per entity tag for a single bias-test run.
-
-    metric="selection": the observed selection rate minus rho. Under the
-    null every token is kept with probability rho regardless of label, so
-    this is the raw over/under-selection in probability units -- an effect
-    size, unscaled by how variable that tag's count could be by chance.
-    metric="division": the same effect divided by the exact null's standard
-    deviation, i.e. the signed z-score from the hypergeometric-convolution
-    test. Standardising this way lets a rare tag's small raw excess count
-    for as much as a common tag's large one. It is an effect size, not a
-    significance value -- the p-value is a separate artifact
-    (pvalue_curves.json).
-
-    rho=None averages over every rho except 1.0, where keeping everything
-    forces the effect to 0 by construction rather than by measurement.
-    """
-    label_map = LABEL_DISPLAY_NAMES.get(dataset, {})
-    filename = "selection_rate_curves.json" if metric == "selection" else "effect_size_curves.json"
-    payload = json.loads((run_path / "data" / filename).read_text())
-    rhos = np.array(payload["rho"], dtype=float)
-    offset = rhos if metric == "selection" else np.zeros_like(rhos)
-
-    # label_map.get(idx, idx), not label_map[idx]: datasets with an upstream
-    # ClassLabel (wikiann, conll2003) key their curves by stringified index,
-    # but conll2000 has none -- NLTK yields the tag string itself, so its
-    # artifacts are keyed "B-NP" directly. Requiring a map hit silently
-    # dropped every conll2000 tag and produced an empty result rather than
-    # an error.
-    if rho is None:
-        keep = ~np.isclose(rhos, 1.0)
-        return {
-            label_map.get(idx, idx): float(np.mean(np.array(curve, dtype=float)[keep] - offset[keep]))
-            for idx, curve in payload["curves"].items()
-        }
-    i = int(np.argmin(np.abs(rhos - rho)))
-    return {
-        label_map.get(idx, idx): float(curve[i] - offset[i])
-        for idx, curve in payload["curves"].items()
-    }
-
-
-def load_ner_f1(run_path: Path, tags: list[str]) -> dict[str, float]:
-    report = json.loads((run_path / "data" / "ner_classification_report.json").read_text())
-    return {tag: float(report["token_level"][tag]["f1-score"]) for tag in tags}
-
-
-def load_binary_entity_f1(run_path: Path) -> float:
-    """Token-level F1 of "is this token part of any entity" (B-*/I-* collapsed
-    against O) -- a real detection metric rather than an average of per-tag F1s."""
-    report = json.loads((run_path / "data" / "ner_classification_report.json").read_text())
-    return float(report["binary_entity_level"]["entity"]["f1-score"])
-
-
-def mean_spread(values: list[float], spread: str) -> tuple[float, float]:
-    """Mean and its shadow radius over seeds. ddof=1: these are a sample of
-    seeds, not the population of them."""
-    arr = np.asarray(values, dtype=float)
-    if arr.size < 2:
-        return float(arr.mean()), 0.0
-    sd = float(arr.std(ddof=1))
-    return float(arr.mean()), sd / np.sqrt(arr.size) if spread == "sem" else sd
-
 
 def safe_pearson(x, y) -> float:
     """Pearson r, or NaN when either side is constant/too short.
@@ -369,14 +268,14 @@ def build_points(series, tags, dataset, metric, rho, spread, absolute):
     points, binary_f1 = {}, {}
     for entry in series:
         bias_runs = [load_bias(p, dataset, metric, rho) for p in entry["bias_runs"]]
-        f1_runs = [load_ner_f1(p, tags) for p in entry["ner_runs"]]
+        f1_runs = [load_ner_f1(r, tags) for r in entry["ner_reports"]]
         points[entry["label"]] = {
             tag: (*mean_spread([abs(b[tag]) if absolute else b[tag] for b in bias_runs], spread),
                   *mean_spread([f[tag] for f in f1_runs], spread))
             for tag in tags
         }
         binary_f1[entry["label"]] = mean_spread(
-            [load_binary_entity_f1(p) for p in entry["ner_runs"]], spread
+            [load_binary_entity_f1(r) for r in entry["ner_reports"]], spread
         )
     return points, binary_f1
 
@@ -489,12 +388,12 @@ def main(dataset: str, metric: str, rho: float | None, spread: str,
     if not series:
         raise SystemExit(
             f"No (selector, NER probe) pairs found for dataset {dataset!r}. "
-            f"Run a selector grid and `forge -M ner_probe grid --file utils/grid_ner.yaml` first."
+            f"Run a selector grid and `python -m ner {dataset}` first."
         )
 
     print(f"seeds per strategy (bias runs / probe runs):")
     for entry in series:
-        print(f"  {entry['label']:11s} {len(entry['bias_runs'])} / {len(entry['ner_runs'])}")
+        print(f"  {entry['label']:11s} {len(entry['bias_runs'])} / {len(entry['ner_reports'])}")
 
     # Short but still readable: metric (sel|div), rho (avg|0.4), sign
     # (sgn|abs). A filtered run adds the encoders it kept, with the pooling
@@ -544,7 +443,7 @@ def main_grouped_latest(dataset: str, metric: str, rho: float | None, spread: st
         print(f"\n{slug}: {len(series)} experiments, newest {count} run(s) per experiment")
         for entry in series:
             bias_run_ids = [path.name for path in entry["bias_runs"]]
-            probe_run_ids = [path.name for path in entry["ner_runs"]]
+            probe_run_ids = [f"seed{r['seed']}" for r in entry["ner_reports"]]
             print(
                 f"  {entry['signature']}  {entry['label']}: "
                 f"bias={','.join(bias_run_ids)} probe={','.join(probe_run_ids)}"

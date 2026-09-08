@@ -1,10 +1,16 @@
 """Signed selection-bias heatmap (entity tag x rho) for every strategy.
 
-Generalises plot_signed_heatmap.py, which takes three hardcoded --sbert/
---e5/--llm signature flags and so cannot show the pooling variants or the
-brute-force oracle at all. This discovers whatever is in the forge store and
-gives each strategy a panel, on one shared colour scale so panels are
-comparable by eye rather than only within themselves.
+Discovers whatever is in the forge store and gives each strategy a panel, on
+one shared colour scale so panels are comparable by eye rather than only
+within themselves.
+
+This also produces the paper's Figure 4, which used to be a separate script
+taking three hardcoded --sbert/--e5/--llm signature flags: `--ncols 1` gives
+that figure's stacked single-column layout, and `--strategies` picks the
+encoders it showed.
+
+    python3 utils/plot_bias_heatmaps.py --dataset wikiann --ncols 1 \
+        --strategies sbert,e5,llm
 
 Reading a panel: colour saturation is the magnitude of the effect and hue is
 its direction -- blue for over-selected, red for under-selected, with a flat
@@ -44,7 +50,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.data import LABEL_DISPLAY_NAMES, PAD_TAG  # noqa: E402
-from utils._heatmap_common import make_flat_grey_cmap, make_flat_grey_norm  # noqa: E402
+from utils._common import make_flat_grey_cmap, make_flat_grey_norm  # noqa: E402
 from utils.forge_paths import discover_strategies  # noqa: E402
 
 # Not entity types, and O's magnitude would dwarf every real tag and flatten
@@ -108,7 +114,11 @@ def main(dataset: str, metric: str, strategies: list[str] | None, ncols: int, ou
     rows_labels = sorted({r for _, m in panels.values() for r in m})
     ncols = max(1, min(ncols, len(panels)))
     nrows = -(-len(panels) // ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(4.4 * ncols, 2.5 * nrows),
+    # A single column is the paper's Figure 4 layout, where each panel spans
+    # the full width and needs room for ~10 rho ticks; tiled panels are
+    # narrower because several sit side by side.
+    width = 6.5 if ncols == 1 else 4.4 * ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(width, 2.5 * nrows),
                              squeeze=False, sharex=True)
 
     im = None
@@ -155,7 +165,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     metric_tag = {"division": "div", "pvalue": "pval"}[args.metric]
-    out = args.output or ROOT / "outputs/analysis" / f"heat_{args.dataset}_{metric_tag}.pdf"
-    main(args.dataset, args.metric,
-         [s.strip() for s in args.strategies.split(",")] if args.strategies else None,
-         args.ncols, out)
+    selected = [s.strip() for s in args.strategies.split(",")] if args.strategies else None
+    # A filtered figure gets the encoders it kept in its name: without this,
+    # the paper's Figure 4 (--strategies sbert,e5,llm) and the full
+    # all-strategy heatmap overwrite each other's file.
+    slug = ""
+    if selected:
+        families = sorted({s.split("/")[0].split(" ")[0] for s in selected})
+        slug = "_" + ("all" if len(families) > 3 else "-".join(families))
+    out = args.output or ROOT / "outputs/analysis" / f"heat_{args.dataset}_{metric_tag}{slug}.pdf"
+    main(args.dataset, args.metric, selected, args.ncols, out)

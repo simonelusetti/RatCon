@@ -8,7 +8,8 @@
 # Probes first: they are minutes each, and without a probe on the same corpus
 # an oracle run has no per-tag F1 to correlate with, so it would produce bias
 # curves and nothing to compare them to. 3 seeds each, matching the wikiann
-# probes so the F1 side is averaged the same way.
+# probes so the F1 side is averaged the same way. The probe is a cache
+# (outputs/ner/<dataset>/<family>/seed<k>), not a forge experiment -- see ner/.
 #
 # movie_rationales gets ner.class_weighted=true: its rationale/not-rationale
 # split is ~5.4:1 and unweighted cross-entropy collapses the probe onto the
@@ -30,7 +31,13 @@ cd "$(dirname "$0")/.."
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 echo "[$(date -Is)] === NER probes ==="
-bash scripts/run_downstream_probes_seeds.sh
+# One call per corpus; already-cached (dataset, family, seed) entries are
+# skipped, so re-running this script never retrains a probe.
+.venv/bin/python -m ner conll2003 conll2000 \
+    --family bert --seeds 0,1,2 --device cuda --set runtime.data.batch_size=16
+.venv/bin/python -m ner movie_rationales \
+    --family bert --seeds 0,1,2 --device cuda --class-weighted \
+    --set runtime.data.batch_size=16
 echo "[$(date -Is)] PROBES_EXIT=$?"
 
 echo "[$(date -Is)] === oracles (rho=0.8) ==="

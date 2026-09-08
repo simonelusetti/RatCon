@@ -41,7 +41,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from utils.forge_paths import run_dirs  # noqa: E402
-from utils.plot_ner_correlation import ENCODER_COLOR, ENCODER_DISPLAY  # noqa: E402
+from utils._common import ENCODER_COLOR, ENCODER_DISPLAY  # noqa: E402
 
 DATASET_DISPLAY = {
     "stsb": "STS-B", "wikiann": "WikiANN", "conll2003": "CoNLL-03",

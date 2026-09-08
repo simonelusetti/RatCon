@@ -210,12 +210,25 @@ def masked_pool(
 ) -> torch.Tensor:
     """Reduce token states [B, L, D] to one vector per sequence [B, D].
 
-    mean: weighted average. min/max: coordinate-wise extremum of token_emb
-    multiplied by pool_mask, with ordinary autograd and no weight clipping.
-    Zero-weight tokens contribute zero vectors. valid_mask, when supplied,
-    identifies real tokens so batch padding does not enter the extrema.
-    last: last positive-weight position; gradients flow through the encoder
-    attention, not the discrete index. Empty selections produce zeros.
+    mean: weighted average. min/max: scale each token vector by its score,
+    then take the coordinate-wise extremum across the scaled vectors. A
+    zero-scored token therefore contributes a zero *vector* that competes in
+    the extremum like any other. Scores are not clipped -- the selector
+    renormalises z to sum to k, so they can exceed 1, and leaving them
+    unclipped is safe because the reduction is scale-equivariant
+    (amax(a*x) == a*amax(x) for a > 0) and the reconstruction loss is a
+    cosine: inflating every score uniformly cannot move it, so only the
+    relative pattern of scores -- actual selection -- carries signal.
+    last: last positive-score position; a hard index, so it passes no
+    gradient to the scores at all and the selector trains through the
+    attention path alone. Empty selections produce zeros.
+
+    valid_mask marks real tokens so batch padding stays out of the extrema.
+    It only bites when nothing is deselected (pool_full, or rho = 1): once
+    any real token scores zero, its zero vector is already in the pool and
+    padding's adds nothing. Callers working on padding-free rows -- the
+    oracle's per-(n, k) groups, mask_optimality's trimmed sentences -- can
+    omit it. See tests/test_pooling.py, which pins all of this.
     """
     if strategy not in POOLING_STRATEGIES:
         raise ValueError(

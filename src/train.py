@@ -580,16 +580,8 @@ def main(cfg: DictConfig) -> int:
             epochs_completed=0, epochs_target=0, training_completed=True,
         )
     elif cfg.train.no_train:
-        # Resolved across the experiment's runs, not just this one: a no-train
-        # eval re-run starts in a fresh, empty run directory, so the named
-        # checkpoint lives in whichever sibling run actually trained it.
-        checkpoint_name = str(cfg.train.checkpoint_path)
-        candidates = sorted(run.experiment.path.glob(f"*/state/models/{checkpoint_name}"))
-        if not candidates:
-            raise FileNotFoundError(
-                f"No {checkpoint_name} found in any run of experiment {run.experiment.signature}."
-            )
-        trainer.load_checkpoint(candidates[-1])
+        _, checkpoint = find_resume_checkpoint(run, str(cfg.train.checkpoint_path))
+        trainer.load_checkpoint(checkpoint)
         # Falls through to run.finish() either way: skipping the eval is a
         # complete run, and returning early here would leave the run marked
         # "running" for forge's atexit handler to record as "failed".

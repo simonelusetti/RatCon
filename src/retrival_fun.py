@@ -204,7 +204,7 @@ def eval_sweep(
 
         for rho, new_a1 in zip(rhos, new_a1_sweep):
             e1_masked = encoder.token_embeddings(t1["input_ids"], new_a1)
-            z1 = encoder.pool(e1_masked, new_a1)
+            z1 = encoder.pool(e1_masked, new_a1, valid_mask=a1)
             sims[rho].extend(F.cosine_similarity(z1, z2).cpu().tolist())
 
         labels.extend(batch["labels"].tolist())
@@ -322,7 +322,7 @@ def eval_random_sweep(loader, encoder, tokenizer, eval_cfg, device, keep_special
 
                 for rho, new_a1 in zip(rhos, new_a1_sweep):
                     e1_masked = encoder.token_embeddings(t1["input_ids"], new_a1)
-                    z1 = encoder.pool(e1_masked, new_a1)
+                    z1 = encoder.pool(e1_masked, new_a1, valid_mask=a1)
                     sims[rho].extend(F.cosine_similarity(z1, z2).cpu().tolist())
 
                 labels.extend(batch_labels.tolist())

@@ -107,7 +107,7 @@ def resolve_tokenizer(family: str) -> AutoTokenizer:
 
 
 # -----------------------------------------------------------------------------
-# Token embedding backends (NO fractional attention; attention_mask is padding mask)
+# Token embedding backends
 # -----------------------------------------------------------------------------
 
 def _sdpa_context(device: torch.device):
@@ -144,7 +144,7 @@ def bert_token_embeddings(
 ) -> torch.Tensor:
     """
     Returns last hidden states [B, T, D] for BERT-style encoders.
-    Uses attention_mask only as a standard padding mask (0/1).
+    Adds log(attention_mask) to attention scores, supporting fractional weights.
     """
     hidden_states = model.embeddings(input_ids)
     key_mask = attention_mask[:, None, None, :].type_as(hidden_states)  # [B,1,1,T]
@@ -179,8 +179,6 @@ def gpt_token_embeddings(
 ) -> torch.Tensor:
     """
     Returns last hidden states [B, T, D] for GPT-style encoders.
-    Uses attention_mask only as a standard padding mask (0/1).
-
     HuggingFace causal models compute the additive bias as (1 - mask) * -inf,
     so values outside [0, 1] produce incorrect biases (+inf for mask > 1).
     Clamping guards against soft z values that can exceed 1.
@@ -204,62 +202,20 @@ def gpt_token_embeddings(
 
 POOLING_STRATEGIES = ("mean", "max", "min", "last")
 
-# Additive penalty that removes masked-out positions from a min/max
-# reduction. Has to dominate any real hidden-state magnitude (BERT/Pythia
-# states sit well inside +/-100) while staying far from fp32 overflow, so
-# that a masked position can never win the extremum.
-_EXCLUSION_PENALTY = 1e4
-
-# Temperature of the softmax surrogate that carries min/max gradients (see
-# _soft_extremum). Set relative to hidden-state scale: these are O(1) with
-# occasional excursions to ~10, so tau=1 gives a surrogate sharp enough to
-# track the true extremum without collapsing onto a single position.
-_SOFT_EXTREMUM_TAU = 1.0
-
-
-def _soft_extremum(token_emb: torch.Tensor, gate: torch.Tensor, strategy: str) -> torch.Tensor:
-    """Differentiable stand-in for a masked min/max, used only in backward.
-
-    A hard extremum over a set of tokens is a step function of the selection
-    weights: nudging a token's mask changes nothing until it overtakes the
-    current winner. Differentiating the masked-penalty form instead yields a
-    gradient proportional to the penalty constant (~1e4), which would dwarf
-    every other term in the loss. This softmax-weighted average is the usual
-    smooth relaxation -- bounded, O(1) gradients, and it sharpens to the true
-    extremum as tau falls.
-    """
-    sign = 1.0 if strategy == "max" else -1.0
-    logits = sign * token_emb / _SOFT_EXTREMUM_TAU + torch.log(gate.clamp(min=1e-9))
-    return (torch.softmax(logits, dim=1) * token_emb).sum(dim=1)
-
-
 def masked_pool(
     token_emb: torch.Tensor,
     pool_mask: torch.Tensor,
     strategy: str,
+    valid_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Reduce token states [B, L, D] to one vector per sequence [B, D].
 
-    `pool_mask` is NOT necessarily binary. During training it carries the
-    selector's soft mask z, and the gradient with respect to it is the only
-    thing that trains the selector, so every branch here has to stay
-    differentiable in the mask:
-
-      mean  weighted average -- the mask acts as the weights directly.
-      max   exact masked extremum in the forward pass, with gradients taken
-      min   from a smooth softmax surrogate (straight-through, see
-            _soft_extremum). The value is therefore always the true extremum
-            over the selected tokens -- no approximation in what is measured
-            -- while the mask still receives a bounded, well-scaled gradient
-            instead of the ~1e4 one the penalty form would produce.
-      last  the last selected position. A hard index, so unlike the others
-            it carries no gradient with respect to the mask -- the selector
-            still trains through the attention path, where the mask also
-            enters (see selector.py's forward), but expect a weaker signal.
-
-    Sequences with an empty selection reduce to zeros rather than to the
-    penalty value; the selector clamps its budget to k >= 1, so this only
-    guards degenerate input.
+    mean: weighted average. min/max: coordinate-wise extremum of token_emb
+    multiplied by pool_mask, with ordinary autograd and no weight clipping.
+    Zero-weight tokens contribute zero vectors. valid_mask, when supplied,
+    identifies real tokens so batch padding does not enter the extrema.
+    last: last positive-weight position; gradients flow through the encoder
+    attention, not the discrete index. Empty selections produce zeros.
     """
     if strategy not in POOLING_STRATEGIES:
         raise ValueError(
@@ -267,27 +223,22 @@ def masked_pool(
         )
 
     mask = pool_mask.unsqueeze(-1).type_as(token_emb)
-    occupied = mask.sum(dim=1) > 0
 
     if strategy == "mean":
         return (token_emb * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-6)
 
     if strategy in ("max", "min"):
-        # Soft masks can exceed 1 (z is renormalised to sum to k), which would
-        # turn the penalty into a bonus, so gate to [0, 1] first.
-        gate = mask.clamp(0.0, 1.0)
-        penalty = (1.0 - gate) * _EXCLUSION_PENALTY
-        hard = (
-            (token_emb - penalty).max(dim=1).values
-            if strategy == "max"
-            else (token_emb + penalty).min(dim=1).values
-        )
-        # Straight-through: exact extremum forward, surrogate gradient backward.
-        soft = _soft_extremum(token_emb, gate, strategy)
-        pooled = soft + (hard - soft).detach()
-        return torch.where(occupied, pooled, torch.zeros_like(pooled))
+        weighted = token_emb * mask
+        if valid_mask is not None:
+            valid = valid_mask.bool().unsqueeze(-1)
+            weighted = weighted.masked_fill(~valid, -torch.inf if strategy == "max" else torch.inf)
+        pooled = weighted.amax(dim=1) if strategy == "max" else weighted.amin(dim=1)
+        if valid_mask is not None:
+            pooled = torch.where(valid.any(dim=1), pooled, torch.zeros_like(pooled))
+        return pooled
 
     # strategy == "last"
+    occupied = mask.sum(dim=1) > 0
     positions = torch.arange(token_emb.shape[1], device=token_emb.device)
     selected = (mask.squeeze(-1) > 0).to(token_emb.dtype)
     last_idx = (selected * (positions + 1).to(token_emb.dtype)).max(dim=1).values.long() - 1
@@ -301,11 +252,10 @@ def masked_pool(
 
 class SentenceEncoder(nn.Module):
     """
-    NO fractional attention.
-    - token_embeddings(ids, attn) does the heavy transformer forward once.
-    - pool(token_emb, pool_mask) computes sentence repr for an arbitrary
+    - token_embeddings(ids, attn) runs the transformer with the supplied mask.
+    - pool(token_emb, pool_mask, valid_mask) computes sentence repr for an arbitrary
       pool_mask. pool_mask is where your selector's g lives (e.g.,
-      pool_mask = attn * g).
+      pool_mask = attn * g). valid_mask is the original padding mask, not g.
     - pool_full(token_emb, attn_mask) computes the whole-sentence embedding
       (the *entire* real sequence, not a subset) -- the reconstruction target.
 
@@ -328,12 +278,15 @@ class SentenceEncoder(nn.Module):
     def token_embeddings(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
-    def pool(self, token_emb: torch.Tensor, pool_mask: torch.Tensor) -> torch.Tensor:
-        sent_emb = masked_pool(token_emb, pool_mask, self.pooling)
+    def pool(
+        self, token_emb: torch.Tensor, pool_mask: torch.Tensor,
+        valid_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        sent_emb = masked_pool(token_emb, pool_mask, self.pooling, valid_mask)
         return F.normalize(sent_emb, dim=-1) if self.normalize else sent_emb
 
     def pool_full(self, token_emb: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
-        return self.pool(token_emb, attn_mask)
+        return self.pool(token_emb, attn_mask, valid_mask=attn_mask)
 
 
 # -----------------------------------------------------------------------------

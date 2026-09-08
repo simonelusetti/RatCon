@@ -194,7 +194,8 @@ class RationaleSelectorModel(nn.Module):
         attn_rep = effective_attns.reshape(R * B, L)
 
         tok = self.sent_encoder.token_embeddings(ids_rep, attn_rep)
-        pred_rep = self.sent_encoder.pool(tok, attn_rep).view(R, B, -1)
+        valid_rep = attn_f[None].expand(R, B, L).reshape(R * B, L)
+        pred_rep = self.sent_encoder.pool(tok, attn_rep, valid_mask=valid_rep).view(R, B, -1)
 
         full_rep_exp = full_rep.unsqueeze(0).expand(R, B, -1)
         per_sample = 1.0 - F.cosine_similarity(pred_rep, full_rep_exp, dim=-1)

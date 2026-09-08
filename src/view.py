@@ -1,4 +1,3 @@
-import math
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -6,7 +5,6 @@ from typing import Any
 
 from matplotlib.colors import LinearSegmentedColormap, FuncNorm
 import matplotlib.pyplot as plt
-from matplotlib.gridspec import GridSpecFromSubplotSpec
 import numpy as np
 
 from .data import LABEL_DISPLAY_NAMES
@@ -24,14 +22,6 @@ _DEFAULT_SIGNED_EFFECT_HEATMAP_PLOT_PATH = Path("plots") / "signed_effect_heatma
 _DEFAULT_SPEARMAN_CURVES_PATH = Path("data") / "spearman_curves.json"
 _DEFAULT_SPEARMAN_PLOT_PATH = Path("plots") / "spearman_vs_rho.pdf"
 
-_METRIC_TO_FILENAME = {
-    "selection_rate": "selection_rate_curves.json",
-    "pvalue": "pvalue_curves.json",
-    "effect_size": "effect_size_curves.json",
-    # z is already signed, so the heatmap reads the same artifact as the line plot.
-    "signed_effect": "effect_size_curves.json",
-    "spearman": "spearman_curves.json",
-}
 
 _METRIC_TO_DATA_PATH = {
     "selection_rate": _DEFAULT_SELECTION_RATE_CURVES_PATH,
@@ -49,53 +39,6 @@ _METRIC_TO_PLOT_PATH = {
     "spearman": _DEFAULT_SPEARMAN_PLOT_PATH,
 }
 
-
-_DEFAULT_CONF_PATH = Path(__file__).resolve().parent.parent / "conf" / "config.yaml"
-_DEFAULT_DATASET_NAME: str | None = None
-
-
-def _get_default_dataset_name() -> str | None:
-    global _DEFAULT_DATASET_NAME
-    if _DEFAULT_DATASET_NAME is not None:
-        return _DEFAULT_DATASET_NAME
-    try:
-        import yaml
-        with _DEFAULT_CONF_PATH.open() as f:
-            cfg = yaml.safe_load(f)
-        _DEFAULT_DATASET_NAME = str(cfg["data"]["dataset"])
-    except Exception:
-        pass
-    return _DEFAULT_DATASET_NAME
-
-
-def _dataset_name_from_overrides(overrides: list[str]) -> str | None:
-    """Return the canonical dataset name from a list of Hydra override strings."""
-    for o in overrides:
-        if o.startswith("data.dataset="):
-            return o.split("=", 1)[1]
-    return None
-
-
-def _legend_in_right_panel(
-    ax,
-    fontsize: float = 7,
-    ncol: int = 1,
-    width_ratio: float = 0.72,
-) -> None:
-    handles, labels = ax.get_legend_handles_labels()
-    if not handles:
-        return
-    pos = ax.get_position()
-    ax.set_position([pos.x0, pos.y0, pos.width * width_ratio, pos.height])
-    ax.legend(
-        handles,
-        labels,
-        loc="center left",
-        bbox_to_anchor=(1.02, 0.5),
-        borderaxespad=0.0,
-        fontsize=fontsize,
-        ncol=ncol,
-    )
 
 def _plot_metric_from_artifact(metric_name: str, ylabel: str) -> Path:
     data_path = _METRIC_TO_DATA_PATH[metric_name]
@@ -388,19 +331,6 @@ def save_train_eval_loss_plot(
     plt.close(fig)
 
 
-def mean_std_curves(curves: Sequence[Sequence[float]]) -> tuple[np.ndarray, np.ndarray]:
-    if not curves:
-        return np.asarray([], dtype=float), np.asarray([], dtype=float)
-
-    max_len = max(len(c) for c in curves)
-    arr = np.full((len(curves), max_len), np.nan, dtype=float)
-    for i, curve in enumerate(curves):
-        arr[i, : len(curve)] = np.asarray(curve, dtype=float)
-    mean = np.nanmean(arr, axis=0)
-    std = np.nanstd(arr, axis=0)
-    return mean, std
-
-
 def _ema(values: Sequence[float], alpha: float) -> list[float]:
     if not values:
         return []
@@ -410,97 +340,9 @@ def _ema(values: Sequence[float], alpha: float) -> list[float]:
     return smoothed
 
 
-def plot_with_band(
-    ax,
-    x: np.ndarray,
-    mean: np.ndarray,
-    std: np.ndarray,
-    label: str,
-    linestyle: str = "-",
-    alpha: float = 0.18,
-    color: str | None = None,
-) -> str:
-    """Plot a mean curve with a ±std band. Returns the color used."""
-    valid = np.isfinite(mean)
-    if not np.any(valid):
-        return color or "C0"
-    xv = x[valid]
-    yv = mean[valid]
-    sv = std[valid]
-    kwargs = {"marker": "o", "linewidth": 2.0, "linestyle": linestyle, "label": label}
-    if color is not None:
-        kwargs["color"] = color
-    line, = ax.plot(xv, yv, **kwargs)
-    used_color = line.get_color()
-    band_valid = np.isfinite(sv)
-    if np.any(band_valid):
-        xb = xv[band_valid]
-        yb = yv[band_valid]
-        sb = sv[band_valid]
-        ax.fill_between(xb, yb - sb, yb + sb, alpha=alpha, color=used_color)
-    return used_color
-
-
-def _build_overview_figure(n_groups: int, ncols: int, width: float = 5.8, height: float = 4.6):
-    nrows = max(1, math.ceil(n_groups / ncols))
-    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * width, nrows * height))
-    fig.subplots_adjust(wspace=35, hspace=5)
-    return fig, np.asarray(axes).reshape(-1)
-
-
-def _setup_overview_axis(ax, label: str, n_runs: int, xlabel: str, ylabel: str, ylim: tuple[float, float] | None = None, custom_title: str | None = None) -> None:
-    if custom_title is not None:
-        ax.set_title(custom_title, fontsize=11, loc="center")
-    else:
-        ax.set_title(f"{label}\\nn={n_runs}", fontsize=8, loc="left", fontfamily="monospace")
-    ax.grid(True, alpha=0.2)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    if ylim is not None:
-        ax.set_ylim(*ylim)
-
-
-def _finalize_overview_figure(fig, axes: np.ndarray, n_groups: int, out_path: Path, dpi: int = 180) -> None:
-    for ax in axes[n_groups:]:
-        ax.set_visible(False)
-    fig.tight_layout(pad=1.1, w_pad=2.2, h_pad=2.2)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
-    plt.close(fig)
-
-
-def _plot_group_label_curves(ax, x_ref: np.ndarray, per_label_runs: dict[str, list[np.ndarray]]) -> None:
-    for label, curves in sorted(per_label_runs.items(), key=lambda kv: kv[0]):
-        mean, std = mean_std_curves([c.tolist() for c in curves])
-        plot_with_band(ax, x_ref, mean, std, f"{label} (n={len(curves)})")
-
-
 def _load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
-
-
-def _load_loss_histories_for_run(run_dir: Path) -> tuple[list[dict[str, float]], list[dict[str, float]]]:
-    loss_path = run_dir / "data" / "loss_history.json"
-    if not loss_path.exists():
-        return [], []
-    payload = _load_json(loss_path)
-    train_history = payload.get("train", []) if isinstance(payload, Mapping) else []
-    eval_history = payload.get("eval", []) if isinstance(payload, Mapping) else []
-    if not isinstance(train_history, list) or not isinstance(eval_history, list):
-        return [], []
-    return train_history, eval_history
-
-
-def _load_metric_payload_for_run(run_dir: Path, metric: str) -> Mapping[str, Any] | None:
-    filename = _METRIC_TO_FILENAME.get(metric)
-    if filename is None:
-        return None
-    payload_path = run_dir / "data" / filename
-    if not payload_path.exists():
-        return None
-    payload = _load_json(payload_path)
-    return payload if isinstance(payload, Mapping) else None
 
 
 def extract_metric_payload(metric_payload: Mapping[str, Any]) -> tuple[np.ndarray, dict[str, np.ndarray], dict[str, Any] | None]:
@@ -525,257 +367,3 @@ def maybe_extract_metric_payload(
         return extract_metric_payload(metric_payload)
     except ValueError:
         return None
-
-
-def plot_loss_overview(groups: Sequence[Any], out_path: Path, ncols: int, titles: list[str] | None = None) -> None:
-    def _plot_loss_ax(
-        ax,
-        histories: Sequence[Sequence[Mapping[str, float]]],
-        metric_key: str,
-        title: str | None = None,
-        xlabel: bool = False,
-        custom_title: str | None = None,
-    ) -> None:
-        curves = [[entry[metric_key] for entry in h if metric_key in entry] for h in histories]
-        curves = [c for c in curves if c]
-
-        ax.grid(True, alpha=0.2)
-        ax.set_ylabel(metric_key.replace("_", " "), fontsize=7)
-        if custom_title is not None:
-            ax.set_title(custom_title, fontsize=11, loc="center")
-        elif title:
-            ax.set_title(f"{title}\\nn={len(curves)}", fontsize=8, loc="left", fontfamily="monospace")
-        if xlabel:
-            ax.set_xlabel("epoch", fontsize=7)
-
-        if not curves:
-            ax.text(0.5, 0.5, f"no {metric_key}", transform=ax.transAxes, ha="center", va="center", fontsize=7)
-            return
-
-        mean, std = mean_std_curves(curves)
-        x = np.arange(1, len(mean) + 1, dtype=float)
-        plot_with_band(ax, x, mean, std, "mean±std")
-        ema_mean = _ema(mean.tolist(), 0.2)
-        ax.plot(x[: len(ema_mean)], ema_mean, linewidth=2.2, label="EMA 0.20")
-        handles, _ = ax.get_legend_handles_labels()
-        if handles:
-            ax.legend(fontsize=6)
-
-    n = len(groups)
-    nrows = max(1, math.ceil(n / ncols))
-    fig = plt.figure(figsize=(ncols * 6.0, nrows * 8.8))
-    outer_gs = fig.add_gridspec(nrows, ncols, hspace=0.7, wspace=0.5)
-
-    for i, group in enumerate(groups):
-        row, col = divmod(i, ncols)
-        inner_gs = GridSpecFromSubplotSpec(2, 1, subplot_spec=outer_gs[row, col], hspace=0.45)
-        train_ax = fig.add_subplot(inner_gs[0])
-        eval_ax = fig.add_subplot(inner_gs[1])
-        loaded_histories = [_load_loss_histories_for_run(run.sig_dir) for run in group.runs]
-        custom = titles[i] if titles and i < len(titles) else None
-        _plot_loss_ax(train_ax, [train_h for train_h, _ in loaded_histories], "train_loss", title=group.label, custom_title=custom)
-        _plot_loss_ax(eval_ax, [eval_h for _, eval_h in loaded_histories], "eval_loss", xlabel=True)
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=180, bbox_inches="tight")
-    plt.close(fig)
-
-
-def plot_signed_effect_heatmap_overview(groups: Sequence[Any], out_path: Path, ncols: int, titles: list[str] | None = None) -> None:
-    all_abs_vals: list[float] = []
-    group_matrices: list[tuple[Any, list[float], dict[str, list[float]]]] = []
-    group_thresh: float | None = None
-
-    for group in groups:
-        label_accum: dict[str, list[list[float]]] = {}
-        rho_ref: list[float] | None = None
-
-        for run in group.runs:
-            payload = _load_metric_payload_for_run(run.sig_dir, metric="effect_size")
-            if payload is None:
-                continue
-            parsed = maybe_extract_metric_payload(payload)
-            if parsed is None:
-                continue
-            x, curves, baseline = parsed
-            if group_thresh is None and isinstance(baseline, Mapping):
-                value = baseline.get("value")
-                if isinstance(value, (int, float)) and value > 0:
-                    group_thresh = float(value)
-            if rho_ref is None:
-                rho_ref = x.tolist()
-            for label, curve in curves.items():
-                label_accum.setdefault(label, []).append(curve.tolist())
-                all_abs_vals.extend(float(abs(v)) for v in curve.tolist() if np.isfinite(v))
-
-        if rho_ref is None:
-            group_matrices.append((group, [], {}))
-            continue
-
-        keep_special = any(
-            "model.keep_special=true" in " ".join(run.overrides)
-            for run in group.runs
-        )
-        mean_curves: dict[str, list[float]] = {
-            lbl: list(np.mean(np.array(runs_data), axis=0))
-            for lbl, runs_data in label_accum.items()
-            if keep_special or lbl != "special"
-        }
-        group_matrices.append((group, rho_ref, mean_curves))
-
-    global_vmax = float(np.percentile(all_abs_vals, 95)) if all_abs_vals else 1.0
-    group_thresh = group_thresh if group_thresh is not None else _Z_THRESH
-    shared_norm = _make_signed_effect_norm(global_vmax, thresh=group_thresh)
-
-    # Cap columns to the actual number of groups to avoid empty gridspec columns
-    # that push the colorbar far off to the right.
-    effective_ncols = min(ncols, len(group_matrices))
-    fig, axes = _build_overview_figure(len(groups), effective_ncols, width=5.5, height=4.2)
-
-    im_ref = None
-    for i, (ax, (group, rho_ref, mean_curves)) in enumerate(zip(axes, group_matrices)):
-        custom = titles[i] if titles and i < len(titles) else None
-        if custom is not None:
-            ax.set_title(custom, fontsize=11, loc="center")
-        else:
-            ax.set_title(
-                f"{group.label}\\nn={len(group.runs)}",
-                fontsize=8, loc="left", fontfamily="monospace",
-            )
-        if not rho_ref or not mean_curves:
-            ax.text(0.5, 0.5, "no signed_effect data", ha="center", va="center", transform=ax.transAxes)
-            continue
-
-        pseudo_payload = {"rho": rho_ref, "curves": mean_curves}
-        ds_name = next(
-            (_dataset_name_from_overrides(run.overrides) for run in group.runs
-             if _dataset_name_from_overrides(run.overrides) is not None),
-            _get_default_dataset_name(),
-        )
-        im = _signed_effect_heatmap_from_payload(
-            pseudo_payload, ax, vmax=global_vmax, norm=shared_norm, dataset_name=ds_name
-        )
-        ax.set_xlabel("ρ", fontsize=7)
-        if im_ref is None:
-            im_ref = im
-
-    for ax in axes[len(groups):]:
-        ax.set_visible(False)
-
-    fig.tight_layout(pad=1.1, w_pad=2.2, h_pad=2.2)
-
-    # Colorbar anchored to the used axes — matplotlib auto-sizes and positions it.
-    if im_ref is None:
-        sm = plt.cm.ScalarMappable(norm=shared_norm, cmap="RdBu")
-        sm.set_array([])
-        im_ref = sm
-
-    cbar = fig.colorbar(
-        im_ref,
-        ax=list(axes[:len(groups)]),
-        shrink=0.8,
-        pad=0.04,
-    )
-    cbar.set_label("z-score (signed)", fontsize=8)
-    # Ticks at the four meaningful breakpoints: extremes + both threshold boundaries
-    ticks = [-global_vmax, -group_thresh, 0.0, group_thresh, global_vmax]
-    labels = [
-        f"−{global_vmax:.0f}",
-        f"−{group_thresh:.1f}",
-        "0",
-        f"+{group_thresh:.1f}",
-        f"+{global_vmax:.0f}",
-    ]
-    cbar.set_ticks(ticks)
-    cbar.set_ticklabels(labels, fontsize=7)
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=180, bbox_inches="tight")
-    plt.close(fig)
-
-
-def plot_effect_size_overview(groups: Sequence[Any], out_path: Path, ncols: int, metric: str, titles: list[str] | None = None) -> None:
-    ylabel = "-log10(p)" if metric == "pvalue" else "Effect size (z-score)"
-    fig, axes = _build_overview_figure(len(groups), ncols, width=7.2)
-
-    for i, (ax, group) in enumerate(zip(axes, groups)):
-        custom = titles[i] if titles and i < len(titles) else None
-        _setup_overview_axis(ax, group.label, len(group.runs), "selection rate", ylabel, custom_title=custom)
-        x_ref: np.ndarray | None = None
-        per_label_runs: dict[str, list[np.ndarray]] = {}
-        baselines: list[float] = []
-        baseline_label = "p=0.05"
-
-        for run in group.runs:
-            metric_payload = _load_metric_payload_for_run(run.sig_dir, metric=metric)
-            if metric_payload is None:
-                continue
-            parsed = maybe_extract_metric_payload(metric_payload)
-            if parsed is None:
-                continue
-            x, label_curves, baseline = parsed
-            if isinstance(baseline, Mapping) and baseline.get("kind") == "constant":
-                try:
-                    baselines.append(float(baseline.get("value")))
-                    baseline_label = str(baseline.get("label", baseline_label))
-                except (TypeError, ValueError):
-                    pass
-            if x_ref is None:
-                x_ref = x
-            elif x_ref.shape != x.shape or not np.allclose(x_ref, x, atol=1e-8, rtol=1e-8):
-                raise ValueError(f"{metric} rho grid mismatch inside group: {group.label}")
-            for label, curve in label_curves.items():
-                per_label_runs.setdefault(label, []).append(curve)
-
-        if x_ref is None or not per_label_runs:
-            ax.text(0.5, 0.5, f"no {metric} data", transform=ax.transAxes, ha="center", va="center")
-            continue
-
-        _plot_group_label_curves(ax, x_ref, per_label_runs)
-
-        if baselines:
-            ax.axhline(float(np.mean(baselines)), linestyle="--", linewidth=1.5, color="0.35", label=baseline_label)
-        _legend_in_right_panel(ax, fontsize=6)
-
-    _finalize_overview_figure(fig, axes, len(groups), out_path)
-
-
-def plot_selection_rates_overview(groups: Sequence[Any], out_path: Path, ncols: int, titles: list[str] | None = None) -> None:
-    fig, axes = _build_overview_figure(len(groups), ncols, width=7.2)
-
-    for i, (ax, group) in enumerate(zip(axes, groups)):
-        custom = titles[i] if titles and i < len(titles) else None
-        _setup_overview_axis(ax, group.label, len(group.runs), "effective selection rate (rho)", "selection rate", ylim=(0.0, 1.05), custom_title=custom)
-        x_ref: np.ndarray | None = None
-        per_label_runs: dict[str, list[np.ndarray]] = {}
-        show_identity_baseline = False
-
-        for run in group.runs:
-            metric_payload = _load_metric_payload_for_run(run.sig_dir, metric="selection_rate")
-            if metric_payload is None:
-                continue
-            parsed = maybe_extract_metric_payload(metric_payload)
-            if parsed is None:
-                continue
-            x, label_curves, baseline = parsed
-            if isinstance(baseline, Mapping) and baseline.get("kind") == "identity":
-                show_identity_baseline = True
-            if x_ref is None:
-                x_ref = x
-            elif x_ref.shape != x.shape or not np.allclose(x_ref, x, atol=1e-8, rtol=1e-8):
-                raise ValueError(f"Selection-rate rho grid mismatch inside group: {group.label}")
-            for label, curve in label_curves.items():
-                per_label_runs.setdefault(label, []).append(curve)
-
-        if x_ref is None or not per_label_runs:
-            ax.text(0.5, 0.5, "no selections data", transform=ax.transAxes, ha="center", va="center")
-            continue
-
-        if show_identity_baseline:
-            ax.plot(x_ref, x_ref, linestyle="--", linewidth=1.5, color="0.35", label="baseline (y=x)")
-        _plot_group_label_curves(ax, x_ref, per_label_runs)
-        _legend_in_right_panel(ax, fontsize=6)
-
-    _finalize_overview_figure(fig, axes, len(groups), out_path)
-
-

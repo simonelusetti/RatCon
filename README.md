@@ -82,13 +82,15 @@ Both entry points share `conf/config.yaml`:
 |---|---|---|
 | Rationale selector (the bias test) | `train.py` | `forge run <overrides>` |
 | Oracle mask search | `train.py` | `forge run task=oracle <overrides>` |
-| NER MLP probe (downstream validation) | `ner_probe.py` | `forge -M ner_probe run <overrides>` |
+| NER MLP probe (downstream validation) | `ner_probe.py` | `forge -M ner_probe run task=ner <overrides>` |
 
 Oracle runs share setup, evaluation and artifact generation with the selector,
 but skip training, compilation and checkpoint loading. They also save
 `data/oracle_masks.npz` and `data/oracle_summary.json`. STS-B search remains
 opt-in with `runtime.oracle.stsb=true`. Existing `forge -M oracle ... task=oracle`
 commands still work; keeping `task=oracle` preserves experiment signatures.
+The probe entry point requires `task=ner` before registering a run, so its
+artifacts cannot be mixed with selector runs under the default task.
 
 Key config overrides:
 
@@ -102,6 +104,11 @@ A plain `forge run data.dataset=wikiann data.encoder.family=sbert` trains
 the selector, then automatically runs the bias-test evaluation
 (`runtime.eval.skip=false` is the default) and writes every `data/*.json`
 artifact the plot scripts need — no separate eval step required.
+
+For `data.encoder.pooling=min` or `max`, each token vector is multiplied by
+its selection weight before taking the coordinate-wise minimum or maximum.
+Weights are not clipped: zero-weight tokens contribute zero vectors, while
+batch padding is excluded. Training differentiates this operation directly.
 
 ### Inspecting results
 
@@ -215,6 +222,10 @@ same experiment, and an unscoped search would let a seed sweep find an
 already-finished run under a *different* seed, decide it had reached the
 target epoch, and skip training — quietly yielding identical runs instead of
 independent seeds.
+
+Evaluation-only runs (`train.no_train=true`) use the same seed filter when
+locating `train.checkpoint_path`. Probe resume also restores per-epoch
+classification reports through the loaded checkpoint's epoch.
 
 ## Every plot/analysis script's own docstring
 

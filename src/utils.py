@@ -5,16 +5,15 @@ import re
 import sys
 import time
 import resource
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import torch
-from forge.core import ExperimentRun
+from forge.core import ExperimentRun, ExperimentStore
 from omegaconf import OmegaConf
-from prettytable import PrettyTable
 from tqdm import tqdm
 
 
@@ -97,11 +96,6 @@ def _write_json(path: str, payload: dict) -> None:
     output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def load_json(path: Path) -> Any:
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
-
-
 def write_metrics_details(
     cfg: dict,
     run: ExperimentRun,
@@ -167,41 +161,28 @@ def checkpoint_epoch(checkpoint_path: Path) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def _run_seed(runtime_yaml: Path) -> Any:
-    """The seed recorded in a run's runtime.yaml, or None if absent."""
-    if not runtime_yaml.exists():
-        return None
-    return OmegaConf.select(OmegaConf.load(runtime_yaml), "seed")
+def find_resume_checkpoint(
+    run: ExperimentRun, checkpoint_name: str | None = None,
+) -> tuple[int, Path] | None:
+    """Find a same-seed checkpoint using Forge's per-run runtime snapshots.
 
-
-def find_resume_checkpoint(run: ExperimentRun) -> tuple[int, Path] | None:
-    """Highest-epoch `model_<n>.pth` among this experiment's *same-seed* runs.
-
-    dora reused a single directory per signature, so `train.continue=true`
-    only had to look in the cwd. forge gives every launch its own run
-    directory under the shared experiment directory, so resuming has to look
-    across sibling runs -- the freshly created run dir is always empty, and
-    would otherwise read as a cold start.
-
-    Restricted to runs sharing this run's seed, because `runtime.seed` is
-    excluded from the experiment signature: every seed of a configuration is
-    a run of the *same* experiment. Without the filter, a seed sweep launched
-    with continue=true would find an already-finished run under a different
-    seed, conclude it had reached the target epoch, and skip training
-    entirely -- silently returning a set of identical runs instead of
-    independent seeds. Resuming is meant to continue one trajectory, and a
-    different seed is a different trajectory.
-
-    Ties (the same epoch reached more than once) go to the most recently
-    written file.
+    Resume chooses the highest epoch; named evaluation requires that file.
+    Ties use file modification time, as before. Failed runs remain eligible
+    because their last saved checkpoint can be resumed.
     """
     seed = OmegaConf.select(run.config, "seed")
+    store = ExperimentStore(root=run.experiment.path.parents[1])
     candidates = [
-        (epoch, path)
-        for path in run.experiment.path.glob("*/state/models/model_*.pth")
-        if (epoch := checkpoint_epoch(path)) is not None
-        and _run_seed(path.parents[2] / "runtime.yaml") == seed
+        (checkpoint_epoch(path) or 0, path)
+        for source in store.list_runs(run.experiment.signature)
+        if OmegaConf.select(source.config, "seed") == seed
+        for path in (source.path / "state/models").glob(checkpoint_name or "model_*.pth")
+        if path.is_file() and (checkpoint_name is not None or checkpoint_epoch(path) is not None)
     ]
+    if not candidates and checkpoint_name is not None:
+        raise FileNotFoundError(
+            f"No {checkpoint_name} for seed {seed} in experiment {run.experiment.signature}."
+        )
     return max(candidates, key=lambda item: (item[0], item[1].stat().st_mtime)) if candidates else None
 
 
@@ -275,32 +256,6 @@ def get_logger(logfile: str = "train.log") -> logging.Logger:
     logger.addHandler(ch)
     logger.addHandler(fh)
     return logger
-
-
-def make_table(fields: Sequence[str], rows: Iterable[Sequence[object]]) -> PrettyTable:
-    table = PrettyTable()
-    table.field_names = fields
-    for row in rows:
-        table.add_row(row)
-    return table
-
-
-def dict_to_table(losses: Mapping[str, float]) -> PrettyTable:
-    fields = losses.keys()
-    rows = [[f"{losses.get(k, 0.0):.6f}" for k in fields]]
-    return make_table(fields, rows)
-
-
-def format_dict(d: Mapping[str, int | float | str], new_liners: set[str] | None = None) -> str:
-    extra_newline_after = new_liners or set()
-    lines: list[str] = []
-    for k, v in d.items():
-        if isinstance(v, (int, float)):
-            v = f"{v:.5f}"
-        lines.append(f"{k}: {v}")
-        if k in extra_newline_after:
-            lines.append("")
-    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------

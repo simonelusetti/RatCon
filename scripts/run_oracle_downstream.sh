@@ -30,12 +30,7 @@ cd "$(dirname "$0")/.."
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 echo "[$(date -Is)] === NER probes ==="
-.venv/bin/forge -M ner_probe grid task=ner data.encoder.family=bert \
-    runtime.device=cuda runtime.data.batch_size=16 train.continue=true \
-    --sweep runtime.seed=0,1,2 \
-    --run data.dataset=conll2003 \
-    --run data.dataset=conll2000 \
-    --run data.dataset=movie_rationales ner.class_weighted=true
+bash scripts/run_downstream_probes_seeds.sh
 echo "[$(date -Is)] PROBES_EXIT=$?"
 
 echo "[$(date -Is)] === oracles (rho=0.8) ==="

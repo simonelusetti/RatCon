@@ -12,15 +12,13 @@
 # the same numbers. Leave it at the config default for every probe run, and
 # read one probe per *token encoder*, not per (encoder, pooling) pair.
 #
-# conll2003 is omitted: it does not load under the pinned datasets==4.0.0
-# (script-based dataset, support removed). See README "Known issues".
+# Override data.dataset=conll2003 to use the converted Parquet loader.
 globals:
   # Load-bearing, not cosmetic: forge derives the experiment signature from
   # the config alone, so with no config-level difference a probe run and a
   # selector run over the same dataset/encoder would hash to the *same*
   # experiment and pile incompatible artifacts into one directory.
-  # ner_probe.py never reads cfg.task; this exists purely to keep the two
-  # families of experiment distinct.
+  # ner_probe.py checks this before registering the run.
   - "task=ner"
   - "runtime.grid=true"
   - "runtime.threads=16"

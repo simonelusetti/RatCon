@@ -219,6 +219,11 @@ class NERTrainer:
         )
 
         loaded_epoch = int(meta.get("epoch", checkpoint_epoch(checkpoint_path) or 0))
+        reports_path = checkpoint_path.parents[2] / "data/ner_report_history.json"
+        reports = json.loads(reports_path.read_text()) if reports_path.exists() else []
+        self.ner_report_history = [r for r in reports if r["epoch"] <= loaded_epoch]
+        if reports_path.exists():
+            self.ner_report_history_path.write_text(json.dumps(self.ner_report_history, indent=2))
         self.completed_epochs = max(self.completed_epochs, loaded_epoch)
         self.logger.info(
             "Loaded checkpoint from %s with signature %s at epoch %d",
@@ -457,6 +462,8 @@ def _resolve_ner_tag_names(dataset_name: str) -> list[str]:
 
 
 def main(cfg: DictConfig) -> int:
+    if cfg.task != "ner":
+        raise ValueError("The probe entry point requires task=ner.")
     start_capture = start_run_metrics_capture()
 
     # start_run() chdirs into the run directory, so it must precede
@@ -484,14 +491,8 @@ def main(cfg: DictConfig) -> int:
     trainer = NERTrainer(cfg, train_dl, test_dl, encoder, tag_names, logger, run, start_capture)
 
     if cfg.train.no_train:
-        # Resolved across the experiment's runs -- see src/train.py's main.
-        checkpoint_name = str(cfg.train.checkpoint_path)
-        candidates = sorted(run.experiment.path.glob(f"*/state/models/{checkpoint_name}"))
-        if not candidates:
-            raise FileNotFoundError(
-                f"No {checkpoint_name} found in any run of experiment {run.experiment.signature}."
-            )
-        trainer.load_checkpoint(candidates[-1])
+        _, checkpoint = find_resume_checkpoint(run, str(cfg.train.checkpoint_path))
+        trainer.load_checkpoint(checkpoint)
         # Falls through to run.finish() either way -- see src/train.py's main.
         if trainer.skip_eval:
             logger.info("Skipping no-train evaluation (runtime.eval.skip=true).")

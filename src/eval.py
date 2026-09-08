@@ -39,22 +39,6 @@ def _budget_k_np(rho: float, n_values: np.ndarray) -> np.ndarray:
     return np.where(n_values > 0, np.maximum(k, 1), 0)
 
 
-def _label_sort_key(label: Any) -> tuple[int, Any]:
-    if isinstance(label, (int, np.integer)):
-        return 0, int(label)
-    if isinstance(label, float):
-        return 1, float(label)
-    if isinstance(label, str):
-        try:
-            return 0, int(label)
-        except ValueError:
-            try:
-                return 1, float(label)
-            except ValueError:
-                return 2, label
-    return 3, str(label)
-
-
 def _build_selections_payload(
     counts_pred: Sequence[Any] | None,
     counts_gold: Sequence[Any] | None,

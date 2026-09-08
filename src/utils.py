@@ -127,7 +127,7 @@ def write_metrics_details(
             "folder": str(run.path),
         },
         "training": {
-            "epochs_target": int(training_cfg.get("epochs", 0) or 0),
+            "epochs_target": int(epochs_target),
             "no_train": bool(training_cfg.get("no_train", False)),
             "continue": bool(training_cfg.get("continue", False)),
             "epochs_completed": int(epochs_completed),

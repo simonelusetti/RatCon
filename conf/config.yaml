@@ -1,7 +1,7 @@
 defaults:
   - _self_
 
-task: "rationale"  # "rationale" (selector, default) or "ner" (per-token MLP downstream probe)
+task: "rationale"  # rationale (trained selector), oracle (mask search), ner (separate probe entry point)
 
 model:
   keep_special: false

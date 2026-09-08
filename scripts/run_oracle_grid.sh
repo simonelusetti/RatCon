@@ -12,7 +12,7 @@
 # interrupted family simply re-runs from scratch.
 set -u
 cd "$(dirname "$0")/.."
-.venv/bin/forge -M oracle grid task=oracle \
+.venv/bin/forge grid task=oracle \
     data.dataset=wikiann data.encoder.pooling=mean \
     runtime.device=cuda runtime.data.batch_size=512 \
     --run data.encoder.family=electra \

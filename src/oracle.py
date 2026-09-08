@@ -15,7 +15,8 @@ OracleSelector exposes exactly RationaleSelectorModel's forward signature
 --- (ids, embeddings, attn, rhos) -> (z, g, loss) --- so it flows through
 the evaluation stack unchanged: the same Counts/SelectionLog bookkeeping,
 the same save_eval_artifacts, and run_stsb_sweep works on it untouched.
-Nothing in the training path needed a branch for this.
+src/train.py selects this implementation for task=oracle and owns the shared
+setup, evaluation, artifact writing, and Forge run lifecycle.
 
 Efficiency
 ----------
@@ -43,11 +44,11 @@ overstatement, and the fraction affected is logged.
 from __future__ import annotations
 
 import itertools
-import json
 import os
 import math
 import sys
 from collections import defaultdict
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -56,24 +57,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from forge import start_run
-from numpy import linspace
-
-from .data import SPECIAL_TAG, initialize_data
-from .eval import save_eval_artifacts
-from .metrics import Counts, SelectionLog, build_token_frequency_table
-from .retrival_fun import run_stsb_sweep
 from .sentence import SentenceEncoder
-from .utils import (
-    build_final_metrics,
-    configure_runtime,
-    get_logger,
-    should_disable_tqdm,
-    start_run_metrics_capture,
-    to_device,
-    write_metrics_details,
-)
-from .view import save_eval_plots
 
 
 class MaskTables:
@@ -149,6 +133,22 @@ class OracleSelector(nn.Module):
         self.progress = progress
         self.n_exhaustive = 0
         self.n_capped = 0
+
+    @contextmanager
+    def search_precision(self):
+        """Enable oracle TF32 without leaking it into later runs in a grid."""
+        if not str(self.device).startswith("cuda"):
+            yield
+            return
+        matmul_tf32 = torch.backends.cuda.matmul.allow_tf32
+        cudnn_tf32 = torch.backends.cudnn.allow_tf32
+        try:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            yield
+        finally:
+            torch.backends.cuda.matmul.allow_tf32 = matmul_tf32
+            torch.backends.cudnn.allow_tf32 = cudnn_tf32
 
     @torch.no_grad()
     def _best_for_group(self, ids_stack, masks, targets_stack):
@@ -296,173 +296,9 @@ def save_masks(path: Path, rhos, per_rho_indices: list[list[np.ndarray]]) -> Non
     np.savez_compressed(path, **payload)
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
 def main(cfg) -> int:
-    """Run the oracle search and emit the same artifacts a selector run does.
-
-    Deliberately its own entry point rather than a branch inside
-    SelectorTrainer: there is no training loop, no optimiser and no
-    checkpoint here, so almost nothing of that class would apply. What IS
-    shared -- the counting, the artifacts, the plots -- is shared by calling
-    the same functions, not by threading a flag through a second code path.
-    """
-    start_capture = start_run_metrics_capture()
-    run = start_run(cfg)
-    logger = get_logger()
-
+    """Compatibility entry point for existing `forge -M oracle` launchers."""
     if str(cfg.get("task", "")) != "oracle":
-        raise SystemExit(
-            "Refusing to run: task must be 'oracle'. forge derives the experiment "
-            "signature from the config alone, so without this an oracle run would "
-            "hash to the same experiment as the selector run it is meant to be "
-            "compared against. Pass task=oracle."
-        )
-
-    logger.info(f"Exp signature: {run.signature}")
-    logger.info(repr(cfg))
-
-    cfg.runtime, changed_device = configure_runtime(cfg.runtime)
-    if changed_device:
-        logger.warning("CUDA requested but unavailable, using CPU.")
-    device = cfg.runtime.device
-
-    train_dl, test_dl, encoder, tokenizer, labels_set, _ = initialize_data(
-        cfg.data, cfg.runtime.data, logger, device=device,
-        keep_special=bool(cfg.model.get("keep_special", True)),
-    )
-    encoder.eval()
-    for p in encoder.parameters():
-        p.requires_grad_(False)
-
-    rhos = linspace(*cfg.model.loss.sweep_range)
-    oracle_cfg = cfg.runtime.get("oracle", {})
-    progress = build_progress(test_dl.dataset, rhos, cfg)
-    selector = OracleSelector(
-        encoder,
-        max_combinations=int(oracle_cfg.get("max_combinations", 10_000)),
-        samples=int(oracle_cfg.get("samples", 10_000)),
-        chunk_tokens=int(oracle_cfg.get("chunk_tokens", 1 << 18)),
-        seed=int(cfg.runtime.get("seed", 42)),
-        device=device,
-        precision=str(oracle_cfg.get("precision", "fp16")),
-        progress=progress,
-    )
-    # TF32 doubles fp32 matmul throughput on Ampere-and-later. Set here
-    # rather than globally so the selector's training path keeps the exact
-    # numerics every existing run was produced with.
-    if str(device).startswith("cuda"):
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        logger.info("TF32 enabled; search precision=%s", oracle_cfg.get("precision", "fp16"))
-
-    logger.info(
-        "Oracle search over %s candidate masks (cap=%s, fallback samples=%s)",
-        f"{progress.total:,}", oracle_cfg.get("max_combinations", 10_000),
-        oracle_cfg.get("samples", 10_000),
-    )
-
-    label_set = None if labels_set is None else set(labels_set) | {SPECIAL_TAG}
-    label_order = sorted(label_set) if label_set is not None else []
-    counts_pred = [Counts(labels=label_set) for _ in rhos]
-    counts_gold = [Counts(labels=label_set) for _ in rhos]
-    selection_log = None
-    if label_set is not None:
-        selection_log = SelectionLog(rhos, build_token_frequency_table(train_dl.dataset["ids"]))
-
-    per_rho_indices: list[list[np.ndarray]] = [[] for _ in rhos]
-    total_loss, examples = 0.0, 0
-
-    with torch.no_grad():
-        for batch in test_dl:
-            batch = to_device(device, batch)
-            ids, attn = batch["ids"], batch["attn_mask"]
-            emb = encoder.token_embeddings(ids, attn)
-            _, g, loss = selector(ids, emb, attn, rhos=rhos)
-
-            bs = ids.size(0)
-            examples += bs
-            total_loss += float(loss) * bs
-
-            for r in range(len(rhos)):
-                for b in range(bs):
-                    per_rho_indices[r].append(
-                        g[r, b].nonzero(as_tuple=True)[0].cpu().numpy().astype(np.int32)
-                    )
-
-            if label_set is not None:
-                flat_attn = attn.bool().view(-1).cpu()
-                flat_labels = [lab for seq in batch["labels"] for lab in seq]
-                word_ids = batch.get("word_ids")
-                if word_ids is not None:
-                    flat_wids = word_ids.view(-1).cpu().tolist()
-                    flat_labels = [
-                        SPECIAL_TAG if (is_att and wid < 0 and lbl == "-100") else lbl
-                        for lbl, is_att, wid in zip(flat_labels, flat_attn.tolist(), flat_wids)
-                    ]
-                for i in range(len(rhos)):
-                    counts_pred[i] += Counts(flat_labels, flat_attn, g[i].cpu().view(-1))
-                    counts_gold[i] += Counts(flat_labels, flat_attn)
-                if selection_log is not None:
-                    selection_log.add_batch(
-                        ids.view(-1).cpu().tolist(), flat_labels, flat_attn.tolist(),
-                        g.reshape(len(rhos), -1), seq_len=attn.shape[1],
-                    )
-    progress.close()
-
-    total_loss /= max(1, examples)
-    searched = selector.n_exhaustive + selector.n_capped
-    exhaustive_frac = selector.n_exhaustive / max(1, searched)
-    logger.info(
-        "Oracle reconstruction loss=%.4f over %d sentences | %.1f%% of (sentence, rho) "
-        "pairs searched exhaustively, the rest capped (a lower bound on the true oracle there)",
-        total_loss, examples, 100 * exhaustive_frac,
-    )
-
-    save_masks(Path("data") / "oracle_masks.npz", rhos, per_rho_indices)
-    logger.info("Saved winning masks to data/oracle_masks.npz")
-
-    stsb = None
-    if bool(oracle_cfg.get("stsb", False)):
-        base, ours, rand = run_stsb_sweep(
-            cfg=cfg, device=device, encoder=encoder, tokenizer=tokenizer, selector=selector,
-        )
-        stsb = {
-            "base": float(base),
-            "ours_by_rho": {str(float(k)): float(v) for k, v in ours.items()},
-            "random_by_rho": {str(float(k)): float(v) for k, v in rand.items()},
-        }
-    else:
-        logger.info("Skipping the STS-B sweep (runtime.oracle.stsb=false): brute-forcing it "
-                    "means a fresh search per pair per rho on the finer eval grid.")
-
-    artifact_paths = save_eval_artifacts(
-        counts_pred=counts_pred, counts_gold=counts_gold, rhos=rhos,
-        label_order=label_order, selection_log=selection_log, stsb=stsb,
-    )
-    for name, path in artifact_paths.items():
-        logger.info("Saved %s artifact to: %s", name, path)
-    for name, path in save_eval_plots(artifact_paths.keys(), dataset_name=cfg.data.dataset).items():
-        logger.info("Saved %s plot to: %s", name, path)
-
-    Path("data/oracle_summary.json").write_text(json.dumps({
-        "reconstruction_loss": total_loss,
-        "sentences": examples,
-        "exhaustive_fraction": exhaustive_frac,
-        "searched_pairs": searched,
-        "candidate_rows": int(progress.total),
-    }, indent=2), encoding="utf-8")
-
-    write_metrics_details(
-        cfg=cfg, run=run, start_capture=start_capture,
-        epochs_completed=0, epochs_target=0, training_completed=True,
-    )
-    run.finish({
-        "eval_loss": total_loss,
-        "exhaustive_fraction": exhaustive_frac,
-        **{k: v for k, v in build_final_metrics([], start_capture, 0).items()
-           if k in ("duration_seconds", "max_rss_gb")},
-    })
-    return 0
+        raise ValueError("The oracle entry point requires task=oracle.")
+    from .train import main as run
+    return run(cfg)

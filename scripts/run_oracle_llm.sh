@@ -16,7 +16,7 @@
 set -u
 cd "$(dirname "$0")/.."
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-.venv/bin/forge -M oracle run task=oracle \
+.venv/bin/forge run task=oracle \
     data.dataset=wikiann data.encoder.family=llm data.encoder.pooling=last \
     runtime.device=cuda runtime.data.batch_size=256 \
     runtime.oracle.chunk_tokens=65536

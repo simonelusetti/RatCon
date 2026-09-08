@@ -81,7 +81,14 @@ Both entry points share `conf/config.yaml`:
 | Task | Entry point | Invocation |
 |---|---|---|
 | Rationale selector (the bias test) | `train.py` | `forge run <overrides>` |
+| Oracle mask search | `train.py` | `forge run task=oracle <overrides>` |
 | NER MLP probe (downstream validation) | `ner_probe.py` | `forge -M ner_probe run <overrides>` |
+
+Oracle runs share setup, evaluation and artifact generation with the selector,
+but skip training, compilation and checkpoint loading. They also save
+`data/oracle_masks.npz` and `data/oracle_summary.json`. STS-B search remains
+opt-in with `runtime.oracle.stsb=true`. Existing `forge -M oracle ... task=oracle`
+commands still work; keeping `task=oracle` preserves experiment signatures.
 
 Key config overrides:
 

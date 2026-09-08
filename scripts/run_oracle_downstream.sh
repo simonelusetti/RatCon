@@ -39,7 +39,7 @@ echo "[$(date -Is)] === NER probes ==="
 echo "[$(date -Is)] PROBES_EXIT=$?"
 
 echo "[$(date -Is)] === oracles (rho=0.8) ==="
-.venv/bin/forge -M oracle grid task=oracle \
+.venv/bin/forge grid task=oracle \
     data.encoder.family=bert data.encoder.pooling=mean \
     model.loss.sweep_range=[0.8,0.8,1] \
     runtime.device=cuda runtime.data.batch_size=256 \

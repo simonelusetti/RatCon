@@ -8,7 +8,7 @@
 # batches. Internal chunking keeps memory bounded regardless.
 set -u
 cd "$(dirname "$0")/.."
-.venv/bin/forge -M oracle run task=oracle \
+.venv/bin/forge run task=oracle \
     data.dataset=wikiann data.encoder.family=bert data.encoder.pooling=mean \
     runtime.device=cuda runtime.data.batch_size=512
 echo "ORACLE_EXIT=$?"

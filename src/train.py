@@ -18,6 +18,7 @@ from numpy import linspace
 from .metrics import Counts, SelectionLog, build_token_frequency_table
 from .sentence import SentenceEncoder
 from .selector import RationaleSelectorModel
+from .oracle import OracleSelector, build_progress, save_masks
 from .data import SPECIAL_TAG, initialize_data
 from .eval import save_eval_artifacts
 from .retrival_fun import run_stsb_sweep
@@ -55,6 +56,7 @@ class SelectorTrainer:
         torch.manual_seed(int(cfg.runtime.get("seed", 42)))
 
         self.cfg = cfg
+        self.is_oracle = cfg.task == "oracle"
         self.logger = logger
         self.train_dl = train_dl
         self.test_dl = test_dl
@@ -92,6 +94,24 @@ class SelectorTrainer:
         for p in self.sent_encoder.parameters():
             p.requires_grad_(False)
 
+        self.plots_dir.mkdir(parents=True, exist_ok=True)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.train_loss_history, self.eval_loss_history = load_combined_loss_history(self.loss_history_path)
+        self.extra_metrics = {}
+
+        if self.is_oracle:
+            oracle_cfg = cfg.runtime.get("oracle", {})
+            self.model = OracleSelector(
+                self.sent_encoder,
+                max_combinations=int(oracle_cfg.get("max_combinations", 10_000)),
+                samples=int(oracle_cfg.get("samples", 10_000)),
+                chunk_tokens=int(oracle_cfg.get("chunk_tokens", 1 << 18)),
+                seed=int(cfg.runtime.get("seed", 42)),
+                device=self.device,
+                precision=str(oracle_cfg.get("precision", "fp16")),
+            )
+            return
+
         with torch.no_grad():
             first = next(iter(self.train_dl))
             model_dim = self.sent_encoder.token_embeddings(
@@ -120,9 +140,6 @@ class SelectorTrainer:
         )
 
         self.models_dir.mkdir(parents=True, exist_ok=True)
-        self.plots_dir.mkdir(parents=True, exist_ok=True)
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.train_loss_history, self.eval_loss_history = load_combined_loss_history(self.loss_history_path)
 
     def checkpoint_path(self, epoch: int) -> Path:
         return self.models_dir / f"model_{epoch}.pth"
@@ -242,7 +259,8 @@ class SelectorTrainer:
 
     @torch.no_grad()
     def evaluate(
-        self, soft: bool = False, selection_log: SelectionLog | None = None
+        self, soft: bool = False, selection_log: SelectionLog | None = None,
+        selected_indices: list | None = None,
     ) -> tuple[dict, list | None, list | None]:
         self.model.eval()
 
@@ -266,6 +284,12 @@ class SelectorTrainer:
                 = self.forward_pass(batch, examples_count, total_loss, rhos=self.rhos)
 
             pred_mask = z if soft else g
+
+            if selected_indices is not None:
+                for r, masks in enumerate(g):
+                    selected_indices[r].extend(
+                        mask.nonzero(as_tuple=True)[0].cpu().numpy() for mask in masks
+                    )
 
             if self.labels_set is not None:
                 labels = batch["labels"]
@@ -303,7 +327,7 @@ class SelectorTrainer:
 
     @torch.no_grad()
     def final_eval(self, record_eval_history: bool = True) -> None:
-        if self.skip_eval:
+        if self.skip_eval and not self.is_oracle:
             self.logger.info("Skipping full evaluation (runtime.eval.skip=true).")
             return
 
@@ -314,36 +338,63 @@ class SelectorTrainer:
 
         # Section 5 counts use the hard top-k mask g_pi(rho) per the paper's
         # inference convention; evaluate(soft=True) would use the soft mask z.
-        eval_losses, counts_pred, counts_gold = self.evaluate(
-            soft=not bool(self.cfg.runtime.eval.get("hard", True)),
-            selection_log=selection_log,
-        )
+        selected_indices = [[] for _ in self.rhos] if self.is_oracle else None
+        progress = build_progress(self.test_dl.dataset, self.rhos, self.cfg) if self.is_oracle else None
+        if self.is_oracle:
+            self.model.progress = progress
+            self.logger.info("Oracle search over %s candidate masks", f"{progress.total:,}")
+        try:
+            eval_losses, counts_pred, counts_gold = self.evaluate(
+                soft=not bool(self.cfg.runtime.eval.get("hard", True)),
+                selection_log=selection_log, selected_indices=selected_indices,
+            )
+        finally:
+            if progress is not None:
+                progress.close()
+                self.model.progress = None
+
+        if self.is_oracle:
+            searched = self.model.n_exhaustive + self.model.n_capped
+            exhaustive_fraction = self.model.n_exhaustive / max(1, searched)
+            self.extra_metrics["exhaustive_fraction"] = exhaustive_fraction
+            save_masks(self.data_dir / "oracle_masks.npz", self.rhos, selected_indices)
+            (self.data_dir / "oracle_summary.json").write_text(json.dumps({
+                "reconstruction_loss": eval_losses["eval_loss"],
+                "sentences": len(self.test_dl.dataset),
+                "exhaustive_fraction": exhaustive_fraction,
+                "searched_pairs": searched,
+                "candidate_rows": int(progress.total),
+            }, indent=2), encoding="utf-8")
+            self.logger.info("Oracle search: %.1f%% of searched pairs exhaustive", 100 * exhaustive_fraction)
 
         if record_eval_history:
-            self.record_eval_losses(eval_losses)
+            if self.is_oracle:
+                self.eval_loss_history.append(eval_losses)
+            else:
+                self.record_eval_losses(eval_losses)
         self.logger.info("Final evaluation: eval_loss=%.4f", eval_losses.get("eval_loss", 0.0))
-        self.write_loss_plot()
+        if not self.is_oracle:
+            self.write_loss_plot()
 
         # Create data and plots directories
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.plots_dir.mkdir(parents=True, exist_ok=True)
 
-        # Runs unconditionally, regardless of what cfg.data.dataset was used
-        # to train -- this is what makes cross-corpus generalization (every
-        # run gets STS-B-evaluated, whatever it trained on) possible without
-        # any extra configuration.
-        base, ours, rand = run_stsb_sweep(
-            cfg=self.cfg,
-            device=self.device,
-            encoder=self.sent_encoder,
-            tokenizer=self.tokenizer,
-            selector=self.model,
-        )
-        stsb = {
-            "base": float(base),
-            "ours_by_rho": {str(float(k)): float(v) for k, v in ours.items()},
-            "random_by_rho": {str(float(k)): float(v) for k, v in rand.items()},
-        }
+        # All trained selectors get cross-corpus STS-B evaluation. Oracle
+        # searches opt in because every pair requires another mask search.
+        stsb = None
+        if not self.is_oracle or self.cfg.runtime.oracle.get("stsb", False):
+            base, ours, rand = run_stsb_sweep(
+                cfg=self.cfg, device=self.device, encoder=self.sent_encoder,
+                tokenizer=self.tokenizer, selector=self.model,
+            )
+            stsb = {
+                "base": float(base),
+                "ours_by_rho": {str(float(k)): float(v) for k, v in ours.items()},
+                "random_by_rho": {str(float(k)): float(v) for k, v in rand.items()},
+            }
+        else:
+            self.logger.info("Skipping the STS-B sweep (runtime.oracle.stsb=false).")
 
         artifact_paths = save_eval_artifacts(
             counts_pred=counts_pred,
@@ -491,6 +542,8 @@ class SelectorTrainer:
 
 
 def main(cfg: DictConfig) -> int:
+    if cfg.task not in ("rationale", "oracle"):
+        raise ValueError("train expects task=rationale or task=oracle; use -M ner_probe for probes.")
     start_capture = start_run_metrics_capture()
 
     # start_run() registers the run and chdirs into its output directory, so
@@ -519,7 +572,14 @@ def main(cfg: DictConfig) -> int:
         cfg, train_dl, test_dl, encoder, tokenizer, labels_set, logger, run, start_capture
     )
 
-    if cfg.train.no_train:
+    if trainer.is_oracle:
+        with trainer.model.search_precision():
+            trainer.final_eval()
+        write_metrics_details(
+            cfg=cfg, run=run, start_capture=start_capture,
+            epochs_completed=0, epochs_target=0, training_completed=True,
+        )
+    elif cfg.train.no_train:
         # Resolved across the experiment's runs, not just this one: a no-train
         # eval re-run starts in a fresh, empty run directory, so the named
         # checkpoint lives in whichever sibling run actually trained it.
@@ -549,7 +609,8 @@ def main(cfg: DictConfig) -> int:
             training_completed=True,
         )
 
-    run.finish(build_final_metrics(
-        trainer.eval_loss_history, start_capture, trainer.completed_epochs
-    ))
+    run.finish({
+        **build_final_metrics(trainer.eval_loss_history, start_capture, trainer.completed_epochs),
+        **trainer.extra_metrics,
+    })
     return 0

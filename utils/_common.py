@@ -1,7 +1,7 @@
 """Everything the utils/plot_*.py scripts share.
 
 Colormap + norm for the signed heatmaps, the encoder palette, and the
-per-tag loaders that read a bias run and the NER probe cache.
+per-tag loaders that read a bias run and the tagger cache.
 
 --- colormap + norm ---------------------------------------------------
 
@@ -35,7 +35,7 @@ from matplotlib.colors import FuncNorm, LinearSegmentedColormap
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import ner  # noqa: E402
+import tagger  # noqa: E402
 from src.data import LABEL_DISPLAY_NAMES  # noqa: E402
 
 # Fraction of the [0,1] colorbar each side of center devoted to the
@@ -176,23 +176,29 @@ def load_bias(run_path: Path, dataset: str, metric: str, rho: float | None) -> d
 
 
 def probe_reports(dataset: str, family: str) -> list[dict]:
-    """Cached NER probe reports for a token encoder, one per seed."""
-    reports = ner.load(dataset, family)
+    """Cached tagger reports for a token encoder, one per seed."""
+    reports = tagger.load(dataset, family)
     if not reports:
         raise SystemExit(
-            f"No cached NER probe for {dataset}/{family}. "
-            f"Build one with: python3 -m ner {dataset} --family {family}")
+            f"No cached tagger for {dataset}/{family}. "
+            f"Build one with: python3 -m tagger {dataset} --family {family}")
     return reports
 
 
-def ner_f1(report: dict, tags: list[str]) -> dict[str, float]:
+def tagger_f1(report: dict, tags: list[str]) -> dict[str, float]:
     return {tag: float(report["token_level"][tag]["f1-score"]) for tag in tags}
 
 
-def binary_entity_f1(report: dict) -> float:
+def binary_entity_f1(report: dict) -> float | None:
     """Token-level F1 of "is this token part of any entity" (B-*/I-* collapsed
-    against O) -- a real detection metric rather than an average of per-tag F1s."""
-    return float(report["binary_entity_level"]["entity"]["f1-score"])
+    against O) -- a real detection metric rather than an average of per-tag F1s.
+
+    None when the corpus has no "O" class (UD upos, deprel, GUM discourse: every
+    token carries a real label, so "is this a token" is vacuous). Callers skip
+    the aggregate view rather than plotting a constant.
+    """
+    level = report.get("binary_entity_level")
+    return float(level["entity"]["f1-score"]) if level else None
 
 
 def mean_spread(values: list[float], spread: str) -> tuple[float, float]:

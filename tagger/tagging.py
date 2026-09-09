@@ -1,4 +1,4 @@
-"""Train-once, load-thereafter NER probe over a frozen encoder.
+"""Train-once, load-thereafter tagger over a frozen encoder.
 
 Why this is a cache and not an experiment: the probe reads *word-level token
 embeddings* and never pools, so neither the pooling strategy nor rho nor the
@@ -7,7 +7,7 @@ selector built on the same token encoder, and the only thing that identifies
 it is (dataset, encoder family). Seed is in the key purely so the grounding
 figures can still show a spread across independently trained probes.
 
-    outputs/ner/<dataset>/<family>/seed<k>/{model.pth,report.json}
+    outputs/probe/<dataset>/<family>/seed<k>/{model.pth,report.json}
 
 report.json holds the three views the plot scripts read -- span level
 (seqeval), token level (per-tag), and a binary entity/O collapse -- plus the
@@ -34,9 +34,10 @@ from src.utils import to_device
 from .model import MLPTagger, gather_word_level
 
 ROOT = Path(__file__).resolve().parent.parent
-STORE = ROOT / "outputs" / "ner"
+STORE = ROOT / "outputs" / "probe"
 
-TAGGED_DATASETS = {"wikiann", "conll2003", "conll2000", "movie_rationales"}
+TAGGED_DATASETS = {"wikiann", "conll2003", "conll2000", "movie_rationales",
+                   "ud_upos", "ud_deprel", "ud_discourse"}
 
 log = logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ def tag_names(dataset: str) -> list[str]:
     name = canonical_name(dataset)
     if name not in TAGGED_DATASETS:
         raise ValueError(
-            f"The NER probe needs a per-token-labeled dataset "
+            f"The tagger needs a per-token-labeled dataset "
             f"({', '.join(sorted(TAGGED_DATASETS))}), got {dataset!r}."
         )
     tag_map = LABEL_DISPLAY_NAMES[name]
@@ -74,19 +75,60 @@ def tag_names(dataset: str) -> list[str]:
 # Reports
 # ---------------------------------------------------------------------------
 
+def is_iob(tags) -> bool:
+    """Do these labels use a B-/I- span encoding?
+
+    seqeval reads the first character of every tag as an IOB prefix and strips
+    it, so on a non-IOB scheme it silently reports on mangled classes -- UD's
+    NOUN becomes "OUN", VERB becomes "ERB", and every F1 comes out 0.0 with
+    non-zero support. Wrong-shaped output rather than an error, so the check
+    has to happen before the call, not after.
+    """
+    return any(t[:2] in ("B-", "I-") for t in tags)
+
+
 def build_reports(y_true: list[list[str]], y_pred: list[list[str]]) -> dict:
+    """Per-tag scores, plus whichever scheme-dependent views the labels support.
+
+    token_level is always present: it is plain per-class classification and
+    assumes nothing about the tagset. The other two encode a tagging scheme and
+    are emitted only when that scheme is actually in use --
+
+      span_level          needs IOB prefixes to recover spans
+      binary_entity_level needs a distinguished negative class "O"
+
+    A corpus like UD upos or GUM discourse has neither: every token carries a
+    real linguistic label and there is no "outside". Emitting those keys anyway
+    produced confident nonsense (span F1 of 0.0, binary F1 of exactly 1.0
+    because everything collapses to one class), so their absence is the honest
+    signal that the question does not apply.
+    """
     flat_true = [tag for seq in y_true for tag in seq]
     flat_pred = [tag for seq in y_pred for tag in seq]
-    # The binary view needs the joint confusion matrix -- a B-PER predicted
-    # as B-ORG is correct here but wrong per-tag -- so it cannot be derived
-    # from the other two after the fact.
-    binarize = lambda tags: ["entity" if t != "O" else "O" for t in tags]
-    return {
-        "span_level": span_classification_report(y_true, y_pred, output_dict=True, zero_division=0),
-        "token_level": flat_classification_report(flat_true, flat_pred, output_dict=True, zero_division=0),
-        "binary_entity_level": flat_classification_report(
-            binarize(flat_true), binarize(flat_pred), output_dict=True, zero_division=0),
+    reports = {
+        "token_level": flat_classification_report(
+            flat_true, flat_pred, output_dict=True, zero_division=0),
     }
+    if is_iob(flat_true):
+        reports["span_level"] = span_classification_report(
+            y_true, y_pred, output_dict=True, zero_division=0)
+    if "O" in set(flat_true):
+        # Needs the joint confusion matrix -- a B-PER predicted as B-ORG is
+        # correct here but wrong per-tag -- so it cannot be derived from
+        # token_level after the fact.
+        binarize = lambda tags: ["entity" if t != "O" else "O" for t in tags]
+        reports["binary_entity_level"] = flat_classification_report(
+            binarize(flat_true), binarize(flat_pred), output_dict=True, zero_division=0)
+    return reports
+
+
+def headline_f1(report: dict) -> float:
+    """One comparable number per run, whatever the tagset.
+
+    Macro-averaged per-tag F1: defined for every scheme, and unlike the binary
+    entity view it does not quietly become 1.0 when there is no negative class.
+    """
+    return float(report["token_level"]["macro avg"]["f1-score"])
 
 
 # ---------------------------------------------------------------------------
@@ -113,15 +155,15 @@ class _Probe:
             dim = encoder.token_embeddings(
                 first["ids"].to(device), first["attn_mask"].to(device)).shape[-1]
 
-        ner_cfg = cfg.get("ner", {})
+        tagger_cfg = cfg.get("tagger", {})
         self.model = MLPTagger(dim, num_tags=len(tags),
-                               hidden=int(ner_cfg.get("hidden", 256)),
-                               dropout=float(ner_cfg.get("dropout", 0.1))).to(device)
+                               hidden=int(tagger_cfg.get("hidden", 256)),
+                               dropout=float(tagger_cfg.get("dropout", 0.1))).to(device)
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(), lr=float(cfg.model.optim.lr),
             weight_decay=float(cfg.model.optim.weight_decay),
             betas=tuple(cfg.model.optim.betas))
-        self.weights = self._class_weights() if bool(ner_cfg.get("class_weighted", False)) else None
+        self.weights = self._class_weights() if bool(tagger_cfg.get("class_weighted", False)) else None
 
     def _class_weights(self) -> torch.Tensor:
         """sklearn's "balanced" weights: total / (num_classes * count[c]).
@@ -184,9 +226,8 @@ class _Probe:
                 seen += batch["ids"].size(0)
             reports = build_reports(*self.evaluate())
             history.append({"epoch": epoch, "train_loss": total / max(1, seen), **reports})
-            log.info("epoch %d/%d train_loss=%.4f entity_f1=%.4f", epoch, epochs,
-                     history[-1]["train_loss"],
-                     reports["binary_entity_level"]["entity"]["f1-score"])
+            log.info("epoch %d/%d train_loss=%.4f macro_f1=%.4f", epoch, epochs,
+                     history[-1]["train_loss"], headline_f1(reports))
         return history
 
 
@@ -222,7 +263,7 @@ def performances(cfg, dataset: str | None = None, seeds=(0,), retrain: bool = Fa
 
         for seed in wanted:
             torch.manual_seed(int(seed))
-            log.info("training NER probe: %s/%s seed=%s", dataset, family, seed)
+            log.info("training tagger: %s/%s seed=%s", dataset, family, seed)
             probe = _Probe(cfg, encoder, tags, train_dl, test_dl, cfg.runtime.device)
             history = probe.fit(int(cfg.train.epochs))
             out = store_dir(dataset, family, seed)

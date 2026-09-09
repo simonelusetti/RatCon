@@ -1,6 +1,6 @@
 """Grounding test across every pooling strategy, aggregated over seeds.
 
-Replaced the older plot_ner_correlation{,_rate}.py, which plotted three
+Replaced the older plot_correlation{,_rate}.py, which plotted three
 hardcoded encoders from a single run each. This one:
 
   * treats a *pooling strategy* as the unit of comparison -- both the
@@ -17,21 +17,21 @@ how well an MLP probe recovers that tag from the same frozen token encoder.
 A positive slope means "the tokens it keeps are the ones it understands".
 
 Usage:
-  python3 utils/plot_ner_grounding.py [--dataset wikiann]
+  python3 utils/plot_grounding.py [--dataset wikiann]
       [--metric selection|division] [--rho 0.3 | --rho-average]
       [--spread sd|sem] [--output PATH]
 
   # Canonical, non-overlapping view: every experiment in each of sentence
   # selectors / token+pooling selectors / sentence oracles / token+pooling
   # oracles, aggregating only its newest three completed runs.
-  python3 utils/plot_ner_grounding.py --grouped-latest --variant both
+  python3 utils/plot_grounding.py --grouped-latest --variant both
 
 
 On the error shadows
 --------------------
 The shadow is an AXIS-ALIGNED ellipse, deliberately: x and y come from two
 *different and unpaired* sets of runs. x is measured on the selector's
-bias-test runs, y on the NER probe's runs -- separate trainings that share
+bias-test runs, y on the tagger's runs -- separate trainings that share
 only a token encoder. Seed 0 of one has no correspondence to seed 0 of the
 other, so pairing them to estimate a covariance would manufacture a
 correlation out of an arbitrary ordering. With no meaningful joint
@@ -45,7 +45,7 @@ move"; `--spread sem` divides by sqrt(n) to answer the narrower "how
 precisely is the mean pinned down" -- with n=3 that band is optimistic, so
 it is not the default.
 
-Note that the three bert/* strategies share ONE NER probe: the probe reads
+Note that the three bert/* strategies share ONE tagger: the probe reads
 word-level token embeddings and never pools, so pooling cannot change it.
 Their y values and y spreads are therefore identical by construction, and
 only x differs -- which is exactly the controlled comparison this figure is
@@ -68,6 +68,7 @@ sys.path.insert(0, str(ROOT))
 
 from forge.core import ExperimentStore  # noqa: E402
 
+import tagger
 from src.data import LABEL_DISPLAY_NAMES  # noqa: E402
 from utils._common import (  # noqa: E402
     ENCODER_COLOR,
@@ -77,7 +78,7 @@ from utils._common import (  # noqa: E402
     entity_tags,
     load_bias,
     mean_spread,
-    ner_f1 as load_ner_f1,
+    tagger_f1 as load_ner_f1,
     probe_reports,
 )  # noqa: E402
 
@@ -142,7 +143,7 @@ def series_label(family: str, pooling: str | None, task: str = "rationale") -> s
 
 
 def discover_series(dataset: str) -> list[dict]:
-    """Pair every selector experiment with the NER probe of its token encoder.
+    """Pair every selector experiment with the tagger of its token encoder.
 
     The probe is keyed by family alone: it never pools, so one probe serves
     every pooling strategy built on the same token encoder.
@@ -155,7 +156,7 @@ def discover_series(dataset: str) -> list[dict]:
         if str(OmegaConf.select(cfg, "data.dataset")) != dataset:
             continue
         if str(OmegaConf.select(cfg, "task")) == "ner":
-            continue  # probes are no longer forge experiments -- see `ner/`
+            continue  # probes are no longer forge experiments -- see `tagger/`
         done_runs = sorted(
             (r for r in (selection.runs or []) if r.status == "done"),
             key=lambda r: r.launched_on,
@@ -190,7 +191,16 @@ def discover_series(dataset: str) -> list[dict]:
     for label in sorted(selectors, key=lambda k: (order.index(selectors[k]["family"])
                                                   if selectors[k]["family"] in order else 99, k)):
         entry = selectors[label]
-        entry["ner_reports"] = probe_reports(dataset, entry["family"])
+        # Skip, do not abort: a dataset can legitimately have selector runs
+        # for encoders whose probe has not been built yet, and one missing
+        # probe must not take the whole figure down with it.
+        reports = tagger.load(dataset, entry["family"])
+        if not reports:
+            print(f"skipping {label}: no cached tagger for token encoder "
+                  f"{entry['family']!r} (run `python3 -m tagger {dataset} "
+                  f"--family {entry['family']}`)", file=sys.stderr)
+            continue
+        entry["tagger_reports"] = reports
         series.append(entry)
     return series
 
@@ -198,7 +208,7 @@ def discover_series(dataset: str) -> list[dict]:
 def grouped_series_with_latest_runs(series: list[dict], count: int = 3) -> dict[str, list[dict]]:
     """Every experiment in each group, capped to its newest *count* runs.
 
-    Bias and NER runs are capped independently because they are unpaired
+    Bias and tagger runs are capped independently because they are unpaired
     experiments. The plot combines their marginal mean/spread, never a
     run-by-run covariance (see the module docstring).
     """
@@ -221,7 +231,7 @@ def grouped_series_with_latest_runs(series: list[dict], count: int = 3) -> dict[
             {
                 **entry,
                 "bias_runs": entry["bias_runs"][-count:],
-                "ner_reports": entry["ner_reports"][-count:],
+                "tagger_reports": entry["tagger_reports"][-count:],
             }
             for entry in candidates
         ]
@@ -236,8 +246,8 @@ def safe_pearson(x, y) -> float:
     """Pearson r, or NaN when either side is constant/too short.
 
     Constant y is expected when several pooling strategies share one token
-    encoder: they necessarily share the same NER probe, so there is no
-    across-strategy NER variance to correlate against.
+    encoder: they necessarily share the same tagger, so there is no
+    across-strategy tagger variance to correlate against.
     """
     x_arr = np.asarray(x, dtype=float)
     y_arr = np.asarray(y, dtype=float)
@@ -268,15 +278,17 @@ def build_points(series, tags, dataset, metric, rho, spread, absolute):
     points, binary_f1 = {}, {}
     for entry in series:
         bias_runs = [load_bias(p, dataset, metric, rho) for p in entry["bias_runs"]]
-        f1_runs = [load_ner_f1(r, tags) for r in entry["ner_reports"]]
+        f1_runs = [load_ner_f1(r, tags) for r in entry["tagger_reports"]]
         points[entry["label"]] = {
             tag: (*mean_spread([abs(b[tag]) if absolute else b[tag] for b in bias_runs], spread),
                   *mean_spread([f[tag] for f in f1_runs], spread))
             for tag in tags
         }
-        binary_f1[entry["label"]] = mean_spread(
-            [load_binary_entity_f1(r) for r in entry["ner_reports"]], spread
-        )
+        # None on corpora with no "O" class -- the aggregate view is skipped
+        # for those rather than drawn as a constant (see _common.binary_entity_f1).
+        agg = [load_binary_entity_f1(r) for r in entry["tagger_reports"]]
+        binary_f1[entry["label"]] = (mean_spread(agg, spread)
+                                     if all(v is not None for v in agg) else None)
     return points, binary_f1
 
 
@@ -289,7 +301,10 @@ def render(series, tags, points, binary_f1, dataset, metric, rho, spread, absolu
         ys = np.array([points[label][t][2] for t in tags])
         within[label] = safe_pearson(xs, ys)
     agg = np.array([np.mean([abs(points[l][t][0]) for t in tags]) for l in labels])
-    across = safe_pearson(agg, np.array([binary_f1[l][0] for l in labels]))
+    have_agg = [l for l in labels if binary_f1.get(l) is not None]
+    across = (safe_pearson(np.array([agg[labels.index(l)] for l in have_agg]),
+                           np.array([binary_f1[l][0] for l in have_agg]))
+              if len(have_agg) >= 3 else float("nan"))
 
     fig, ax = plt.subplots(figsize=(10.5, 7.0))
     style_axis(ax)
@@ -346,7 +361,7 @@ def render(series, tags, points, binary_f1, dataset, metric, rho, spread, absolu
                 else "|preference score| (|z|, distance from chance in null SDs)")
     rho_desc = "averaged over rho" if rho is None else f"at rho={rho:g}"
     ax.set_xlabel(f"{base}, {rho_desc}", fontsize=10)
-    ax.set_ylabel("NER token-level F1", fontsize=10)
+    ax.set_ylabel("tagger token-level F1", fontsize=10)
 
     band = "±1 SD" if spread == "sd" else "±1 SEM"
     question = ("does it treat the tags it understands differently, either way?"
@@ -387,13 +402,13 @@ def main(dataset: str, metric: str, rho: float | None, spread: str,
         series = [e for e in series if e["label"] in strategies]
     if not series:
         raise SystemExit(
-            f"No (selector, NER probe) pairs found for dataset {dataset!r}. "
-            f"Run a selector grid and `python -m ner {dataset}` first."
+            f"No (selector, tagger) pairs found for dataset {dataset!r}. "
+            f"Run a selector grid and `python -m tagger {dataset}` first."
         )
 
     print(f"seeds per strategy (bias runs / probe runs):")
     for entry in series:
-        print(f"  {entry['label']:11s} {len(entry['bias_runs'])} / {len(entry['ner_reports'])}")
+        print(f"  {entry['label']:11s} {len(entry['bias_runs'])} / {len(entry['tagger_reports'])}")
 
     # Short but still readable: metric (sel|div), rho (avg|0.4), sign
     # (sgn|abs). A filtered run adds the encoders it kept, with the pooling
@@ -437,13 +452,13 @@ def main_grouped_latest(dataset: str, metric: str, rho: float | None, spread: st
     for slug, series in groups.items():
         if not series:
             raise SystemExit(
-                f"Group {slug!r} has no completed experiments paired with an NER probe."
+                f"Group {slug!r} has no completed experiments paired with an tagger."
             )
 
         print(f"\n{slug}: {len(series)} experiments, newest {count} run(s) per experiment")
         for entry in series:
             bias_run_ids = [path.name for path in entry["bias_runs"]]
-            probe_run_ids = [f"seed{r['seed']}" for r in entry["ner_reports"]]
+            probe_run_ids = [f"seed{r['seed']}" for r in entry["tagger_reports"]]
             print(
                 f"  {entry['signature']}  {entry['label']}: "
                 f"bias={','.join(bias_run_ids)} probe={','.join(probe_run_ids)}"

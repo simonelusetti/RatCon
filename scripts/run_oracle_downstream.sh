@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bert/mean oracle at rho=0.8 on the corpora other than wikiann, plus the NER
+# bert/mean oracle at rho=0.8 on the corpora other than wikiann, plus the tagger
 # probes those oracles have to be correlated against.
 #
 #   tmux new-session -d -s iolex-downstream \
@@ -9,11 +9,11 @@
 # an oracle run has no per-tag F1 to correlate with, so it would produce bias
 # curves and nothing to compare them to. 3 seeds each, matching the wikiann
 # probes so the F1 side is averaged the same way. The probe is a cache
-# (outputs/ner/<dataset>/<family>/seed<k>), not a forge experiment -- see ner/.
+# (outputs/probe/<dataset>/<family>/seed<k>), not a forge experiment -- see tagger/.
 #
-# movie_rationales gets ner.class_weighted=true: its rationale/not-rationale
+# movie_rationales gets tagger.class_weighted=true: its rationale/not-rationale
 # split is ~5.4:1 and unweighted cross-entropy collapses the probe onto the
-# majority class (see the note on ner.class_weighted in conf/config.yaml),
+# majority class (see the note on tagger.class_weighted in conf/config.yaml),
 # which would make its per-tag F1 -- and any correlation built on it -- junk.
 #
 # model.loss.sweep_range=[0.8,0.8,1] restricts the search to the single
@@ -30,12 +30,12 @@ set -u
 cd "$(dirname "$0")/.."
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-echo "[$(date -Is)] === NER probes ==="
+echo "[$(date -Is)] === taggers ==="
 # One call per corpus; already-cached (dataset, family, seed) entries are
 # skipped, so re-running this script never retrains a probe.
-.venv/bin/python -m ner conll2003 conll2000 \
+.venv/bin/python -m tagger conll2003 conll2000 \
     --family bert --seeds 0,1,2 --device cuda --set runtime.data.batch_size=16
-.venv/bin/python -m ner movie_rationales \
+.venv/bin/python -m tagger movie_rationales \
     --family bert --seeds 0,1,2 --device cuda --class-weighted \
     --set runtime.data.batch_size=16
 echo "[$(date -Is)] PROBES_EXIT=$?"

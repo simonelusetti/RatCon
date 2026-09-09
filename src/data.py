@@ -12,6 +12,9 @@ from .utils import to_absolute_path
 
 from .datasets_builders import (
     build_conll2000,
+    build_ud_deprel,
+    build_ud_discourse,
+    build_ud_upos,
     build_movie_reviews,
     build_conll2003,
     build_wikiann,
@@ -24,6 +27,9 @@ ALIASES = {
     "conll2000": {"conll2000", "conll00"},
     "movie_rationales": {"movie_rationales", "mr"},
     "stsb": {"stsb", "sts-b", "stsb-en"},
+    "ud_upos": {"ud_upos", "upos", "ud-upos"},
+    "ud_deprel": {"ud_deprel", "deprel", "ud-deprel"},
+    "ud_discourse": {"ud_discourse", "discourse", "rst", "gum"},
 }
 
 BUILDERS = {
@@ -32,6 +38,9 @@ BUILDERS = {
     "conll2000": build_conll2000,
     "movie_rationales": build_movie_reviews,
     "stsb": build_stsb,
+    "ud_upos": build_ud_upos,
+    "ud_deprel": build_ud_deprel,
+    "ud_discourse": build_ud_discourse,
 }
 
 PAD_TAG = "-100"
@@ -76,7 +85,7 @@ LABEL_DISPLAY_NAMES: dict[str, dict[str, str]] = {
     # CoNLL-2000 has no ClassLabel encoding upstream (NLTK's iob_sents()
     # yields raw tag strings, not integer ids) -- this fixes a canonical
     # index order for the 23 tags actually observed across train+test
-    # (11 phrase types x {B,I}, plus O), needed by the NER probe's output
+    # (11 phrase types x {B,I}, plus O), needed by the tagger's output
     # layer. The rationale/bias-test pipeline doesn't need this at all: it
     # keys everything by the raw tag string directly.
     "conll2000": {
@@ -95,11 +104,21 @@ LABEL_DISPLAY_NAMES: dict[str, dict[str, str]] = {
     },
 }
 # Also index by canonical_name() output, so lookups keyed on the canonical
-# name (e.g. NER scoring) work regardless of which alias the user passed in
+# name (e.g. tagger scoring) work regardless of which alias the user passed in
 # data.dataset (view.py's plotting lookups key on the raw override string, so
 # both spellings are kept).
 LABEL_DISPLAY_NAMES["conll2003"] = LABEL_DISPLAY_NAMES["conll03"]
 LABEL_DISPLAY_NAMES["movie_rationales"] = LABEL_DISPLAY_NAMES["mr"]
+
+# Universal Dependencies label sets. Like CoNLL-2000 these arrive as raw tag
+# strings rather than ClassLabel ids, so the mapping below only fixes a
+# canonical index order for the tagger's output layer -- the bias pipeline
+# keys on the tag string directly. Both sets are closed and complete: these are
+# every value observed across UD English EWT's train+dev+test.
+LABEL_DISPLAY_NAMES["ud_upos"] = {str(i): t for i, t in enumerate(['ADJ', 'ADP', 'ADV', 'AUX', 'CCONJ', 'DET', 'INTJ', 'NOUN', 'NUM', 'PART', 'PRON', 'PROPN', 'PUNCT', 'SCONJ', 'SYM', 'VERB', 'X'])}
+LABEL_DISPLAY_NAMES["ud_discourse"] = {str(i): t for i, t in enumerate(['ROOT', 'adversative-antithesis', 'adversative-concession', 'adversative-contrast_m', 'attribution-negative', 'attribution-positive', 'causal-cause', 'causal-result', 'context-background', 'context-circumstance', 'contingency-condition', 'elaboration-additional', 'elaboration-attribute', 'evaluation-comment', 'explanation-evidence', 'explanation-justify', 'explanation-motivation', 'joint-disjunction_m', 'joint-list_m', 'joint-other_m', 'joint-sequence_m', 'mode-manner', 'mode-means', 'organization-heading', 'organization-phatic', 'organization-preparation', 'purpose-attribute', 'purpose-goal', 'restatement-partial', 'restatement-repetition_m', 'same-unit_m', 'topic-question', 'topic-solutionhood'])}
+LABEL_DISPLAY_NAMES["ud_deprel"] = {str(i): t for i, t in enumerate(['acl', 'acl:relcl', 'advcl', 'advcl:relcl', 'advmod', 'amod', 'appos', 'aux', 'aux:pass', 'case', 'cc', 'cc:preconj', 'ccomp', 'compound', 'compound:prt', 'conj', 'cop', 'csubj', 'csubj:outer', 'csubj:pass', 'dep', 'det', 'det:predet', 'discourse', 'dislocated', 'expl', 'fixed', 'flat', 'goeswith', 'iobj', 'list', 'mark', 'nmod', 'nmod:desc', 'nmod:poss', 'nmod:unmarked', 'nsubj', 'nsubj:outer', 'nsubj:pass', 'nummod', 'obj', 'obl', 'obl:agent', 'obl:unmarked', 'orphan', 'parataxis', 'punct', 'reparandum', 'root', 'vocative', 'xcomp'])}
+
 
 class TokenizedExample(TypedDict):
     ids: list[int]

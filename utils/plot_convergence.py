@@ -1,12 +1,12 @@
-"""NER MLP probe training-progress curves, one line per (encoder, B/I) pair,
+"""tagger training-progress curves, one line per (encoder, B/I) pair,
 for a single dataset -- token-level F1 macro-averaged separately across all
 B-* tags and all I-* tags per epoch (span-level has no B/I distinction, since
 it collapses B/I into whole entity spans). Independent of the bias-test rho
 -- rho is a retention-rate parameter for the exact preference test on the
-rationale-selection task and plays no role in training the NER probe, which
+rationale-selection task and plays no role in training the tagger, which
 has its own separate per-epoch training loop.
 
-Usage: python3 utils/plot_ner_convergence.py [--dataset conll2003] [--output PATH]
+Usage: python3 utils/plot_convergence.py [--dataset conll2003] [--output PATH]
 """
 import argparse
 import json
@@ -19,7 +19,7 @@ from matplotlib.lines import Line2D
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import ner  # noqa: E402
+import tagger  # noqa: E402
 from utils._common import ENCODER_COLOR, ENCODER_DISPLAY, ENCODER_MARKER  # noqa: E402
 
 BIO_LINESTYLE = {"B": "-", "I": "--"}
@@ -29,14 +29,14 @@ def load_history(dataset: str, family: str) -> tuple[list[int], list[float], lis
     """(epochs, macro-avg F1 over B-* tags, macro-avg F1 over I-* tags).
 
     Averaged over every cached probe seed. The per-epoch history comes from
-    the probe cache (see `ner/`); probes are not forge experiments, so there
+    the probe cache (see `tagger/`); probes are not forge experiments, so there
     is no signature to pass.
     """
-    reports = [r for r in ner.load(dataset, family) if r.get("history")]
+    reports = [r for r in tagger.load(dataset, family) if r.get("history")]
     if not reports:
         raise SystemExit(
-            f"No cached NER probe history for {dataset}/{family}. "
-            f"Build one with: python -m ner {dataset} --family {family}")
+            f"No cached tagger history for {dataset}/{family}. "
+            f"Build one with: python -m tagger {dataset} --family {family}")
 
     def macro(token: dict, prefix: str) -> float:
         scores = [v["f1-score"] for k, v in token.items() if k.startswith(prefix)]
@@ -70,7 +70,7 @@ def main(dataset: str, encoders: list[str], output: Path) -> None:
 
     ax.set_xlabel("epoch")
     ax.set_ylabel("token-level macro F1")
-    ax.set_title(f"{dataset}: NER probe training progress, by encoder and B/I")
+    ax.set_title(f"{dataset}: tagger training progress, by encoder and B/I")
 
     encoder_handles = [
         Line2D([0], [0], color=ENCODER_COLOR[e], marker=ENCODER_MARKER[e], linewidth=1.6, label=ENCODER_DISPLAY[e])

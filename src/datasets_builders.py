@@ -141,3 +141,119 @@ def build_movie_reviews() -> DatasetDict:
         "train": mapped["train"],
         "test": concatenate_datasets([mapped["validation"], mapped["test"]]),
     })
+
+
+# Universal Dependencies English EWT. Two label sets over the SAME sentences:
+# upos (17 universal POS tags) and deprel (the syntactic relation each word
+# bears to its head). Holding the corpus fixed and varying only the labelling
+# is what isolates the abstraction axis -- measured on the training split,
+# H(label | word) / H(label) is 0.08 for upos and 0.26 for deprel, so upos is
+# almost entirely determined by the word itself while deprel needs context.
+#
+# Both are far better balanced than this repo's NER corpora: H/log2(tags) is
+# 0.89 and 0.84, against wikiann's 0.79 over only 7 tags, and neither has an
+# "O" class swallowing half the tokens. That matters because the grounding
+# correlation runs over tags, so usable tag count sets its statistical power
+# (14 and 29 usable tags here vs wikiann's 6).
+#
+# The Hub repo ships native parquet, so this needs no script execution and is
+# unaffected by the datasets>=4 change that broke the conll2003 loader.
+UD_EWT_REPO = "universal-dependencies/universal_dependencies"
+
+
+def _load_ud_ewt() -> DatasetDict:
+    from huggingface_hub import hf_hub_download
+
+    files = {
+        split: hf_hub_download(UD_EWT_REPO, f"parquet/en_ewt/{split}.parquet", repo_type="dataset")
+        for split in ("train", "dev", "test")
+    }
+    return load_dataset("parquet", data_files=files)
+
+
+def _ud_with_labels(column: str) -> DatasetDict:
+    """One UD annotation layer, verbatim: {tokens, labels} and nothing else.
+
+    Deliberately no relabelling. An earlier version collapsed deprel subtypes
+    (nsubj:pass -> nsubj) to shrink the label set, which turned out to be
+    strictly worse: measured on the training split it drops usable tags (>=0.5%
+    of tokens) from 29 to 24 and raises the |r| needed for p<0.05 from 0.367 to
+    0.404, while leaving H(label|word)/H(label) unchanged at 0.26. It cost
+    statistical power and bought nothing, so the raw UD labels are used.
+    """
+    ds = _load_ud_ewt()
+
+    def to_labels(example: dict) -> dict:
+        return {"tokens": example["tokens"], "labels": example[column]}
+
+    mapped = ds.map(to_labels, remove_columns=ds["train"].column_names,
+                    desc=f"Extracting UD {column}")
+    return DatasetDict({
+        "train": mapped["train"],
+        "test": concatenate_datasets([mapped["dev"], mapped["test"]]),
+    })
+
+
+def build_ud_upos() -> DatasetDict:
+    return _ud_with_labels("upos")
+
+
+def build_ud_deprel() -> DatasetDict:
+    return _ud_with_labels("deprel")
+
+
+# UD English GUM, RST discourse relations. GUM is multilayer: the same tokens
+# carry syntax, entities/coreference and Rhetorical Structure Theory, and UD's
+# parquet packs the non-syntactic layers into the `misc` column. This reads the
+# RST layer out of it.
+#
+# Under RST a text is cut into elementary discourse units (EDUs, roughly
+# clauses) and each is labelled with the rhetorical job it does relative to
+# what it attaches to -- conceding, justifying, giving evidence, evaluating.
+# That is a property of the span's role in the argument, not of its words, so
+# it sits at the far end of the abstraction axis: H(label|word)/H(label) is
+# 0.86, against 0.26 for deprel and 0.08 for upos.
+#
+# It also happens to be the best balanced corpus here (H/log2(tags) = 0.90,
+# largest class 11.3%) because every token belongs to some EDU -- there is no
+# "O" class swallowing the distribution the way there is in NER.
+def _gum_discourse_labels(example: dict) -> list[str]:
+    """Forward-fill each EDU's relation across the tokens it covers.
+
+    `Discourse=` is written once, on the EDU's first token, as
+    `Discourse=<relation>:<edu>-><parent>:...`; the tokens after it belong to
+    the same EDU until the next marker. Verified across all three splits:
+    every sentence carries a marker on its first token, so no token is left
+    without a relation and nothing has to be carried across sentences.
+
+    The value is taken verbatim -- `_m` marks a multinuclear relation (joint,
+    contrast: coordinate units rather than nucleus/satellite) and `ROOT` is the
+    top of a document's tree. Both are real distinctions, and an earlier
+    version of this parser silently dropped them with a too-narrow regex.
+    """
+    labels: list[str] = []
+    current: str | None = None
+    for misc in example["misc"]:
+        if misc and "Discourse=" in misc:
+            current = misc.split("Discourse=")[1].split("|")[0].split(":")[0]
+        labels.append(current)
+    return labels
+
+
+def build_ud_discourse() -> DatasetDict:
+    from huggingface_hub import hf_hub_download
+
+    files = {
+        split: hf_hub_download(UD_EWT_REPO, f"parquet/en_gum/{split}.parquet", repo_type="dataset")
+        for split in ("train", "dev", "test")
+    }
+    ds = load_dataset("parquet", data_files=files)
+    mapped = ds.map(
+        lambda ex: {"tokens": ex["tokens"], "labels": _gum_discourse_labels(ex)},
+        remove_columns=ds["train"].column_names,
+        desc="Extracting GUM RST relations",
+    )
+    return DatasetDict({
+        "train": mapped["train"],
+        "test": concatenate_datasets([mapped["dev"], mapped["test"]]),
+    })

@@ -4,6 +4,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.sentence import SentenceEncoder
+from src.words import (
+    gather_word_mean, scatter_word_to_tokens, word_valid,
+)
 
 
 # ------------------------------------------------------------
@@ -113,7 +116,11 @@ class RationaleSelectorModel(nn.Module):
         attn: torch.Tensor,
         rhos: Sequence[float],
     ) -> torch.Tensor:
-        """Per-token soft ranks r_t (Section 3), shape [R, B, L]."""
+        """Soft ranks over the selection units, shape [R, B, U].
+
+        Called with WORD embeddings and a word validity mask -- the unit of
+        selection is the word, not the subword (see src/words.py).
+        """
         param_dtype = next(self.parameters()).dtype
         if embeddings.dtype != param_dtype:
             embeddings = embeddings.to(param_dtype)
@@ -148,7 +155,15 @@ class RationaleSelectorModel(nn.Module):
         embeddings: torch.Tensor,
         attn: torch.Tensor,
         rhos: Sequence[float],
+        word_ids: torch.Tensor | None = None,
     ):
+        """Select whole WORDS, then broadcast the decision to their subwords.
+
+        word_ids=None falls back to one word per token, which reproduces the
+        old subword-level behaviour exactly -- kept only so single-sentence
+        analysis helpers that have no word map still run. Training and
+        evaluation always pass it.
+        """
         param_dtype = next(self.parameters()).dtype
         if embeddings.dtype != param_dtype:
             embeddings = embeddings.to(param_dtype)
@@ -159,15 +174,25 @@ class RationaleSelectorModel(nn.Module):
         with torch.no_grad():
             full_rep = self.sent_encoder.pool_full(embeddings, attn_f)
 
-        selection_f = attn_f
-        L_eff = selection_f.sum(dim=1).float()
-
         B, L = ids.shape
         R = len(rhos)
 
+        if word_ids is None:
+            # identity map: every attended position is its own "word"
+            word_ids = torch.where(attn.bool(),
+                                   torch.arange(L, device=device).expand(B, L),
+                                   torch.full((B, L), -1, device=device))
+        word_emb = gather_word_mean(embeddings, word_ids)
+        selection_f = word_valid(word_ids)
+        U = selection_f.shape[1]
+        # rho is now a fraction of WORDS: "keep 30% of the words" rather than
+        # 30% of the subword pieces, which is both interpretable and identical
+        # across tokenizers.
+        L_eff = selection_f.sum(dim=1).float()
+
         rhos_t = torch.tensor(list(rhos), device=device, dtype=torch.float32)
 
-        ranks = self._rank(embeddings, attn, rhos)
+        ranks = self._rank(word_emb, selection_f, rhos)
 
         k = (rhos_t[:, None] * L_eff[None]).round().long()
         k = torch.where(L_eff[None] > 0, k.clamp(min=1), torch.zeros_like(k))
@@ -176,15 +201,20 @@ class RationaleSelectorModel(nn.Module):
             (k.float()[:, :, None] - ranks) / self.tau_gate
         ) * selection_f[None]
 
-        z = gate_raw / gate_raw.sum(dim=-1, keepdim=True).clamp(min=1e-8)
-        z = z * k.float()[:, :, None]
+        z_word = gate_raw / gate_raw.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+        z_word = z_word * k.float()[:, :, None]
 
-        invalid_ranks = ranks.masked_fill(attn_f[None] == 0, float("inf"))
+        invalid_ranks = ranks.masked_fill(selection_f[None] == 0, float("inf"))
         _, sorted_idx = torch.sort(invalid_ranks, dim=2)
-        pos = torch.arange(L, device=device)
+        pos = torch.arange(U, device=device)
         valid_sel = pos[None, None, :] < k[:, :, None]
-        g = torch.zeros(R, B, L, device=device)
-        g.scatter_(2, sorted_idx, valid_sel.float())
+        g_word = torch.zeros(R, B, U, device=device)
+        g_word.scatter_(2, sorted_idx, valid_sel.float())
+
+        # Broadcast the word decision onto its subwords, so the mask entering
+        # attention is subword-shaped but constant within a word.
+        z = torch.stack([scatter_word_to_tokens(z_word[r], word_ids) for r in range(R)])
+        g = torch.stack([scatter_word_to_tokens(g_word[r], word_ids) for r in range(R)])
 
         # Training always uses the soft mask z (Eq. 3); the hard top-k mask g
         # is exposed for eval/inference callers (Section 4/5/6), not training.

@@ -19,6 +19,7 @@ from .metrics import Counts, SelectionLog, build_token_frequency_table
 from .sentence import SentenceEncoder
 from .selector import RationaleSelectorModel
 from .oracle import OracleSelector, build_progress, save_masks
+from .words import first_subword_mask
 from .data import SPECIAL_TAG, initialize_data
 from .eval import save_eval_artifacts
 from .retrival_fun import run_stsb_sweep
@@ -37,6 +38,10 @@ from .utils import (
     remap_checkpoint_state_dict,
 )
 from .view import save_train_eval_loss_plot, save_eval_plots
+
+
+# Selection operates on whole words; see src/words.py for why.
+SELECTION_UNIT = "word"
 
 
 class SelectorTrainer:
@@ -156,6 +161,11 @@ class SelectorTrainer:
                 "meta": {
                     "sig": self.run.signature,
                     "epoch": epoch,
+                    # Guards against silently resuming a subword-era
+                    # checkpoint: the selector MLP is D->scalar either way, so
+                    # such a checkpoint would load cleanly and quietly produce
+                    # a ranking trained for a different unit and budget.
+                    "selection_unit": SELECTION_UNIT,
                 },
             },
             checkpoint_path,
@@ -171,6 +181,15 @@ class SelectorTrainer:
             _, checkpoint_path = latest
 
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        unit = checkpoint.get("meta", {}).get("selection_unit")
+        if unit != SELECTION_UNIT:
+            raise ValueError(
+                f"{checkpoint_path} was trained with selection_unit="
+                f"{unit or 'token (pre-word-level)'!r}, but this build selects "
+                f"{SELECTION_UNIT!r}. The weights would load without error and "
+                f"silently produce a ranking learnt for a different unit and "
+                f"budget. Purge the run and retrain."
+            )
         state_dict = remap_checkpoint_state_dict(checkpoint["model"], self.model.state_dict())
         self.model.load_state_dict(state_dict)
         self.optimizer.load_state_dict(checkpoint["optimizer"])
@@ -222,7 +241,8 @@ class SelectorTrainer:
         with torch.no_grad():
             tkns_embd = self.sent_encoder.token_embeddings(ids, attn)
 
-        z, g, loss = self.model(ids, tkns_embd, attn, rhos=rhos)
+        z, g, loss = self.model(ids, tkns_embd, attn, rhos=rhos,
+                                 word_ids=batch.get("word_ids"))
 
         return (
             attn,
@@ -303,6 +323,16 @@ class SelectorTrainer:
                         SPECIAL_TAG if (is_att and wid < 0 and lbl == "-100") else lbl
                         for lbl, is_att, wid in zip(flat_labels, flat_attn.tolist(), flat_word_ids)
                     ]
+                    # One vote per WORD, taken at its first subword. Selection
+                    # is word-constant now, so the first piece represents the
+                    # whole word -- and counting every piece would weight each
+                    # tag by how many subwords its words happen to split into
+                    # (on wikiann, 1.85 for B-LOC against 1.22 for I-ORG),
+                    # which is the fragmentation artifact word-level selection
+                    # exists to remove. Positions belonging to no word (special
+                    # tokens, when kept) still count once each.
+                    counts_once = (first_subword_mask(word_ids) | (word_ids < 0)).view(-1).cpu()
+                    flat_attn = flat_attn & counts_once
 
                 for i, pred_mask_i in enumerate(pred_mask):
                     flat_preds = pred_mask_i.cpu().view(-1)
@@ -543,7 +573,7 @@ class SelectorTrainer:
 
 def main(cfg: DictConfig) -> int:
     if cfg.task not in ("rationale", "oracle"):
-        raise ValueError("train expects task=rationale or task=oracle; the NER probe is not a forge entry point (see ner/).")
+        raise ValueError("train expects task=rationale or task=oracle; the tagger is not a forge entry point (see ner/).")
     start_capture = start_run_metrics_capture()
 
     # start_run() registers the run and chdirs into its output directory, so

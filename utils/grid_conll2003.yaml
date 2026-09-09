@@ -5,9 +5,9 @@ globals:
   - "runtime.grid=true"
   - "data.dataset=conll2003"
   - "runtime.data.batch_size=16"
-  # Capped (default is 24) to leave headroom for the NER MLP grid running
+  # Capped (default is 24) to leave headroom for the tagger grid running
   # concurrently on the same machine -- at 24 threads the main grid was
-  # saturating ~23/32 cores and starving the NER runs to a crawl.
+  # saturating ~23/32 cores and starving the tagger runs to a crawl.
   - "runtime.threads=16"
   # Numerically equivalent (operator fusion, not an approximation).
   - "runtime.compile=true"

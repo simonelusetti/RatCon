@@ -58,6 +58,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from .sentence import SentenceEncoder
+from .words import word_slots
 
 
 class MaskTables:
@@ -151,22 +152,30 @@ class OracleSelector(nn.Module):
             torch.backends.cudnn.allow_tf32 = cudnn_tf32
 
     @torch.no_grad()
-    def _best_for_group(self, ids_stack, masks, targets_stack):
-        """Best mask for every sentence in a group sharing the same (n, k).
+    def _best_for_group(self, ids_stack, attn_stack, expand, masks, targets_stack):
+        """Best mask for every sentence in a group sharing the same (n_words, k).
 
-        The batching that makes this viable: sentences of equal length with
-        equal budget share one candidate table, so S sentences x C candidates
-        become a single S*C row problem instead of S separate C-row forwards.
-        At wikiann's median length a lone sentence is an 84-row batch -- far
-        too small to occupy a GPU -- while the grouped form fills it.
+        The batching that makes this viable: sentences with equal word count
+        and equal budget share one candidate table, so S sentences x C
+        candidates become a single S*C row problem instead of S separate
+        C-row forwards. At wikiann's median length a lone sentence is a
+        20-row batch -- far too small to occupy a GPU -- while the grouped
+        form fills it.
+
+        Candidates are over WORDS, but the encoder needs subwords, so `expand`
+        ([S, n_words, L]) broadcasts each word decision onto that word's
+        token positions. Sentences sharing a word count can still tokenize
+        differently, which is exactly why the expansion is per sentence.
         """
-        S, n = ids_stack.shape
+        S, L = ids_stack.shape
         C = masks.shape[0]
         ids_rep = ids_stack.repeat_interleave(C, dim=0)
-        masks_rep = masks.repeat(S, 1)
+        # [S, C, L] -> [S*C, L]: word mask broadcast to this sentence's subwords
+        masks_rep = torch.einsum("cw,swl->scl", masks, expand).reshape(S * C, L)
+        valid_rep = attn_stack.repeat_interleave(C, dim=0)
         targets_rep = targets_stack.repeat_interleave(C, dim=0)
 
-        rows_per_chunk = max(1, self.chunk_tokens // max(n, 1))
+        rows_per_chunk = max(1, self.chunk_tokens // max(L, 1))
         use_amp = self.autocast_dtype is not None and str(self.device).startswith("cuda")
         scores = []
         for start in range(0, S * C, rows_per_chunk):
@@ -180,7 +189,8 @@ class OracleSelector(nn.Module):
             # half precision.
             with torch.autocast("cuda", dtype=self.autocast_dtype, enabled=use_amp):
                 pooled = self.sent_encoder.pool(
-                    self.sent_encoder.token_embeddings(ids_rep[sl], block), block
+                    self.sent_encoder.token_embeddings(ids_rep[sl], block), block,
+                    valid_mask=valid_rep[sl],
                 )
             scores.append(F.cosine_similarity(pooled.float(), targets_rep[sl].float(), dim=-1))
             if self.progress is not None:
@@ -188,7 +198,8 @@ class OracleSelector(nn.Module):
         return torch.cat(scores).view(S, C)
 
     @torch.no_grad()
-    def forward(self, ids: torch.Tensor, embeddings: torch.Tensor, attn: torch.Tensor, rhos):
+    def forward(self, ids: torch.Tensor, embeddings: torch.Tensor, attn: torch.Tensor, rhos,
+                word_ids: torch.Tensor | None = None):
         B, L = ids.shape
         R = len(rhos)
         device = ids.device
@@ -203,10 +214,19 @@ class OracleSelector(nn.Module):
 
         # Bucket every (sentence, rho) pair by the shape of its search, so
         # that one forward serves all of them.
+        if word_ids is None:  # identity map -- see RationaleSelectorModel.forward
+            word_ids = torch.where(attn.bool(),
+                                   torch.arange(L, device=device).expand(B, L),
+                                   torch.full((B, L), -1, device=device))
+        slot, is_word, n_words, _ = word_slots(word_ids)
+
+        # The search is over WORDS, so the budget is a fraction of words and
+        # candidate counts collapse: at wikiann's median, C(13,6)=1716 over
+        # subwords becomes C(8,4)=70 over words.
         groups: dict[tuple[int, int], list[tuple[int, int, torch.Tensor]]] = defaultdict(list)
         for b in range(B):
             valid = attn_f[b] > 0
-            n = int(valid.sum())
+            n = int(n_words[b])
             if n == 0:
                 continue
             positions = valid.nonzero(as_tuple=True)[0]
@@ -223,13 +243,23 @@ class OracleSelector(nn.Module):
             self.n_exhaustive += len(items) if exhaustive else 0
             self.n_capped += 0 if exhaustive else len(items)
 
-            ids_stack = torch.stack([ids[b, pos] for _, b, pos in items])
+            width = max(int(p.numel()) for _, b, p in items)
+            S = len(items)
+            ids_stack = torch.zeros(S, width, dtype=ids.dtype, device=device)
+            attn_stack = torch.zeros(S, width, device=device)
+            expand = torch.zeros(S, n, width, device=device)
+            for i, (_, b, pos) in enumerate(items):
+                m = pos.numel()
+                ids_stack[i, :m] = ids[b, pos]
+                attn_stack[i, :m] = 1.0
+                expand[i, slot[b, pos], torch.arange(m, device=device)] = 1.0
             targets_stack = torch.stack([targets[b] for _, b, _ in items])
-            scores = self._best_for_group(ids_stack, masks, targets_stack)
+            scores = self._best_for_group(ids_stack, attn_stack, expand, masks, targets_stack)
 
             best = scores.argmax(dim=1)
             for i, (r, b, positions) in enumerate(items):
-                g[r, b, positions] = masks[best[i]]
+                # winning word mask, broadcast back onto this sentence's subwords
+                g[r, b, positions] = masks[best[i]][slot[b, positions]]
                 losses.append(1.0 - scores[i, best[i]])
 
         loss = torch.stack(losses).mean() if losses else torch.zeros((), device=device)
@@ -239,8 +269,9 @@ class OracleSelector(nn.Module):
 def total_candidate_rows(dataset, rhos, max_combinations: int, samples: int) -> int:
     """Rows the search will score, for a progress bar with a real ETA."""
     total = 0
-    for attn in dataset["attn_mask"]:
-        n = int(sum(attn))
+    # Word count, not token count: the search enumerates over words.
+    for attn, wids in zip(dataset["attn_mask"], dataset["word_ids"]):
+        n = len({w for w, a in zip(wids, attn) if a and w is not None and w >= 0})
         if n == 0:
             continue
         for rho in rhos:

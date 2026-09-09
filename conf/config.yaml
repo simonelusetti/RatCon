@@ -1,7 +1,7 @@
 defaults:
   - _self_
 
-task: "rationale"  # rationale (trained selector) or oracle (mask search). The NER probe is not a task -- see ner/.
+task: "rationale"  # rationale (trained selector) or oracle (mask search). The tagger is not a task -- see tagger/.
 
 model:
   keep_special: false
@@ -16,7 +16,12 @@ model:
     weight_decay: 1e-2
     betas: [0.9, 0.999]
 
-ner:
+# Hyperparameters of the token-classification tagger (tagger/), the
+# downstream evaluation object. Excluded from the experiment signature below:
+# the tagger is not part of a selector or oracle run at all -- nothing outside
+# tagger/ reads these keys -- so without the exclusion, changing the tagger's
+# hidden size would fork every selector experiment that never used it.
+tagger:
   hidden: 256
   dropout: 0.1
   # Off by default to match the reported wikiann/conll2003 probes, which
@@ -126,6 +131,10 @@ forge:
     - "forge.*"
     # Covers runtime.seed too -- see the note on it above.
     - "runtime.*"
+    # The tagger is a separate evaluation object with its own cache
+    # (outputs/probe/); its hyperparameters do not change what a selector or
+    # oracle run computes.
+    - "tagger.*"
     - "train.no_train"
     - "train.continue"
     - "train.checkpoint_path"

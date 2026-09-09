@@ -1,4 +1,4 @@
-"""Paper figure: preference-vs-F1 scatter (left) next to NER training-progress
+"""Paper figure: preference-vs-F1 scatter (left) next to tagger training-progress
 curves split by B/I (right), for conll2003. Per the supervisor's simplification
 request: no titles, no correlation numbers in the plot, just axis labels and
 legends. Per-point tag labels are kept on the scatter panel.
@@ -23,11 +23,11 @@ from utils._common import (  # noqa: E402
     ENCODER_MARKER,
     entity_tags,
     load_bias,
-    ner_f1,
+    tagger_f1,
     probe_reports,
 )
 from utils.forge_paths import run_dir  # noqa: E402
-from utils.plot_ner_convergence import BIO_LINESTYLE, load_history  # noqa: E402
+from utils.plot_convergence import BIO_LINESTYLE, load_history  # noqa: E402
 
 DATASET = "conll2003"
 ENCODERS = ("sbert", "e5", "llm")
@@ -45,7 +45,7 @@ def draw_scatter(ax, dataset: str, bias_sigs: dict[str, str], rho: float) -> Non
         # Averaged over the probe cache's seeds; this panel shows one point
         # per tag, so the spread is not drawn (see plot_ner_grounding.py for
         # the version that does).
-        per_seed = [ner_f1(r, tags) for r in probe_reports(dataset, encoder)]
+        per_seed = [tagger_f1(r, tags) for r in probe_reports(dataset, encoder)]
         f1_by_tag = {t: float(np.mean([f[t] for f in per_seed])) for t in tags}
         xs = [rate_by_tag[t] for t in tags]
         ys = [f1_by_tag[t] for t in tags]
@@ -67,7 +67,7 @@ def draw_scatter(ax, dataset: str, bias_sigs: dict[str, str], rho: float) -> Non
             )
 
     ax.set_xlabel("Over/under-selection rate")
-    ax.set_ylabel("NER token-level F1")
+    ax.set_ylabel("tagger token-level F1")
     ax.legend(title="encoder", frameon=False, loc="lower right")
     ylo, yhi = ax.get_ylim()
     ax.set_ylim(ylo, yhi + 0.12 * (yhi - ylo))
@@ -120,7 +120,7 @@ def main(bias_sigs: dict[str, str], rho: float, output: Path) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    # Only the bias side needs a signature. The NER probe is a cache keyed by
+    # Only the bias side needs a signature. The tagger is a cache keyed by
     # (dataset, encoder family), so naming the encoder already names it.
     for enc in ENCODERS:
         parser.add_argument(f"--{enc}-bias-sig", required=True,

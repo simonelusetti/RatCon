@@ -5,7 +5,7 @@ Essential Tokens"** — a study of whether sentence encoders (SBERT, E5,
 Pythia) have structural token-selection biases. A differentiable top-ρ
 token selector is trained on top of a frozen sentence encoder; its
 selections are then checked for label-dependent bias, tested for
-downstream-task sufficiency, and correlated against an independent NER
+downstream-task sufficiency, and correlated against an independent tagger
 probe.
 
 ## Setup
@@ -83,7 +83,7 @@ Both entry points share `conf/config.yaml`:
 | Rationale selector (the bias test) | `train.py` | `forge run <overrides>` |
 | Oracle mask search | `train.py` | `forge run task=oracle <overrides>` |
 
-The NER probe is deliberately *not* here — see "The NER probe" below.
+The tagger is deliberately *not* here — see "The tagger" below.
 
 Oracle runs share setup, evaluation and artifact generation with the selector,
 but skip training, compilation and checkpoint loading. They also save
@@ -109,7 +109,7 @@ its selection weight before taking the coordinate-wise minimum or maximum.
 Weights are not clipped: zero-weight tokens contribute zero vectors, while
 batch padding is excluded. Training differentiates this operation directly.
 
-## The NER probe
+## The tagger
 
 The probe is the study's *evaluation object*, not one of its experiments, so
 it does not live in the forge store at all. It answers one fixed question
@@ -122,7 +122,7 @@ serves every selector built on the same token encoder.
 It is a cache, keyed by exactly what identifies that question:
 
 ```
-outputs/ner/<dataset>/<family>/seed<k>/
+outputs/probe/<dataset>/<family>/seed<k>/
   model.pth      # one model per key -- no per-epoch checkpoints
   report.json    # span_level, token_level, binary_entity_level, + per-epoch history
 ```
@@ -131,8 +131,8 @@ Seed is in the key only so the grounding figures can show a spread across
 independently trained probes; drop to one seed if you do not need the band.
 
 ```bash
-python3 -m ner wikiann --family bert --seeds 0,1,2 --device cuda
-python3 -m ner movie_rationales --family bert --seeds 0,1,2 --class-weighted
+python3 -m tagger wikiann --family bert --seeds 0,1,2 --device cuda
+python3 -m tagger movie_rationales --family bert --seeds 0,1,2 --class-weighted
 ```
 
 Entries that already exist are loaded, not retrained, so re-running is free
@@ -140,7 +140,7 @@ and safe; pass `--retrain` to force. From Python it is one call, which trains
 whatever is missing and returns one report per seed:
 
 ```python
-from ner import performances, load
+from tagger import performances, load
 reports = performances(cfg, dataset="conll2003", seeds=(0, 1, 2))
 reports = load("wikiann", "bert")     # read-only, what the plot scripts use
 ```
@@ -178,12 +178,12 @@ python3 utils/plot_bias_heatmaps.py --dataset wikiann --ncols 1 \
     --strategies sbert,e5,llm
 ```
 
-**Figure 5 — grounding test (bias rate vs. NER F1, + B/I convergence)**
+**Figure 5 — grounding test (bias rate vs. tagger F1, + B/I convergence)**
 ```bash
 forge grid --file utils/grid_conll2003.yaml
-python3 -m ner conll2003 --family sbert --seeds 0,1,2
-python3 -m ner conll2003 --family e5    --seeds 0,1,2
-python3 -m ner conll2003 --family llm   --seeds 0,1,2
+python3 -m tagger conll2003 --family sbert --seeds 0,1,2
+python3 -m tagger conll2003 --family e5    --seeds 0,1,2
+python3 -m tagger conll2003 --family llm   --seeds 0,1,2
 
 python3 utils/plot_paper_figure_conll2003.py \
     --sbert-bias-sig <sig> --e5-bias-sig <sig> --llm-bias-sig <sig> \
@@ -239,7 +239,7 @@ forge grid --file utils/grid_conll2003.yaml         # 3 encoders
 CLI arguments layer on top of the file, which composes usefully —
 `--sweep runtime.seed=0,1,2` adds a seed axis to any grid, and
 `--sweep data.encoder.family=sbert` narrows one. There is no probe grid:
-`python3 -m ner <datasets...>` takes the place of one.
+`python3 -m tagger <datasets...>` takes the place of one.
 
 Two things to know about `forge grid`:
 
@@ -270,9 +270,9 @@ this repo has grown since, and take no signatures at all — they discover
 what exists in the forge store and in the probe cache:
 
 ```bash
-python3 utils/plot_ner_grounding.py --grouped-latest --variant both  # grounding, every strategy
+python3 utils/plot_grounding.py --grouped-latest --variant both  # grounding, every strategy
 python3 utils/plot_bias_heatmaps.py --dataset wikiann                # bias heatmap, every strategy
-python3 utils/plot_ner_convergence.py --dataset wikiann              # probe B/I convergence
+python3 utils/plot_convergence.py --dataset wikiann              # probe B/I convergence
 python3 utils/mask_optimality.py <selector-sig> --rho 0.5            # how good is the selector's mask?
 ```
 
